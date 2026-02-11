@@ -1,4 +1,7 @@
+use lxmf_core::message;
 use rns_core::msgpack::{pack, unpack_exact, Value};
+use rns_crypto::identity::Identity;
+use rns_crypto::sha256::sha256;
 use serde::Deserialize;
 use serde_json;
 use std::fs;
@@ -575,4 +578,464 @@ fn test_enum_from_u8_roundtrip() {
         assert_eq!(err as u8, v);
     }
     assert!(PeerError::from_u8(0xF2).is_none());
+}
+
+// ============================================================
+// Phase 2: LXMessage wire format tests
+// ============================================================
+
+#[derive(Deserialize)]
+struct MessageVector {
+    name: String,
+    #[serde(default)]
+    src_prv: Option<String>,
+    #[serde(default)]
+    src_pub: Option<String>,
+    #[serde(default)]
+    dst_prv: Option<String>,
+    #[serde(default)]
+    dst_pub: Option<String>,
+    #[serde(default)]
+    src_hash: Option<String>,
+    #[serde(default)]
+    dst_hash: Option<String>,
+    #[serde(default)]
+    timestamp: Option<f64>,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    content: Option<String>,
+    #[serde(default)]
+    packed_payload: Option<String>,
+    #[serde(default)]
+    message_hash: Option<String>,
+    #[serde(default)]
+    signature: Option<String>,
+    #[serde(default)]
+    packed: Option<String>,
+    #[serde(default)]
+    stamp: Option<String>,
+    #[serde(default)]
+    fields: Option<Vec<Vec<u64>>>,
+    #[serde(default)]
+    lxmf_data: Option<String>,
+    #[serde(default)]
+    transient_id: Option<String>,
+    #[serde(default)]
+    propagation_packed: Option<String>,
+    #[serde(default)]
+    paper_packed: Option<String>,
+    #[serde(default)]
+    paper_uri: Option<String>,
+    #[serde(default)]
+    lxmf_bytes: Option<String>,
+    #[serde(default)]
+    packed_container: Option<String>,
+    #[serde(default)]
+    state: Option<u64>,
+    #[serde(default)]
+    method: Option<u64>,
+    #[serde(default)]
+    transport_encrypted: Option<bool>,
+    #[serde(default)]
+    transport_encryption: Option<String>,
+}
+
+fn load_message_vectors() -> Vec<MessageVector> {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../tests/fixtures/message_vectors.json"
+    );
+    let data = fs::read_to_string(path).expect("Failed to read message vectors");
+    serde_json::from_str(&data).expect("Failed to parse message vectors")
+}
+
+fn find_msg_vector<'a>(vectors: &'a [MessageVector], name: &str) -> &'a MessageVector {
+    vectors
+        .iter()
+        .find(|v| v.name == name)
+        .unwrap_or_else(|| panic!("Message vector '{}' not found", name))
+}
+
+#[test]
+fn test_message_hash_computation() {
+    let vectors = load_message_vectors();
+    let v = find_msg_vector(&vectors, "basic_message");
+
+    let dst_hash_bytes = b64(v.dst_hash.as_ref().unwrap());
+    let src_hash_bytes = b64(v.src_hash.as_ref().unwrap());
+    let packed_payload = b64(v.packed_payload.as_ref().unwrap());
+    let expected_hash = b64(v.message_hash.as_ref().unwrap());
+
+    let mut dst_hash = [0u8; 16];
+    dst_hash.copy_from_slice(&dst_hash_bytes);
+    let mut src_hash = [0u8; 16];
+    src_hash.copy_from_slice(&src_hash_bytes);
+
+    let hash = message::compute_hash(&dst_hash, &src_hash, &packed_payload);
+    assert_eq!(
+        &hash[..],
+        &expected_hash[..],
+        "Message hash mismatch"
+    );
+}
+
+#[test]
+fn test_message_pack_deterministic() {
+    let vectors = load_message_vectors();
+    let v = find_msg_vector(&vectors, "deterministic_keys");
+
+    let src_prv_bytes = b64(v.src_prv.as_ref().unwrap());
+    let dst_hash_bytes = b64(v.dst_hash.as_ref().unwrap());
+    let src_hash_bytes = b64(v.src_hash.as_ref().unwrap());
+    let expected_packed = b64(v.packed.as_ref().unwrap());
+    let expected_hash = b64(v.message_hash.as_ref().unwrap());
+    let expected_sig = b64(v.signature.as_ref().unwrap());
+
+    let mut src_prv = [0u8; 64];
+    src_prv.copy_from_slice(&src_prv_bytes);
+    let identity = Identity::from_private_key(&src_prv);
+
+    let mut dst_hash = [0u8; 16];
+    dst_hash.copy_from_slice(&dst_hash_bytes);
+    let mut src_hash = [0u8; 16];
+    src_hash.copy_from_slice(&src_hash_bytes);
+
+    let title = b64(v.title.as_ref().unwrap());
+    let content = b64(v.content.as_ref().unwrap());
+
+    let result = message::pack(
+        &dst_hash,
+        &src_hash,
+        v.timestamp.unwrap(),
+        &title,
+        &content,
+        vec![],
+        None,
+        |data| identity.sign(data).map_err(|_| message::Error::SignError),
+    )
+    .expect("pack failed");
+
+    assert_eq!(
+        &result.message_hash[..],
+        &expected_hash[..],
+        "Deterministic message hash mismatch"
+    );
+    assert_eq!(
+        &result.packed[32..96],
+        &expected_sig[..],
+        "Deterministic signature mismatch"
+    );
+    assert_eq!(result.packed, expected_packed, "Deterministic packed mismatch");
+}
+
+#[test]
+fn test_message_unpack_basic() {
+    let vectors = load_message_vectors();
+    let v = find_msg_vector(&vectors, "basic_message");
+
+    let packed = b64(v.packed.as_ref().unwrap());
+    let expected_hash = b64(v.message_hash.as_ref().unwrap());
+    let src_pub_bytes = b64(v.src_pub.as_ref().unwrap());
+
+    let mut src_pub = [0u8; 64];
+    src_pub.copy_from_slice(&src_pub_bytes);
+    let src_identity = Identity::from_public_key(&src_pub);
+
+    let result = message::unpack(
+        &packed,
+        Some(&|_src_hash, sig, data| src_identity.verify(sig, data)),
+    )
+    .expect("unpack failed");
+
+    assert_eq!(&result.message_hash[..], &expected_hash[..]);
+    assert_eq!(result.timestamp, 1700000000.0);
+    assert_eq!(result.title, b"Hello");
+    assert_eq!(result.content, b"World");
+    assert_eq!(result.fields.len(), 0);
+    assert!(result.stamp.is_none());
+    assert_eq!(result.signature_valid, Some(true));
+}
+
+#[test]
+fn test_message_unpack_with_fields() {
+    let vectors = load_message_vectors();
+    let v = find_msg_vector(&vectors, "message_with_fields");
+
+    let packed = b64(v.packed.as_ref().unwrap());
+    let src_pub_bytes = b64(v.src_pub.as_ref().unwrap());
+
+    let mut src_pub = [0u8; 64];
+    src_pub.copy_from_slice(&src_pub_bytes);
+    let src_identity = Identity::from_public_key(&src_pub);
+
+    let result = message::unpack(
+        &packed,
+        Some(&|_src_hash, sig, data| src_identity.verify(sig, data)),
+    )
+    .expect("unpack failed");
+
+    assert_eq!(result.signature_valid, Some(true));
+    assert_eq!(result.fields.len(), 1);
+    assert_eq!(result.fields[0].0.as_uint().unwrap(), 15);
+    assert_eq!(result.fields[0].1.as_uint().unwrap(), 2);
+}
+
+#[test]
+fn test_message_unpack_with_stamp() {
+    let vectors = load_message_vectors();
+    let v = find_msg_vector(&vectors, "message_with_stamp");
+
+    let packed = b64(v.packed.as_ref().unwrap());
+    let expected_hash = b64(v.message_hash.as_ref().unwrap());
+    let expected_stamp = b64(v.stamp.as_ref().unwrap());
+    let src_pub_bytes = b64(v.src_pub.as_ref().unwrap());
+
+    let mut src_pub = [0u8; 64];
+    src_pub.copy_from_slice(&src_pub_bytes);
+    let src_identity = Identity::from_public_key(&src_pub);
+
+    let result = message::unpack(
+        &packed,
+        Some(&|_src_hash, sig, data| src_identity.verify(sig, data)),
+    )
+    .expect("unpack failed");
+
+    // Hash must match the 4-element payload (without stamp)
+    assert_eq!(
+        &result.message_hash[..],
+        &expected_hash[..],
+        "Stamp message hash must be computed from 4-element payload"
+    );
+    assert_eq!(result.signature_valid, Some(true));
+    assert!(result.stamp.is_some());
+    assert_eq!(result.stamp.unwrap(), expected_stamp);
+}
+
+#[test]
+fn test_message_pack_unpack_roundtrip() {
+    use rns_crypto::OsRng;
+    let mut rng = OsRng;
+    let src_identity = Identity::new(&mut rng);
+    let dst_identity = Identity::new(&mut rng);
+
+    let src_hash = *src_identity.hash();
+    let dst_hash = *dst_identity.hash();
+
+    let result = message::pack(
+        &dst_hash,
+        &src_hash,
+        1700000000.0,
+        b"Test Title",
+        b"Test Content",
+        vec![(Value::UInt(15), Value::UInt(2))],
+        None,
+        |data| src_identity.sign(data).map_err(|_| message::Error::SignError),
+    )
+    .expect("pack failed");
+
+    let src_pub = src_identity.get_public_key().unwrap();
+    let src_pub_id = Identity::from_public_key(&src_pub);
+
+    let unpacked = message::unpack(
+        &result.packed,
+        Some(&|_src_hash, sig, data| src_pub_id.verify(sig, data)),
+    )
+    .expect("unpack failed");
+
+    assert_eq!(unpacked.destination_hash, dst_hash);
+    assert_eq!(unpacked.source_hash, src_hash);
+    assert_eq!(unpacked.timestamp, 1700000000.0);
+    assert_eq!(unpacked.title, b"Test Title");
+    assert_eq!(unpacked.content, b"Test Content");
+    assert_eq!(unpacked.fields.len(), 1);
+    assert_eq!(unpacked.message_hash, result.message_hash);
+    assert_eq!(unpacked.signature_valid, Some(true));
+}
+
+#[test]
+fn test_message_pack_with_stamp_roundtrip() {
+    use rns_crypto::OsRng;
+    let mut rng = OsRng;
+    let src_identity = Identity::new(&mut rng);
+    let dst_identity = Identity::new(&mut rng);
+
+    let src_hash = *src_identity.hash();
+    let dst_hash = *dst_identity.hash();
+    let stamp = [0x42u8; 32];
+
+    let result = message::pack(
+        &dst_hash,
+        &src_hash,
+        1700000000.0,
+        b"Title",
+        b"Content",
+        vec![],
+        Some(&stamp),
+        |data| src_identity.sign(data).map_err(|_| message::Error::SignError),
+    )
+    .expect("pack failed");
+
+    let src_pub = src_identity.get_public_key().unwrap();
+    let src_pub_id = Identity::from_public_key(&src_pub);
+
+    let unpacked = message::unpack(
+        &result.packed,
+        Some(&|_src_hash, sig, data| src_pub_id.verify(sig, data)),
+    )
+    .expect("unpack failed");
+
+    assert_eq!(unpacked.signature_valid, Some(true));
+    assert_eq!(unpacked.stamp.as_deref(), Some(&stamp[..]));
+    // Hash must be the same regardless of stamp
+    assert_eq!(unpacked.message_hash, result.message_hash);
+}
+
+#[test]
+fn test_container_roundtrip() {
+    let vectors = load_message_vectors();
+    let v = find_msg_vector(&vectors, "file_container");
+
+    let lxmf_bytes = b64(v.lxmf_bytes.as_ref().unwrap());
+    let expected = b64(v.packed_container.as_ref().unwrap());
+
+    let packed = message::pack_container(&lxmf_bytes, 1, true, "Curve25519", 2);
+    assert_eq!(packed, expected, "Container pack mismatch");
+
+    let container = message::unpack_container(&packed).expect("unpack_container failed");
+    assert_eq!(container.lxmf_bytes, lxmf_bytes);
+    assert_eq!(container.state, Some(1));
+    assert_eq!(container.method, Some(2));
+    assert_eq!(container.transport_encrypted, Some(true));
+    assert_eq!(
+        container.transport_encryption.as_deref(),
+        Some("Curve25519")
+    );
+}
+
+#[test]
+fn test_paper_uri_roundtrip() {
+    let vectors = load_message_vectors();
+    let v = find_msg_vector(&vectors, "paper_uri");
+
+    let expected_uri = v.paper_uri.as_ref().unwrap();
+    let paper_packed = b64(v.paper_packed.as_ref().unwrap());
+
+    // Encode
+    let uri = message::as_uri(&paper_packed);
+    assert_eq!(&uri, expected_uri, "Paper URI encode mismatch");
+
+    // Decode
+    let decoded = message::from_uri(&uri).expect("from_uri failed");
+    assert_eq!(decoded, paper_packed, "Paper URI decode mismatch");
+}
+
+#[test]
+fn test_paper_uri_decode_from_python() {
+    let vectors = load_message_vectors();
+    let v = find_msg_vector(&vectors, "paper_uri");
+
+    let expected_bytes = b64(v.paper_packed.as_ref().unwrap());
+    let uri = v.paper_uri.as_ref().unwrap();
+
+    let decoded = message::from_uri(uri).expect("from_uri failed");
+    assert_eq!(decoded, expected_bytes);
+}
+
+#[test]
+fn test_propagation_pack_format() {
+    // Test that our propagation_pack function produces the right transient_id
+    // We can't exactly reproduce the encryption since it uses random,
+    // but we can test the structure
+    use rns_crypto::OsRng;
+    let mut rng = OsRng;
+    let src_identity = Identity::new(&mut rng);
+    let dst_identity = Identity::new(&mut rng);
+
+    let src_hash = *src_identity.hash();
+    let dst_hash = *dst_identity.hash();
+
+    let pack_result = message::pack(
+        &dst_hash,
+        &src_hash,
+        1700000000.0,
+        b"Hello",
+        b"World",
+        vec![],
+        None,
+        |data| src_identity.sign(data).map_err(|_| message::Error::SignError),
+    )
+    .expect("pack failed");
+
+    let (prop_packed, transient_id) = message::propagation_pack(
+        &pack_result.packed,
+        1700000000.0,
+        None,
+        |data| {
+            dst_identity
+                .encrypt(data, &mut rng)
+                .map_err(|_| message::Error::EncryptError)
+        },
+    )
+    .expect("propagation_pack failed");
+
+    // Verify the structure: msgpack([timestamp, [lxmf_data]])
+    let outer = unpack_exact(&prop_packed).expect("Failed to unpack propagation_packed");
+    let arr = outer.as_array().expect("Expected array");
+    assert_eq!(arr.len(), 2);
+    assert_eq!(arr[0].as_float().unwrap(), 1700000000.0);
+
+    let inner = arr[1].as_array().unwrap();
+    assert_eq!(inner.len(), 1);
+
+    let lxmf_data = inner[0].as_bin().unwrap();
+    // First 16 bytes should be the destination hash
+    assert_eq!(&lxmf_data[..16], &dst_hash[..]);
+
+    // transient_id should be SHA256 of lxmf_data
+    let expected_tid = sha256(lxmf_data);
+    assert_eq!(transient_id, expected_tid);
+
+    // Verify we can decrypt
+    let encrypted = &lxmf_data[16..];
+    let decrypted = dst_identity.decrypt(encrypted).expect("decrypt failed");
+
+    // decrypted should be: src_hash + signature + packed_payload
+    assert_eq!(&decrypted[..16], &src_hash[..]);
+}
+
+#[test]
+fn test_signature_invalid_detection() {
+    use rns_crypto::OsRng;
+    let mut rng = OsRng;
+    let src_identity = Identity::new(&mut rng);
+    let other_identity = Identity::new(&mut rng);
+    let dst_identity = Identity::new(&mut rng);
+
+    let src_hash = *src_identity.hash();
+    let dst_hash = *dst_identity.hash();
+
+    let result = message::pack(
+        &dst_hash,
+        &src_hash,
+        1700000000.0,
+        b"Hello",
+        b"World",
+        vec![],
+        None,
+        |data| src_identity.sign(data).map_err(|_| message::Error::SignError),
+    )
+    .expect("pack failed");
+
+    // Verify with wrong identity
+    let other_pub = other_identity.get_public_key().unwrap();
+    let other_pub_id = Identity::from_public_key(&other_pub);
+
+    let unpacked = message::unpack(
+        &result.packed,
+        Some(&|_src_hash, sig, data| other_pub_id.verify(sig, data)),
+    )
+    .expect("unpack should succeed even with invalid sig");
+
+    assert_eq!(unpacked.signature_valid, Some(false));
 }
