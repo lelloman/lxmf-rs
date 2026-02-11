@@ -1,0 +1,26 @@
+[workspace]
+members = ["lxmf-core", "lxmf", "lxmd"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license-file = "LICENSE"
+repository = "https://github.com/lelloman/lxmf-rs"
+authors = ["lxmf-rs contributors"]
+
+[workspace.dependencies]
+rns-crypto = { version = "0.1.0", default-features = false }
+rns-core = { version = "0.1.0", default-features = false }
+rns-net = "0.1.0"
+lxmf-core = { version = "0.1.0", path = "lxmf-core" }
+lxmf = { version = "0.1.0", path = "lxmf" }
+log = "0.4"
+rayon = "1"
+
+# Compile crypto crate with optimizations even in debug/test builds.
+[profile.dev.package.rns-crypto]
+opt-level = 2
+
+[profile.test.package.rns-crypto]
+opt-level = 2

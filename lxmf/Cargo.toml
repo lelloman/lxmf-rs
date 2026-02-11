@@ -1,0 +1,13 @@
+[package]
+name = "lxmf"
+description = "LXMF message delivery protocol for Reticulum"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+lxmf-core.workspace = true
+rns-crypto = { workspace = true, features = ["std"] }
+rns-core = { workspace = true, features = ["std"] }
+rns-net.workspace = true
+log.workspace = true
+rayon.workspace = true

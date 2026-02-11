@@ -1,0 +1,10 @@
+[package]
+name = "lxmd"
+description = "LXMF propagation daemon"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+lxmf.workspace = true
+rns-net.workspace = true
+log.workspace = true

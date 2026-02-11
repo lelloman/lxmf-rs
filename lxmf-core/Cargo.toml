@@ -1,0 +1,17 @@
+[package]
+name = "lxmf-core"
+description = "Core LXMF message format, constants, and stamp validation (no_std)"
+version.workspace = true
+edition.workspace = true
+
+[features]
+default = ["std"]
+std = ["rns-crypto/std", "rns-core/std"]
+
+[dependencies]
+rns-crypto = { workspace = true, default-features = false }
+rns-core = { workspace = true, default-features = false }
+
+[dev-dependencies]
+serde_json = "1"
+serde = { version = "1", features = ["derive"] }
