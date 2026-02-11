@@ -244,6 +244,124 @@ def generate_storage_vectors():
     return vectors
 
 
+def generate_peer_vectors():
+    """Generate test vectors for peer serialization interop."""
+    import hashlib
+    vectors = []
+
+    # 1: Minimal peer (defaults)
+    dest_hash = hashlib.sha256(b"peer_dest").digest()[:16]
+    minimal_peer = {
+        "peering_timebase": 0.0,
+        "alive": False,
+        "metadata": None,
+        "last_heard": 0.0,
+        "sync_strategy": 0x02,  # Persistent
+        "peering_key": None,
+        "destination_hash": dest_hash,
+        "link_establishment_rate": 0.0,
+        "sync_transfer_rate": 0.0,
+        "propagation_transfer_limit": None,
+        "propagation_sync_limit": None,
+        "propagation_stamp_cost": None,
+        "propagation_stamp_cost_flexibility": None,
+        "peering_cost": None,
+        "last_sync_attempt": 0.0,
+        "offered": 0,
+        "outgoing": 0,
+        "incoming": 0,
+        "rx_bytes": 0,
+        "tx_bytes": 0,
+        "handled_ids": [],
+        "unhandled_ids": [],
+    }
+    vectors.append({
+        "name": "minimal_peer",
+        "packed": b64(umsgpack.packb(minimal_peer)),
+        "destination_hash": b64(dest_hash),
+    })
+
+    # 2: Full peer with all fields populated
+    dest_hash2 = hashlib.sha256(b"peer_full").digest()[:16]
+    peering_key_data = bytes(range(32))
+    tid1 = hashlib.sha256(b"handled_msg_1").digest()
+    tid2 = hashlib.sha256(b"unhandled_msg_1").digest()
+    tid3 = hashlib.sha256(b"unhandled_msg_2").digest()
+
+    full_peer = {
+        "peering_timebase": 1700000000.0,
+        "alive": True,
+        "metadata": {"name": "TestNode"},
+        "last_heard": 1700001000.0,
+        "sync_strategy": 0x02,
+        "peering_key": [peering_key_data, 20],
+        "destination_hash": dest_hash2,
+        "link_establishment_rate": 0.15,
+        "sync_transfer_rate": 50000.0,
+        "propagation_transfer_limit": 256.0,
+        "propagation_sync_limit": 10240,
+        "propagation_stamp_cost": 16,
+        "propagation_stamp_cost_flexibility": 3,
+        "peering_cost": 18,
+        "last_sync_attempt": 1700000500.0,
+        "offered": 42,
+        "outgoing": 35,
+        "incoming": 10,
+        "rx_bytes": 1024000,
+        "tx_bytes": 2048000,
+        "handled_ids": [tid1],
+        "unhandled_ids": [tid2, tid3],
+    }
+    vectors.append({
+        "name": "full_peer",
+        "packed": b64(umsgpack.packb(full_peer)),
+        "destination_hash": b64(dest_hash2),
+        "alive": True,
+        "last_heard": 1700001000.0,
+        "offered": 42,
+        "outgoing": 35,
+        "handled_count": 1,
+        "unhandled_count": 2,
+        "propagation_stamp_cost": 16,
+        "peering_cost": 18,
+        "peering_key_value": 20,
+    })
+
+    # 3: Offer format
+    peering_key_bytes = bytes(range(32))
+    tid_a = hashlib.sha256(b"offer_a").digest()
+    tid_b = hashlib.sha256(b"offer_b").digest()
+    offer = [peering_key_bytes, [tid_a, tid_b]]
+    vectors.append({
+        "name": "offer_format",
+        "packed": b64(umsgpack.packb(offer)),
+        "peering_key": b64(peering_key_bytes),
+        "transient_ids": [b64(tid_a), b64(tid_b)],
+    })
+
+    # 4: Offer response: False (has all)
+    vectors.append({
+        "name": "response_has_all",
+        "packed": b64(umsgpack.packb(False)),
+    })
+
+    # 5: Offer response: True (wants all)
+    vectors.append({
+        "name": "response_wants_all",
+        "packed": b64(umsgpack.packb(True)),
+    })
+
+    # 6: Offer response: list of wanted IDs
+    wanted = [tid_a]
+    vectors.append({
+        "name": "response_wants_specific",
+        "packed": b64(umsgpack.packb(wanted)),
+        "wanted": [b64(tid_a)],
+    })
+
+    return vectors
+
+
 def main():
     out_dir = os.path.join(os.path.dirname(__file__), "fixtures")
     os.makedirs(out_dir, exist_ok=True)
@@ -259,6 +377,12 @@ def main():
     with open(out_path, "w") as f:
         json.dump(storage_vectors, f, indent=2)
     print(f"Wrote {len(storage_vectors)} storage vectors to {out_path}")
+
+    peer_vectors = generate_peer_vectors()
+    out_path = os.path.join(out_dir, "peer_vectors.json")
+    with open(out_path, "w") as f:
+        json.dump(peer_vectors, f, indent=2)
+    print(f"Wrote {len(peer_vectors)} peer vectors to {out_path}")
 
 
 if __name__ == "__main__":

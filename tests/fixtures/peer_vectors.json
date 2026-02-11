@@ -1,0 +1,45 @@
+[
+  {
+    "name": "minimal_peer",
+    "packed": "3gAWsHBlZXJpbmdfdGltZWJhc2XLAAAAAAAAAAClYWxpdmXCqG1ldGFkYXRhwKpsYXN0X2hlYXJkywAAAAAAAAAArXN5bmNfc3RyYXRlZ3kCq3BlZXJpbmdfa2V5wLBkZXN0aW5hdGlvbl9oYXNoxBBL7jO7KHzM1H/Up1QgovyOt2xpbmtfZXN0YWJsaXNobWVudF9yYXRlywAAAAAAAAAAsnN5bmNfdHJhbnNmZXJfcmF0ZcsAAAAAAAAAALpwcm9wYWdhdGlvbl90cmFuc2Zlcl9saW1pdMC2cHJvcGFnYXRpb25fc3luY19saW1pdMC2cHJvcGFnYXRpb25fc3RhbXBfY29zdMDZInByb3BhZ2F0aW9uX3N0YW1wX2Nvc3RfZmxleGliaWxpdHnArHBlZXJpbmdfY29zdMCxbGFzdF9zeW5jX2F0dGVtcHTLAAAAAAAAAACnb2ZmZXJlZACob3V0Z29pbmcAqGluY29taW5nAKhyeF9ieXRlcwCodHhfYnl0ZXMAq2hhbmRsZWRfaWRzkK11bmhhbmRsZWRfaWRzkA==",
+    "destination_hash": "S+4zuyh8zNR/1KdUIKL8jg=="
+  },
+  {
+    "name": "full_peer",
+    "packed": "3gAWsHBlZXJpbmdfdGltZWJhc2XLQdlU/EAAAAClYWxpdmXDqG1ldGFkYXRhgaRuYW1lqFRlc3ROb2Rlqmxhc3RfaGVhcmTLQdlU/ToAAACtc3luY19zdHJhdGVneQKrcGVlcmluZ19rZXmSxCAAAQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHxSwZGVzdGluYXRpb25faGFzaMQQqsTeKi/N0okaKtJ2I+UIfbdsaW5rX2VzdGFibGlzaG1lbnRfcmF0Zcs/wzMzMzMzM7JzeW5jX3RyYW5zZmVyX3JhdGXLQOhqAAAAAAC6cHJvcGFnYXRpb25fdHJhbnNmZXJfbGltaXTLQHAAAAAAAAC2cHJvcGFnYXRpb25fc3luY19saW1pdM0oALZwcm9wYWdhdGlvbl9zdGFtcF9jb3N0ENkicHJvcGFnYXRpb25fc3RhbXBfY29zdF9mbGV4aWJpbGl0eQOscGVlcmluZ19jb3N0ErFsYXN0X3N5bmNfYXR0ZW1wdMtB2VT8vQAAAKdvZmZlcmVkKqhvdXRnb2luZyOoaW5jb21pbmcKqHJ4X2J5dGVzzgAPoACodHhfYnl0ZXPOAB9AAKtoYW5kbGVkX2lkc5HEIOOSNwuQeuE8ZcdSKeMF36vqcUWtqXVNaaRi223MHPDNrXVuaGFuZGxlZF9pZHOSxCB9a7CEtYl7HAaHxMFMU66HdI3T+N64gl8HdlvubW1ZjcQgV/do/EosCSiUOF6JQd8ZszGVba2VGIdNUpF2Apd3LI0=",
+    "destination_hash": "qsTeKi/N0okaKtJ2I+UIfQ==",
+    "alive": true,
+    "last_heard": 1700001000.0,
+    "offered": 42,
+    "outgoing": 35,
+    "handled_count": 1,
+    "unhandled_count": 2,
+    "propagation_stamp_cost": 16,
+    "peering_cost": 18,
+    "peering_key_value": 20
+  },
+  {
+    "name": "offer_format",
+    "packed": "ksQgAAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh+SxCAju0qLFe6C8MXMD1FfL/T3dOebrLZChb5Bhx5Of2hptMQgHTGq3ZXYUDqf6qtp/5Ca7lx9LObqAm3GxCe3wxX6Ke0=",
+    "peering_key": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+    "transient_ids": [
+      "I7tKixXugvDFzA9RXy/093Tnm6y2QoW+QYceTn9oabQ=",
+      "HTGq3ZXYUDqf6qtp/5Ca7lx9LObqAm3GxCe3wxX6Ke0="
+    ]
+  },
+  {
+    "name": "response_has_all",
+    "packed": "wg=="
+  },
+  {
+    "name": "response_wants_all",
+    "packed": "ww=="
+  },
+  {
+    "name": "response_wants_specific",
+    "packed": "kcQgI7tKixXugvDFzA9RXy/093Tnm6y2QoW+QYceTn9oabQ=",
+    "wanted": [
+      "I7tKixXugvDFzA9RXy/093Tnm6y2QoW+QYceTn9oabQ="
+    ]
+  }
+]

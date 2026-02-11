@@ -1568,3 +1568,5 @@ fn test_storage_stamp_costs_roundtrip() {
     assert_eq!(loaded[&[0x01; 16]].1, 16);
     assert_eq!(loaded[&[0x02; 16]].1, 8);
 }
+
+// Peer tests are in lxmf/tests/peer_tests.rs since they require the lxmf crate.
