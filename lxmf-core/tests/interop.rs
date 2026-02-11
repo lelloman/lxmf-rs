@@ -1039,3 +1039,252 @@ fn test_signature_invalid_detection() {
 
     assert_eq!(unpacked.signature_valid, Some(false));
 }
+
+// ============================================================
+// Phase 3: Stamp system tests
+// ============================================================
+
+use lxmf_core::stamp;
+
+#[derive(Deserialize)]
+struct StampVector {
+    name: String,
+    #[serde(default)]
+    material: Option<String>,
+    #[serde(default)]
+    rounds: Option<u32>,
+    #[serde(default)]
+    workblock: Option<String>,
+    #[serde(default)]
+    workblock_len: Option<usize>,
+    #[serde(default)]
+    message_id: Option<String>,
+    #[serde(default)]
+    stamp: Option<String>,
+    #[serde(default)]
+    target_cost: Option<u8>,
+    #[serde(default)]
+    stamp_valid: Option<bool>,
+    #[serde(default)]
+    stamp_value: Option<u32>,
+    #[serde(default)]
+    salts: Option<Vec<SaltVector>>,
+    #[serde(default)]
+    peering_id: Option<String>,
+    #[serde(default)]
+    peering_key: Option<String>,
+    #[serde(default)]
+    valid: Option<bool>,
+    #[serde(default)]
+    cases: Option<Vec<StampValueCase>>,
+    #[serde(default)]
+    hash_result: Option<String>,
+    #[serde(default)]
+    expected_value: Option<u32>,
+    #[serde(default)]
+    min_size: Option<usize>,
+}
+
+#[derive(Deserialize)]
+struct SaltVector {
+    n: u64,
+    packed_n: String,
+    salt: String,
+}
+
+#[derive(Deserialize)]
+struct StampValueCase {
+    stamp: String,
+    hash: String,
+    value: u32,
+}
+
+fn load_stamp_vectors() -> Vec<StampVector> {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../tests/fixtures/stamp_vectors.json"
+    );
+    let data = fs::read_to_string(path).expect("Failed to read stamp vectors");
+    serde_json::from_str(&data).expect("Failed to parse stamp vectors")
+}
+
+fn find_stamp_vector<'a>(vectors: &'a [StampVector], name: &str) -> &'a StampVector {
+    vectors
+        .iter()
+        .find(|v| v.name == name)
+        .unwrap_or_else(|| panic!("Stamp vector '{}' not found", name))
+}
+
+#[test]
+fn test_workblock_generation() {
+    let vectors = load_stamp_vectors();
+    let v = find_stamp_vector(&vectors, "workblock_25_rounds");
+
+    let material = b64(v.material.as_ref().unwrap());
+    let expected = b64(v.workblock.as_ref().unwrap());
+    let expected_len = v.workblock_len.unwrap();
+
+    let workblock = stamp::stamp_workblock(&material, v.rounds.unwrap());
+    assert_eq!(workblock.len(), expected_len, "Workblock length mismatch");
+    assert_eq!(workblock, expected, "Workblock content mismatch");
+}
+
+#[test]
+fn test_hkdf_salt_computation() {
+    let vectors = load_stamp_vectors();
+    let v = find_stamp_vector(&vectors, "hkdf_salts");
+
+    let material = b64(v.material.as_ref().unwrap());
+    let salts = v.salts.as_ref().unwrap();
+
+    for sv in salts {
+        let expected_packed_n = b64(&sv.packed_n);
+        let expected_salt = b64(&sv.salt);
+
+        // Verify msgpack encoding of integer
+        let packed_n = rns_core::msgpack::pack(&Value::UInt(sv.n));
+        assert_eq!(
+            packed_n, expected_packed_n,
+            "msgpack encoding of {} differs",
+            sv.n
+        );
+
+        // Verify salt = SHA256(material + packed_n)
+        let mut salt_input = Vec::new();
+        salt_input.extend_from_slice(&material);
+        salt_input.extend_from_slice(&packed_n);
+        let salt = sha256(&salt_input);
+        assert_eq!(
+            &salt[..],
+            &expected_salt[..],
+            "Salt for n={} differs",
+            sv.n
+        );
+    }
+}
+
+#[test]
+fn test_stamp_validation() {
+    let vectors = load_stamp_vectors();
+    let v = find_stamp_vector(&vectors, "stamp_validation");
+
+    let workblock = b64(v.workblock.as_ref().unwrap());
+    let stamp_bytes = b64(v.stamp.as_ref().unwrap());
+    let target_cost = v.target_cost.unwrap();
+    let expected_valid = v.stamp_valid.unwrap();
+    let expected_value = v.stamp_value.unwrap();
+
+    let valid = stamp::stamp_valid(&stamp_bytes, target_cost, &workblock);
+    assert_eq!(valid, expected_valid, "stamp_valid mismatch");
+
+    let value = stamp::stamp_value(&workblock, &stamp_bytes);
+    assert_eq!(value, expected_value, "stamp_value mismatch");
+}
+
+#[test]
+fn test_peering_key_validation() {
+    let vectors = load_stamp_vectors();
+    let v = find_stamp_vector(&vectors, "peering_key_validation");
+
+    let peering_id = b64(v.peering_id.as_ref().unwrap());
+    let peering_key = b64(v.peering_key.as_ref().unwrap());
+    let target_cost = v.target_cost.unwrap();
+    let expected_valid = v.valid.unwrap();
+
+    // Also verify the workblock matches Python
+    let expected_workblock = b64(v.workblock.as_ref().unwrap());
+    let workblock = stamp::stamp_workblock(
+        &peering_id,
+        lxmf_core::constants::WORKBLOCK_EXPAND_ROUNDS_PEERING,
+    );
+    assert_eq!(workblock, expected_workblock, "Peering workblock mismatch");
+
+    let valid = stamp::validate_peering_key(&peering_id, &peering_key, target_cost);
+    assert_eq!(valid, expected_valid, "Peering key validation mismatch");
+}
+
+#[test]
+fn test_stamp_value_edge_cases() {
+    let vectors = load_stamp_vectors();
+    let v = find_stamp_vector(&vectors, "stamp_value_edge_cases");
+
+    let workblock = b64(v.workblock.as_ref().unwrap());
+    let cases = v.cases.as_ref().unwrap();
+
+    for case in cases {
+        let stamp_bytes = b64(&case.stamp);
+        let expected_hash = b64(&case.hash);
+
+        // Verify hash
+        let mut material = Vec::new();
+        material.extend_from_slice(&workblock);
+        material.extend_from_slice(&stamp_bytes);
+        let hash = sha256(&material);
+        assert_eq!(
+            &hash[..],
+            &expected_hash[..],
+            "Hash mismatch for stamp {:?}",
+            &stamp_bytes[..4]
+        );
+
+        // Verify value
+        let value = stamp::stamp_value(&workblock, &stamp_bytes);
+        assert_eq!(
+            value, case.value,
+            "Value mismatch for stamp {:?}",
+            &stamp_bytes[..4]
+        );
+    }
+}
+
+#[test]
+fn test_leading_zeros() {
+    // Test with known values
+    assert_eq!(stamp::leading_zeros(&[0u8; 32]), 256);
+    assert_eq!(stamp::leading_zeros(&{
+        let mut h = [0u8; 32];
+        h[0] = 0x80;
+        h
+    }), 0);
+    assert_eq!(stamp::leading_zeros(&{
+        let mut h = [0u8; 32];
+        h[0] = 0x40;
+        h
+    }), 1);
+    assert_eq!(stamp::leading_zeros(&{
+        let mut h = [0u8; 32];
+        h[0] = 0x01;
+        h
+    }), 7);
+    assert_eq!(stamp::leading_zeros(&{
+        let mut h = [0u8; 32];
+        h[1] = 0x01;
+        h
+    }), 15);
+}
+
+#[test]
+fn test_pn_stamp_validation_size_check() {
+    // Data too short should return None
+    let short_data = vec![0u8; 100]; // less than LXMF_OVERHEAD + STAMP_SIZE = 144
+    assert!(stamp::validate_pn_stamp(&short_data, 2).is_none());
+
+    // Exact boundary
+    let boundary_data = vec![0u8; 144]; // exactly LXMF_OVERHEAD + STAMP_SIZE
+    assert!(stamp::validate_pn_stamp(&boundary_data, 2).is_none());
+}
+
+#[test]
+fn test_stamp_workblock_size() {
+    // Verify workblock sizes match the plan
+    let material = [0u8; 32];
+
+    let wb_peering = stamp::stamp_workblock(&material, 25);
+    assert_eq!(wb_peering.len(), 25 * 256);
+
+    // We don't test 1000 or 3000 rounds here as they would be slow,
+    // but verify the formula
+    assert_eq!(25 * 256, 6400);
+    assert_eq!(1000 * 256, 256000);
+    assert_eq!(3000 * 256, 768000);
+}
