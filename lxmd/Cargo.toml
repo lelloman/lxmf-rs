@@ -6,5 +6,8 @@ edition.workspace = true
 
 [dependencies]
 lxmf.workspace = true
+lxmf-core.workspace = true
 rns-net.workspace = true
+rns-core = { workspace = true, features = ["std"] }
+rns-crypto = { workspace = true, features = ["std"] }
 log.workspace = true
