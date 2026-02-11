@@ -1,0 +1,70 @@
+[
+  {
+    "name": "transient_ids",
+    "packed": "gsQgu4kQP/jUGJlCk0A2cKf24tZU3t1aVbnzUCfxsNDUEZPLQdlU/EAAAADEII+x+YkwRP/pmZKrfkEUrIpKGrhRrUz60hx3sCoDrd6Ey0HZVP06IAAA",
+    "entries": [
+      {
+        "key": "u4kQP/jUGJlCk0A2cKf24tZU3t1aVbnzUCfxsNDUEZM=",
+        "value": 1700000000.0
+      },
+      {
+        "key": "j7H5iTBE/+mZkqt+QRSsikoauFGtTPrSHHewKgOt3oQ=",
+        "value": 1700001000.5
+      }
+    ]
+  },
+  {
+    "name": "stamp_costs",
+    "packed": "gsQQSTwOjjDAq5GolywcM+ILNZLLQdlU/EAAAAAQxBDnP+H+rJVt1bUorX7knz6YkstB2VT+NAAAAAg=",
+    "entries": [
+      {
+        "key": "STwOjjDAq5GolywcM+ILNQ==",
+        "timestamp": 1700000000.0,
+        "cost": 16
+      },
+      {
+        "key": "5z/h/qyVbdW1KK1+5J8+mA==",
+        "timestamp": 1700002000.0,
+        "cost": 8
+      }
+    ]
+  },
+  {
+    "name": "node_stats",
+    "packed": "g7FtZXNzYWdlc19yZWNlaXZlZCqtbWVzc2FnZXNfc2VudBGvcGVlcnNfY29ubmVjdGVkAw==",
+    "entries": [
+      {
+        "key": "messages_received",
+        "value": 42
+      },
+      {
+        "key": "messages_sent",
+        "value": 17
+      },
+      {
+        "key": "peers_connected",
+        "value": 3
+      }
+    ]
+  },
+  {
+    "name": "peers",
+    "packed": "koOwZGVzdGluYXRpb25faGFzaMQQFgSiLJNck3a3/GSWP7NB2qpsYXN0X2hlYXJky0HZVPxAAAAApWFsaXZlw4OwZGVzdGluYXRpb25faGFzaMQQuVsDq8zeKCNOh6bD9l6jkqpsYXN0X2hlYXJky0HZVP06AAAApWFsaXZlwg==",
+    "count": 2
+  },
+  {
+    "name": "dest_hash_delivery",
+    "identity_hash": "AAECAwQFBgcICQoLDA0ODw==",
+    "expected_hash": "qzyimPPVAmesDgwPDlERjQ=="
+  },
+  {
+    "name": "dest_hash_propagation",
+    "identity_hash": "AAECAwQFBgcICQoLDA0ODw==",
+    "expected_hash": "5/B34LnSGgRC6xWF/S1c8A=="
+  },
+  {
+    "name": "dest_hash_control",
+    "identity_hash": "AAECAwQFBgcICQoLDA0ODw==",
+    "expected_hash": "VFPivG7IyzvlQb6Ux86Uyg=="
+  }
+]

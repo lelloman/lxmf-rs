@@ -1288,3 +1288,283 @@ fn test_stamp_workblock_size() {
     assert_eq!(1000 * 256, 256000);
     assert_eq!(3000 * 256, 768000);
 }
+
+// ============================================================
+// Phase 4: Storage format and destination hash tests
+// ============================================================
+
+#[derive(Debug, serde::Deserialize)]
+struct StorageVector {
+    name: String,
+    #[serde(default)]
+    packed: Option<String>,
+    #[serde(default)]
+    entries: Option<serde_json::Value>,
+    #[serde(default)]
+    count: Option<usize>,
+    #[serde(default)]
+    identity_hash: Option<String>,
+    #[serde(default)]
+    expected_hash: Option<String>,
+}
+
+fn load_storage_vectors() -> Vec<StorageVector> {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../tests/fixtures/storage_vectors.json"
+    );
+    let data = std::fs::read_to_string(path).expect("Failed to read storage_vectors.json");
+    serde_json::from_str(&data).expect("Failed to parse storage_vectors.json")
+}
+
+fn find_storage_vector<'a>(vectors: &'a [StorageVector], name: &str) -> &'a StorageVector {
+    vectors
+        .iter()
+        .find(|v| v.name == name)
+        .unwrap_or_else(|| panic!("Storage vector '{}' not found", name))
+}
+
+#[test]
+fn test_transient_ids_load() {
+    let vectors = load_storage_vectors();
+    let v = find_storage_vector(&vectors, "transient_ids");
+    let packed_bytes = b64(v.packed.as_ref().unwrap());
+
+    let val = unpack_exact(&packed_bytes).expect("Failed to unpack transient_ids");
+    let map = val.as_map().expect("Expected map");
+
+    let entries = v.entries.as_ref().unwrap().as_array().unwrap();
+    assert_eq!(map.len(), entries.len());
+
+    for entry in entries {
+        let key_b64 = entry["key"].as_str().unwrap();
+        let expected_ts = entry["value"].as_f64().unwrap();
+        let key = b64(key_b64);
+        assert_eq!(key.len(), 32);
+
+        let found = map.iter().any(|(k, v): &(Value, Value)| {
+            k.as_bin() == Some(&key) && (v.as_number().unwrap() - expected_ts).abs() < 0.01
+        });
+        assert!(found, "Entry with key {:?} not found", &key[..4]);
+    }
+}
+
+#[test]
+fn test_stamp_costs_load() {
+    let vectors = load_storage_vectors();
+    let v = find_storage_vector(&vectors, "stamp_costs");
+    let packed_bytes = b64(v.packed.as_ref().unwrap());
+
+    let val = unpack_exact(&packed_bytes).expect("Failed to unpack stamp_costs");
+    let map = val.as_map().expect("Expected map");
+
+    let entries = v.entries.as_ref().unwrap().as_array().unwrap();
+    assert_eq!(map.len(), entries.len());
+
+    for entry in entries {
+        let key = b64(entry["key"].as_str().unwrap());
+        let expected_ts = entry["timestamp"].as_f64().unwrap();
+        let expected_cost = entry["cost"].as_u64().unwrap();
+        assert_eq!(key.len(), 16);
+
+        let found = map.iter().any(|(k, v): &(Value, Value)| {
+            if k.as_bin() != Some(&key) {
+                return false;
+            }
+            if let Some(arr) = v.as_array() {
+                if arr.len() >= 2 {
+                    let ts = arr[0].as_number().unwrap_or(0.0);
+                    let cost = arr[1].as_uint().unwrap_or(0);
+                    return (ts - expected_ts).abs() < 0.01 && cost == expected_cost;
+                }
+            }
+            false
+        });
+        assert!(found, "Stamp cost entry not found for key {:?}", &key[..4]);
+    }
+}
+
+#[test]
+fn test_node_stats_load() {
+    let vectors = load_storage_vectors();
+    let v = find_storage_vector(&vectors, "node_stats");
+    let packed_bytes = b64(v.packed.as_ref().unwrap());
+
+    let val = unpack_exact(&packed_bytes).expect("Failed to unpack node_stats");
+    let map = val.as_map().expect("Expected map");
+
+    let entries = v.entries.as_ref().unwrap().as_array().unwrap();
+    assert_eq!(map.len(), entries.len());
+
+    for entry in entries {
+        let key = entry["key"].as_str().unwrap();
+        let expected_value = entry["value"].as_u64().unwrap();
+
+        let found = map.iter().any(|(k, v): &(Value, Value)| {
+            k.as_str() == Some(key) && v.as_uint() == Some(expected_value)
+        });
+        assert!(found, "Node stat '{}' not found", key);
+    }
+}
+
+#[test]
+fn test_peers_load() {
+    let vectors = load_storage_vectors();
+    let v = find_storage_vector(&vectors, "peers");
+    let packed_bytes = b64(v.packed.as_ref().unwrap());
+
+    let val = unpack_exact(&packed_bytes).expect("Failed to unpack peers");
+    let arr = val.as_array().expect("Expected array");
+    assert_eq!(arr.len(), v.count.unwrap());
+
+    for peer in arr {
+        let map: &[(Value, Value)] = peer.as_map().expect("Peer should be a map");
+        let has_dest_hash = map
+            .iter()
+            .any(|(k, v): &(Value, Value)| k.as_str() == Some("destination_hash") && v.as_bin().is_some());
+        let has_last_heard = map
+            .iter()
+            .any(|(k, v): &(Value, Value)| k.as_str() == Some("last_heard") && v.as_number().is_some());
+        let has_alive = map.iter().any(|(k, v): &(Value, Value)| {
+            k.as_str() == Some("alive") && v.as_bool().is_some()
+        });
+        assert!(has_dest_hash, "Peer missing destination_hash");
+        assert!(has_last_heard, "Peer missing last_heard");
+        assert!(has_alive, "Peer missing alive");
+    }
+}
+
+#[test]
+fn test_dest_hash_delivery() {
+    let vectors = load_storage_vectors();
+    let v = find_storage_vector(&vectors, "dest_hash_delivery");
+
+    let identity_hash = b64(v.identity_hash.as_ref().unwrap());
+    let expected_hash = b64(v.expected_hash.as_ref().unwrap());
+
+    assert_eq!(identity_hash.len(), 16);
+    assert_eq!(expected_hash.len(), 16);
+
+    // Compute: SHA256(SHA256("lxmf.delivery") + identity_hash)[:16]
+    let name_hash = sha256(b"lxmf.delivery");
+    let mut material = Vec::with_capacity(32 + 16);
+    material.extend_from_slice(&name_hash);
+    material.extend_from_slice(&identity_hash);
+    let full = sha256(&material);
+    let result = &full[..16];
+
+    assert_eq!(result, &expected_hash[..], "Delivery dest_hash mismatch");
+}
+
+#[test]
+fn test_dest_hash_propagation() {
+    let vectors = load_storage_vectors();
+    let v = find_storage_vector(&vectors, "dest_hash_propagation");
+
+    let identity_hash = b64(v.identity_hash.as_ref().unwrap());
+    let expected_hash = b64(v.expected_hash.as_ref().unwrap());
+
+    let name_hash = sha256(b"lxmf.propagation");
+    let mut material = Vec::with_capacity(32 + 16);
+    material.extend_from_slice(&name_hash);
+    material.extend_from_slice(&identity_hash);
+    let full = sha256(&material);
+    let result = &full[..16];
+
+    assert_eq!(result, &expected_hash[..], "Propagation dest_hash mismatch");
+}
+
+#[test]
+fn test_dest_hash_control() {
+    let vectors = load_storage_vectors();
+    let v = find_storage_vector(&vectors, "dest_hash_control");
+
+    let identity_hash = b64(v.identity_hash.as_ref().unwrap());
+    let expected_hash = b64(v.expected_hash.as_ref().unwrap());
+
+    let name_hash = sha256(b"lxmf.propagation.control");
+    let mut material = Vec::with_capacity(32 + 16);
+    material.extend_from_slice(&name_hash);
+    material.extend_from_slice(&identity_hash);
+    let full = sha256(&material);
+    let result = &full[..16];
+
+    assert_eq!(
+        result,
+        &expected_hash[..],
+        "Control dest_hash mismatch"
+    );
+}
+
+#[test]
+fn test_storage_transient_ids_roundtrip() {
+    use std::collections::HashMap;
+
+    let mut ids: HashMap<[u8; 32], f64> = HashMap::new();
+    ids.insert([0xAA; 32], 1700000000.0);
+    ids.insert([0xBB; 32], 1700001000.5);
+
+    // Serialize
+    let entries: Vec<(Value, Value)> = ids
+        .iter()
+        .map(|(k, v)| (Value::Bin(k.to_vec()), Value::Float(*v)))
+        .collect();
+    let packed_bytes = pack(&Value::Map(entries));
+
+    // Deserialize
+    let val = unpack_exact(&packed_bytes).expect("Failed to unpack");
+    let map = val.as_map().expect("Expected map");
+    assert_eq!(map.len(), 2);
+
+    let mut loaded: HashMap<[u8; 32], f64> = HashMap::new();
+    for &(ref k, ref v) in map {
+        let key_bytes = k.as_bin().unwrap();
+        let ts = v.as_number().unwrap();
+        let mut key = [0u8; 32];
+        key.copy_from_slice(key_bytes);
+        loaded.insert(key, ts);
+    }
+    assert_eq!(loaded.len(), 2);
+    assert!((loaded[&[0xAA; 32]] - 1700000000.0).abs() < 0.01);
+    assert!((loaded[&[0xBB; 32]] - 1700001000.5).abs() < 0.01);
+}
+
+#[test]
+fn test_storage_stamp_costs_roundtrip() {
+    use std::collections::HashMap;
+
+    let mut costs: HashMap<[u8; 16], (f64, u8)> = HashMap::new();
+    costs.insert([0x01; 16], (1700000000.0, 16));
+    costs.insert([0x02; 16], (1700002000.0, 8));
+
+    // Serialize
+    let entries: Vec<(Value, Value)> = costs
+        .iter()
+        .map(|(k, (ts, cost))| {
+            (
+                Value::Bin(k.to_vec()),
+                Value::Array(vec![Value::Float(*ts), Value::UInt(*cost as u64)]),
+            )
+        })
+        .collect();
+    let packed_bytes = pack(&Value::Map(entries));
+
+    // Deserialize
+    let val = unpack_exact(&packed_bytes).expect("Failed to unpack");
+    let map = val.as_map().expect("Expected map");
+    assert_eq!(map.len(), 2);
+
+    let mut loaded: HashMap<[u8; 16], (f64, u8)> = HashMap::new();
+    for &(ref k, ref v) in map {
+        let key_bytes = k.as_bin().unwrap();
+        let arr = v.as_array().unwrap();
+        let ts = arr[0].as_number().unwrap();
+        let cost = arr[1].as_uint().unwrap() as u8;
+        let mut key = [0u8; 16];
+        key.copy_from_slice(key_bytes);
+        loaded.insert(key, (ts, cost));
+    }
+    assert_eq!(loaded.len(), 2);
+    assert_eq!(loaded[&[0x01; 16]].1, 16);
+    assert_eq!(loaded[&[0x02; 16]].1, 8);
+}
