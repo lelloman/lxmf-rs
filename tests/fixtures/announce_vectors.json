@@ -1,0 +1,52 @@
+[
+  {
+    "name": "delivery_v050",
+    "packed": "ksQIVGVzdE5vZGUQ",
+    "display_name": "TestNode",
+    "stamp_cost": 16
+  },
+  {
+    "name": "delivery_legacy",
+    "packed": "TGVnYWN5Tm9kZQ==",
+    "display_name": "LegacyNode",
+    "stamp_cost": null
+  },
+  {
+    "name": "delivery_no_cost",
+    "packed": "kcQITmFtZU9ubHk=",
+    "display_name": "NameOnly",
+    "stamp_cost": null
+  },
+  {
+    "name": "pn_valid",
+    "packed": "l8QIUHJvcE5vZGXOZVPxAMPNAQDNKACTEAMSgQHEBk15Tm9kZQ==",
+    "node_timebase": 1700000000,
+    "propagation_enabled": true,
+    "propagation_transfer_limit": 256,
+    "propagation_sync_limit": 10240,
+    "propagation_stamp_cost": 16,
+    "propagation_stamp_cost_flexibility": 3,
+    "peering_cost": 18,
+    "pn_name": "MyNode"
+  },
+  {
+    "name": "pn_disabled",
+    "packed": "l8DOZVPxAMIAAJMAAACA",
+    "propagation_enabled": false
+  },
+  {
+    "name": "pn_invalid_short",
+    "packed": "k8QFU2hvcnTOZVPxAMM=",
+    "valid": false
+  },
+  {
+    "name": "pn_invalid_types",
+    "packed": "l8QDQmFkp25vdF9pbnTDzQEAzSgAkxADEoA=",
+    "valid": false
+  },
+  {
+    "name": "pn_no_name",
+    "packed": "l8QGTm9OYW1lzmVT8QDDzQEAzSgAkxADEoA=",
+    "pn_name": null
+  }
+]

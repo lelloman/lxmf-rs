@@ -362,6 +362,151 @@ def generate_peer_vectors():
     return vectors
 
 
+def generate_announce_vectors():
+    """Generate test vectors for announce data parsing."""
+    import hashlib
+    vectors = []
+
+    # 1: Delivery announce - v0.5.0+ format (msgpack array)
+    display_name = b"TestNode"
+    stamp_cost = 16
+    delivery_data = umsgpack.packb([display_name, stamp_cost])
+    vectors.append({
+        "name": "delivery_v050",
+        "packed": b64(delivery_data),
+        "display_name": "TestNode",
+        "stamp_cost": stamp_cost,
+    })
+
+    # 2: Delivery announce - legacy format (raw string)
+    legacy_name = "LegacyNode"
+    legacy_data = legacy_name.encode("utf-8")
+    vectors.append({
+        "name": "delivery_legacy",
+        "packed": b64(legacy_data),
+        "display_name": legacy_name,
+        "stamp_cost": None,
+    })
+
+    # 3: Delivery announce - no stamp cost (v0.5.0+ with only name)
+    name_only = umsgpack.packb([b"NameOnly"])
+    vectors.append({
+        "name": "delivery_no_cost",
+        "packed": b64(name_only),
+        "display_name": "NameOnly",
+        "stamp_cost": None,
+    })
+
+    # 4: PN announce - valid full data
+    pn_data = [
+        b"PropNode",        # display name
+        1700000000,         # timebase
+        True,               # propagation enabled
+        256,                # transfer limit
+        10240,              # sync limit
+        [16, 3, 18],        # [stamp_cost, flexibility, peering_cost]
+        {0x01: b"MyNode"},  # metadata with PN_META_NAME
+    ]
+    pn_packed = umsgpack.packb(pn_data)
+    vectors.append({
+        "name": "pn_valid",
+        "packed": b64(pn_packed),
+        "node_timebase": 1700000000,
+        "propagation_enabled": True,
+        "propagation_transfer_limit": 256,
+        "propagation_sync_limit": 10240,
+        "propagation_stamp_cost": 16,
+        "propagation_stamp_cost_flexibility": 3,
+        "peering_cost": 18,
+        "pn_name": "MyNode",
+    })
+
+    # 5: PN announce - propagation disabled
+    pn_disabled = [
+        None,               # no display name
+        1700000000,
+        False,              # disabled
+        0,
+        0,
+        [0, 0, 0],
+        {},
+    ]
+    vectors.append({
+        "name": "pn_disabled",
+        "packed": b64(umsgpack.packb(pn_disabled)),
+        "propagation_enabled": False,
+    })
+
+    # 6: PN announce - invalid (too few elements)
+    pn_short = [b"Short", 1700000000, True]
+    vectors.append({
+        "name": "pn_invalid_short",
+        "packed": b64(umsgpack.packb(pn_short)),
+        "valid": False,
+    })
+
+    # 7: PN announce - invalid (wrong types)
+    pn_bad_types = [b"Bad", "not_int", True, 256, 10240, [16, 3, 18], {}]
+    vectors.append({
+        "name": "pn_invalid_types",
+        "packed": b64(umsgpack.packb(pn_bad_types)),
+        "valid": False,
+    })
+
+    # 8: PN announce - no metadata name
+    pn_no_name = [
+        b"NoName",
+        1700000000,
+        True,
+        256,
+        10240,
+        [16, 3, 18],
+        {},  # empty metadata
+    ]
+    vectors.append({
+        "name": "pn_no_name",
+        "packed": b64(umsgpack.packb(pn_no_name)),
+        "pn_name": None,
+    })
+
+    return vectors
+
+
+def generate_ticket_vectors():
+    """Generate test vectors for ticket stamp computation."""
+    import hashlib
+    vectors = []
+
+    # Ticket stamp = truncated_hash(ticket + message_id)
+    # truncated_hash = SHA256(data)[:16]
+    ticket = bytes(range(16))
+    message_id = hashlib.sha256(b"test_message").digest()
+
+    stamp_material = ticket + message_id
+    stamp_hash = hashlib.sha256(stamp_material).digest()
+    stamp = stamp_hash[:16]
+
+    vectors.append({
+        "name": "ticket_stamp_basic",
+        "ticket": b64(ticket),
+        "message_id": b64(message_id),
+        "expected_stamp": b64(stamp),
+    })
+
+    # Another ticket stamp with different data
+    ticket2 = bytes([0xFF] * 16)
+    message_id2 = hashlib.sha256(b"another_message").digest()
+    stamp2 = hashlib.sha256(ticket2 + message_id2).digest()[:16]
+    vectors.append({
+        "name": "ticket_stamp_ff",
+        "ticket": b64(ticket2),
+        "message_id": b64(message_id2),
+        "expected_stamp": b64(stamp2),
+    })
+
+    return vectors
+
+
 def main():
     out_dir = os.path.join(os.path.dirname(__file__), "fixtures")
     os.makedirs(out_dir, exist_ok=True)
@@ -383,6 +528,18 @@ def main():
     with open(out_path, "w") as f:
         json.dump(peer_vectors, f, indent=2)
     print(f"Wrote {len(peer_vectors)} peer vectors to {out_path}")
+
+    announce_vectors = generate_announce_vectors()
+    out_path = os.path.join(out_dir, "announce_vectors.json")
+    with open(out_path, "w") as f:
+        json.dump(announce_vectors, f, indent=2)
+    print(f"Wrote {len(announce_vectors)} announce vectors to {out_path}")
+
+    ticket_vectors = generate_ticket_vectors()
+    out_path = os.path.join(out_dir, "ticket_vectors.json")
+    with open(out_path, "w") as f:
+        json.dump(ticket_vectors, f, indent=2)
+    print(f"Wrote {len(ticket_vectors)} ticket vectors to {out_path}")
 
 
 if __name__ == "__main__":

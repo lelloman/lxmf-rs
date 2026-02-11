@@ -1570,3 +1570,164 @@ fn test_storage_stamp_costs_roundtrip() {
 }
 
 // Peer tests are in lxmf/tests/peer_tests.rs since they require the lxmf crate.
+
+// ============================================================
+// Phase 7: Announce parsing tests
+// ============================================================
+
+#[derive(Debug, Deserialize)]
+struct AnnounceVector {
+    name: String,
+    #[serde(default)]
+    packed: Option<String>,
+    #[serde(default)]
+    display_name: Option<String>,
+    #[serde(default)]
+    stamp_cost: Option<u8>,
+    #[serde(default)]
+    node_timebase: Option<u64>,
+    #[serde(default)]
+    propagation_enabled: Option<bool>,
+    #[serde(default)]
+    propagation_transfer_limit: Option<u64>,
+    #[serde(default)]
+    propagation_sync_limit: Option<u64>,
+    #[serde(default)]
+    propagation_stamp_cost: Option<u8>,
+    #[serde(default)]
+    propagation_stamp_cost_flexibility: Option<u8>,
+    #[serde(default)]
+    peering_cost: Option<u8>,
+    #[serde(default)]
+    pn_name: Option<String>,
+    #[serde(default)]
+    valid: Option<bool>,
+}
+
+fn load_announce_vectors() -> Vec<AnnounceVector> {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../tests/fixtures/announce_vectors.json"
+    );
+    let data = fs::read_to_string(path).expect("Failed to read announce_vectors.json");
+    serde_json::from_str(&data).expect("Failed to parse announce_vectors.json")
+}
+
+fn find_announce_vector<'a>(vectors: &'a [AnnounceVector], name: &str) -> &'a AnnounceVector {
+    vectors
+        .iter()
+        .find(|v| v.name == name)
+        .unwrap_or_else(|| panic!("Announce vector '{}' not found", name))
+}
+
+use lxmf_core::announce;
+
+#[test]
+fn test_delivery_announce_v050() {
+    let vectors = load_announce_vectors();
+    let v = find_announce_vector(&vectors, "delivery_v050");
+    let data = b64(v.packed.as_ref().unwrap());
+
+    let name = announce::display_name_from_app_data(&data);
+    assert_eq!(name.as_deref(), Some("TestNode"));
+
+    let cost = announce::stamp_cost_from_app_data(&data);
+    assert_eq!(cost, Some(16));
+}
+
+#[test]
+fn test_delivery_announce_legacy() {
+    let vectors = load_announce_vectors();
+    let v = find_announce_vector(&vectors, "delivery_legacy");
+    let data = b64(v.packed.as_ref().unwrap());
+
+    let name = announce::display_name_from_app_data(&data);
+    assert_eq!(name.as_deref(), Some("LegacyNode"));
+
+    let cost = announce::stamp_cost_from_app_data(&data);
+    assert_eq!(cost, None);
+}
+
+#[test]
+fn test_delivery_announce_no_cost() {
+    let vectors = load_announce_vectors();
+    let v = find_announce_vector(&vectors, "delivery_no_cost");
+    let data = b64(v.packed.as_ref().unwrap());
+
+    let name = announce::display_name_from_app_data(&data);
+    assert_eq!(name.as_deref(), Some("NameOnly"));
+
+    let cost = announce::stamp_cost_from_app_data(&data);
+    assert_eq!(cost, None);
+}
+
+#[test]
+fn test_display_name_empty() {
+    let name = announce::display_name_from_app_data(&[]);
+    assert_eq!(name, None);
+}
+
+#[test]
+fn test_pn_announce_valid() {
+    let vectors = load_announce_vectors();
+    let v = find_announce_vector(&vectors, "pn_valid");
+    let data = b64(v.packed.as_ref().unwrap());
+
+    assert!(announce::pn_announce_data_is_valid(&data));
+
+    let parsed = announce::parse_pn_announce_data(&data).unwrap();
+    assert_eq!(parsed.node_timebase, 1700000000);
+    assert!(parsed.propagation_enabled);
+    assert_eq!(parsed.propagation_transfer_limit, 256);
+    assert_eq!(parsed.propagation_sync_limit, 10240);
+    assert_eq!(parsed.propagation_stamp_cost, 16);
+    assert_eq!(parsed.propagation_stamp_cost_flexibility, 3);
+    assert_eq!(parsed.peering_cost, 18);
+
+    let pn_name = announce::pn_name_from_app_data(&data);
+    assert_eq!(pn_name.as_deref(), Some("MyNode"));
+
+    let pn_cost = announce::pn_stamp_cost_from_app_data(&data);
+    assert_eq!(pn_cost, Some(16));
+}
+
+#[test]
+fn test_pn_announce_disabled() {
+    let vectors = load_announce_vectors();
+    let v = find_announce_vector(&vectors, "pn_disabled");
+    let data = b64(v.packed.as_ref().unwrap());
+
+    assert!(announce::pn_announce_data_is_valid(&data));
+    let parsed = announce::parse_pn_announce_data(&data).unwrap();
+    assert!(!parsed.propagation_enabled);
+}
+
+#[test]
+fn test_pn_announce_invalid_short() {
+    let vectors = load_announce_vectors();
+    let v = find_announce_vector(&vectors, "pn_invalid_short");
+    let data = b64(v.packed.as_ref().unwrap());
+
+    assert!(!announce::pn_announce_data_is_valid(&data));
+    assert!(announce::parse_pn_announce_data(&data).is_none());
+}
+
+#[test]
+fn test_pn_announce_invalid_types() {
+    let vectors = load_announce_vectors();
+    let v = find_announce_vector(&vectors, "pn_invalid_types");
+    let data = b64(v.packed.as_ref().unwrap());
+
+    assert!(!announce::pn_announce_data_is_valid(&data));
+}
+
+#[test]
+fn test_pn_announce_no_name() {
+    let vectors = load_announce_vectors();
+    let v = find_announce_vector(&vectors, "pn_no_name");
+    let data = b64(v.packed.as_ref().unwrap());
+
+    assert!(announce::pn_announce_data_is_valid(&data));
+    let pn_name = announce::pn_name_from_app_data(&data);
+    assert_eq!(pn_name, None);
+}

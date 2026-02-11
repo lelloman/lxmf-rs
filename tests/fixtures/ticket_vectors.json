@@ -1,0 +1,14 @@
+[
+  {
+    "name": "ticket_stamp_basic",
+    "ticket": "AAECAwQFBgcICQoLDA0ODw==",
+    "message_id": "O3SR3AFqwaCy4CNyQCyGH6+kWSlAh+fL4J9wTVgtkx8=",
+    "expected_stamp": "4NbW78LL8jvdEVMRnePTKw=="
+  },
+  {
+    "name": "ticket_stamp_ff",
+    "ticket": "/////////////////////w==",
+    "message_id": "dG+pPsalCpnhZShen9a6c/oWGwX+joP3SRyCEWf+h60=",
+    "expected_stamp": "9IfvO2Rqyvga8TyF43b5Gw=="
+  }
+]
