@@ -8,7 +8,7 @@ use lxmf_core::message;
 use rns_core::msgpack::{self, Value};
 use rns_core::types::{DestHash, IdentityHash, LinkId, PacketHash};
 use rns_crypto::identity::Identity;
-use rns_crypto::sha256::sha256;
+
 use rns_net::destination::{AnnouncedIdentity, Destination};
 use rns_net::driver::Callbacks;
 use rns_net::node::RnsNode;
@@ -159,6 +159,12 @@ pub struct LxmRouter {
     pub propagation_transfer_progress: f64,
     pub propagation_transfer_max_messages: Option<u32>,
 
+    // Identity cache (dest_hash → public_key) populated from announces.
+    // Used for signature verification in lxmf_delivery to avoid synchronous
+    // RPC calls to the driver thread (which would deadlock when called from
+    // a driver callback like on_local_delivery).
+    pub identity_cache: HashMap<[u8; 16], [u8; 64]>,
+
     // Node reference (set after start)
     node: Option<Arc<RnsNode>>,
 
@@ -221,6 +227,7 @@ impl LxmRouter {
             propagation_transfer_state: PropagationTransferState::Idle,
             propagation_transfer_progress: 0.0,
             propagation_transfer_max_messages: None,
+            identity_cache: HashMap::new(),
             node: None,
             display_name: None,
             delivery_stamp_cost: None,
@@ -253,15 +260,12 @@ impl LxmRouter {
         self.display_name = display_name;
 
         if let Some(node) = &self.node {
-            let sig_prv = delivery_identity.get_private_key().unwrap();
-            let sig_pub = delivery_identity.get_public_key().unwrap();
-            // Register as link destination to accept incoming links
-            let _ = node.register_link_destination(
-                dest_hash,
-                sig_prv[32..].try_into().unwrap(), // Ed25519 private key
-                sig_pub[32..].try_into().unwrap(), // Ed25519 public key
-            );
-            // Register destination for single packets
+            // Register destination for single packets (opportunistic delivery).
+            // NOTE: link destination registration is intentionally omitted here.
+            // Direct link delivery requires populating link_destinations in
+            // on_link_established, which is not yet implemented. Registering as
+            // a link destination causes rns-net to route ALL packets through the
+            // link manager, which silently drops non-link DATA packets.
             let _ = node.register_destination(dest_hash, 1); // SINGLE type
         }
     }
@@ -542,14 +546,15 @@ impl LxmRouter {
         transport_encryption: &str,
         method: DeliveryMethod,
     ) {
-        // Clone node for use in verify closure
-        let node = self.node.clone();
+        // Use local identity cache for signature verification. We must NOT
+        // call node.recall_identity() here because lxmf_delivery can be called
+        // from a driver callback (on_local_delivery), and recall_identity does
+        // a synchronous RPC to the driver thread — causing a self-deadlock.
+        let cache = self.identity_cache.clone();
         let verify_fn = |src_hash: &[u8; 16], sig: &[u8; 64], data: &[u8]| -> bool {
-            if let Some(ref node) = node {
-                if let Ok(Some(announced)) = node.recall_identity(&DestHash(*src_hash)) {
-                    let id = Identity::from_public_key(&announced.public_key);
-                    return id.verify(sig, data);
-                }
+            if let Some(public_key) = cache.get(src_hash) {
+                let id = Identity::from_public_key(public_key);
+                return id.verify(sig, data);
             }
             false
         };
@@ -761,6 +766,9 @@ impl Callbacks for LxmfCallbacks {
             }
         }
 
+        // Cache the public key for signature verification in lxmf_delivery
+        router.identity_cache.insert(announced.dest_hash.0, announced.public_key);
+
         // Extract stamp cost from delivery announces
         if let Some(ref app_data) = announced.app_data {
             if !app_data.is_empty() {
@@ -801,10 +809,27 @@ impl Callbacks for LxmfCallbacks {
         // Check if this is for our delivery destination
         if let Some(delivery_hash) = router.delivery_dest_hash {
             if dest_hash.0 == delivery_hash {
-                // Opportunistic delivery: prepend destination hash
-                let mut lxmf_bytes = Vec::with_capacity(DESTINATION_LENGTH + raw.len());
+                // Extract data payload from raw wire packet
+                let packet = match rns_core::packet::RawPacket::unpack(&raw) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        log::warn!("on_local_delivery: unpack failed: {}", e);
+                        return;
+                    }
+                };
+                // Decrypt the data payload (encrypted with our public key by sender)
+                let plaintext = match router.identity.decrypt(&packet.data) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        log::warn!("on_local_delivery: decrypt failed: {:?}", e);
+                        return;
+                    }
+                };
+                // Opportunistic delivery: prepend destination hash to decrypted payload
+                let mut lxmf_bytes =
+                    Vec::with_capacity(DESTINATION_LENGTH + plaintext.len());
                 lxmf_bytes.extend_from_slice(&dest_hash.0);
-                lxmf_bytes.extend_from_slice(&raw);
+                lxmf_bytes.extend_from_slice(&plaintext);
                 router.lxmf_delivery(
                     &lxmf_bytes,
                     true,
@@ -1011,20 +1036,9 @@ impl Callbacks for LxmfCallbacks {
 // ============================================================
 
 /// Compute a destination hash from app_name, aspects, and identity hash.
+/// Delegates to rns_core to ensure consistency with the network protocol.
 fn compute_dest_hash(app_name: &str, aspects: &[&str], identity_hash: &[u8; 16]) -> [u8; 16] {
-    let mut name = app_name.to_string();
-    for aspect in aspects {
-        name.push('.');
-        name.push_str(aspect);
-    }
-    let name_hash = sha256(name.as_bytes());
-    let mut material = Vec::with_capacity(32 + 16);
-    material.extend_from_slice(&name_hash);
-    material.extend_from_slice(identity_hash);
-    let full = sha256(&material);
-    let mut result = [0u8; 16];
-    result.copy_from_slice(&full[..16]);
-    result
+    rns_core::destination::destination_hash(app_name, aspects, Some(identity_hash))
 }
 
 /// Get current UNIX timestamp as f64.

@@ -14,7 +14,7 @@ use lxmf_core::constants::*;
 use lxmf_core::message;
 use rns_core::types::{DestHash, IdentityHash, LinkId, PacketHash};
 use rns_crypto::identity::Identity;
-use rns_net::destination::AnnouncedIdentity;
+use rns_net::destination::{AnnouncedIdentity, Destination};
 use rns_net::driver::Callbacks;
 use rns_net::interface::tcp::TcpClientConfig;
 use rns_net::interface::tcp_server::TcpServerConfig;
@@ -703,15 +703,13 @@ fn test_propagation_node_announce_received() {
 // Test C: Opportunistic delivery
 // ============================================================
 
-/// Tests the full LXMF message flow:
-/// 1. Alice's outbound processing: pack, queue, and send via router.jobs()
-/// 2. Bob's inbound processing: lxmf_delivery() → unpack → delivery callback
+/// Tests end-to-end opportunistic LXMF delivery through a real network:
 ///
-/// These are tested as an integrated flow. The actual network transport
-/// (rns-net packet encryption/decryption) is rns-net's responsibility
-/// and is tested separately there. Here we validate that the LXMF router
-/// correctly processes outbound messages and that inbound delivery works
-/// end-to-end through the LxmRouter.
+/// Alice sends a message to Bob via send_packet. The encrypted SINGLE DATA
+/// packet travels through the transport node to Bob. Bob's on_local_delivery
+/// callback unpacks the wire format, decrypts with the delivery identity,
+/// verifies the signature using the cached public key from Alice's announce,
+/// and fires the delivery callback.
 #[test]
 fn test_opportunistic_delivery() {
     let peers = setup_two_lxmf_peers_announced(None, None);
@@ -730,64 +728,31 @@ fn test_opportunistic_delivery() {
         Some(peers.alice.identity.hash()),
     );
 
-    // --- Outbound path: verify Alice's router correctly queues and processes ---
-    {
-        let mut r = peers.alice.router.lock().unwrap();
-        let msg = OutboundMessage {
-            destination_hash: peers.bob.delivery_dest_hash,
-            source_hash: alice_src_hash,
-            packed: pack_result.packed.clone(),
-            message_hash: pack_result.message_hash,
-            method: DeliveryMethod::Opportunistic,
-            state: MessageState::Outbound,
-            representation: Representation::Unknown,
-            attempts: 0,
-            last_attempt: 0.0,
-            stamp: None,
-            stamp_cost: None,
-            propagation_packed: None,
-            propagation_stamp: None,
-            transient_id: None,
-            delivery_callback: None,
-            failed_callback: None,
-            progress_callback: None,
-            link_id: None,
-            packet_hash: None,
-        };
-        r.handle_outbound(msg);
+    // --- Send via real network ---
+    // Perform node RPCs outside the router lock. Calling jobs() while
+    // holding the lock deadlocks because process_outbound() does
+    // synchronous RPCs to the driver, which may be mid-callback trying
+    // to acquire the same router lock.
+    assert!(
+        peers.alice.node.has_path(&DestHash(peers.bob.delivery_dest_hash)).unwrap(),
+        "Alice should have Bob's path from the announce exchange"
+    );
 
-        assert_eq!(r.outbound.len(), 1, "Message should be queued");
-        assert_eq!(r.outbound[0].state, MessageState::Outbound);
+    let announced = peers.alice.node
+        .recall_identity(&DestHash(peers.bob.delivery_dest_hash))
+        .unwrap()
+        .expect("Alice should have Bob's announced identity");
 
-        // Process outbound — router should attempt delivery via send_packet
-        r.jobs();
+    let dest = Destination::single_out(APP_NAME, &["delivery"], &announced);
+    let lxmf_payload = &pack_result.packed[DESTINATION_LENGTH..];
+    let _packet_hash = peers.alice.node
+        .send_packet(&dest, lxmf_payload)
+        .expect("send_packet should succeed");
 
-        // After jobs(), the message should have been attempted
-        assert!(
-            r.outbound[0].attempts >= 1,
-            "Router should have attempted delivery"
-        );
-        // If path exists, state transitions to Sent (packet dispatched)
-        // If no path, state stays Outbound with a path request queued
-        // Either outcome validates the outbound processing logic
-    }
-
-    // --- Inbound path: deliver message directly into Bob's router ---
-    // This validates the full lxmf_delivery → unpack → callback chain.
-    // In production, rns-net handles packet decryption before calling
-    // on_local_delivery, which then calls lxmf_delivery with the plaintext.
-    {
-        let mut r = peers.bob.router.lock().unwrap();
-        r.lxmf_delivery(
-            &pack_result.packed,
-            true,
-            ENCRYPTION_DESCRIPTION_EC,
-            DeliveryMethod::Opportunistic,
-        );
-    }
-
-    // Bob should receive the message via delivery callback
-    let event = wait_for_message_delivery(&peers.bob.rx, Duration::from_secs(5));
+    // --- Bob receives via real network transport ---
+    // The packet travels: Alice → transport node → Bob.
+    // Bob's on_local_delivery unpacks wire format → decrypts → delivers.
+    let event = wait_for_message_delivery(&peers.bob.rx, DEFAULT_TIMEOUT);
     assert!(event.is_some(), "Bob should receive the delivered message");
 
     if let Some(LxmfTestEvent::MessageDelivered {
