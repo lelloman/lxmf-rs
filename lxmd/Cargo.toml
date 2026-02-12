@@ -4,6 +4,11 @@ description = "LXMF propagation daemon"
 version.workspace = true
 edition.workspace = true
 
+[features]
+default = ["init-logger"]
+init-logger = ["dep:env_logger"]
+android-logger = ["dep:android_logger"]
+
 [dependencies]
 lxmf.workspace = true
 lxmf-core.workspace = true
@@ -11,4 +16,7 @@ rns-net.workspace = true
 rns-core = { workspace = true, features = ["std"] }
 rns-crypto = { workspace = true, features = ["std"] }
 log.workspace = true
-env_logger = "0.11"
+env_logger = { version = "0.11", optional = true }
+
+[target.'cfg(target_os = "android")'.dependencies]
+android_logger = { version = "0.13", optional = true }

@@ -1279,6 +1279,7 @@ fn main() {
     // Determine log level
     let base_level = config.loglevel as i8;
     let adjusted = (base_level + args.verbose as i8 - args.quiet as i8).clamp(0, 7);
+    #[allow(unused_variables)]
     let log_level = match adjusted {
         0 => log::LevelFilter::Error,
         1 => log::LevelFilter::Error,
@@ -1290,9 +1291,36 @@ fn main() {
         _ => log::LevelFilter::Trace,
     };
 
-    let mut logger = env_logger::Builder::new();
-    logger.filter_level(log_level);
-    let _ = logger.try_init();
+    // Initialize logger based on feature configuration
+    #[cfg(all(feature = "android-logger", target_os = "android"))]
+    {
+        // Use Android logger when feature is enabled and platform is Android
+        android_logger::init_once(
+            android_logger::Config::default()
+                .with_min_level(log_level.to_level().unwrap_or(log::Level::Info))
+                .with_tag("lxmd")
+        );
+    }
+
+    #[cfg(all(feature = "init-logger", not(all(feature = "android-logger", target_os = "android"))))]
+    {
+        // Use env_logger when:
+        // - init-logger feature is enabled AND
+        // - NOT (both android-logger feature is enabled AND platform is Android)
+        let mut logger = env_logger::Builder::new();
+        logger.filter_level(log_level);
+        // try_init() returns SetLoggerError if a logger is already set,
+        // which is fine - we just want to ensure one exists
+        let _ = logger.try_init();
+    }
+
+    #[cfg(not(any(feature = "init-logger", feature = "android-logger")))]
+    {
+        // When both logger features are disabled, user must provide their own logger.
+        // Note: We cannot reliably detect at runtime if a logger has been set,
+        // so we assume the user has properly configured logging before calling lxmd.
+        // The log macros will silently do nothing if no logger is configured.
+    }
 
     // Remote control operations
     if args.status || args.peers || args.sync.is_some() || args.unpeer.is_some() {
