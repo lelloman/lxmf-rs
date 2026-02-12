@@ -60,8 +60,8 @@ impl Callbacks for AppCallbacks {
         self.inner.on_local_delivery(dest_hash, raw, packet_hash);
     }
 
-    fn on_link_established(&mut self, link_id: LinkId, rtt: f64, is_initiator: bool) {
-        self.inner.on_link_established(link_id, rtt, is_initiator);
+    fn on_link_established(&mut self, link_id: LinkId, dest_hash: DestHash, rtt: f64, is_initiator: bool) {
+        self.inner.on_link_established(link_id, dest_hash, rtt, is_initiator);
     }
 
     fn on_link_closed(

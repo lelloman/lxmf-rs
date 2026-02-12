@@ -260,12 +260,17 @@ impl LxmRouter {
         self.display_name = display_name;
 
         if let Some(node) = &self.node {
-            // Register destination for single packets (opportunistic delivery).
-            // NOTE: link destination registration is intentionally omitted here.
-            // Direct link delivery requires populating link_destinations in
-            // on_link_established, which is not yet implemented. Registering as
-            // a link destination causes rns-net to route ALL packets through the
-            // link manager, which silently drops non-link DATA packets.
+            // Register as link destination so we can accept incoming LINKREQUEST.
+            // Also register as SINGLE destination for opportunistic delivery.
+            // When both are registered, rns-net routes link packets through
+            // link_manager and falls back to on_local_delivery for non-link DATA.
+            let sig_prv = delivery_identity.get_private_key().unwrap();
+            let sig_pub = delivery_identity.get_public_key().unwrap();
+            let _ = node.register_link_destination(
+                dest_hash,
+                sig_prv[32..].try_into().unwrap(),
+                sig_pub[32..].try_into().unwrap(),
+            );
             let _ = node.register_destination(dest_hash, 1); // SINGLE type
         }
     }
@@ -843,6 +848,7 @@ impl Callbacks for LxmfCallbacks {
     fn on_link_established(
         &mut self,
         link_id: LinkId,
+        dest_hash: DestHash,
         _rtt: f64,
         is_initiator: bool,
     ) {
@@ -861,7 +867,9 @@ impl Callbacks for LxmfCallbacks {
                 }
             }
         } else {
-            // Incoming link - set up for delivery
+            // Incoming link — map link_id to its destination for delivery routing
+            router.link_destinations.insert(link_id.0, dest_hash.0);
+
             if let Some(node) = &router.node {
                 // Accept resources on this link
                 let _ = node.set_resource_strategy(link_id.0, 1); // AcceptAll

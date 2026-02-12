@@ -96,13 +96,13 @@ impl Callbacks for LxmfTestCallbacks {
         self.inner.on_local_delivery(dest_hash, raw, packet_hash);
     }
 
-    fn on_link_established(&mut self, link_id: LinkId, rtt: f64, is_initiator: bool) {
+    fn on_link_established(&mut self, link_id: LinkId, dest_hash: DestHash, rtt: f64, is_initiator: bool) {
         let _ = self.tx.send(LxmfTestEvent::LinkEstablished {
             link_id: link_id.0,
             rtt,
             is_initiator,
         });
-        self.inner.on_link_established(link_id, rtt, is_initiator);
+        self.inner.on_link_established(link_id, dest_hash, rtt, is_initiator);
     }
 
     fn on_link_closed(
@@ -895,14 +895,10 @@ fn test_stamp_cost_propagation_via_announce() {
 }
 
 // ============================================================
-// Test F: Direct delivery via link (ignored — documents gap)
+// Test F: Direct delivery via link
 // ============================================================
 
 #[test]
-#[ignore = "LxmfCallbacks::on_link_established responder path never populates \
-            link_destinations, so on_link_data/on_resource_received cannot identify \
-            delivery links. See router.rs on_link_established (is_initiator=false). \
-            Fix in follow-up."]
 fn test_direct_delivery_via_link() {
     let peers = setup_two_lxmf_peers_announced(None, None);
 
@@ -944,7 +940,12 @@ fn test_direct_delivery_via_link() {
             packet_hash: None,
         };
         r.handle_outbound(msg);
-        r.jobs();
+    }
+
+    // Trigger outbound processing outside the router lock to avoid
+    // deadlock (jobs → process_outbound → node RPCs).
+    {
+        peers.alice.router.lock().unwrap().jobs();
     }
 
     // Bob should receive via direct link delivery

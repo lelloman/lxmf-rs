@@ -1029,7 +1029,7 @@ impl Callbacks for ControlCallbacks {
 
     fn on_local_delivery(&mut self, _dest_hash: DestHash, _raw: Vec<u8>, _packet_hash: PacketHash) {}
 
-    fn on_link_established(&mut self, link_id: LinkId, _rtt: f64, is_initiator: bool) {
+    fn on_link_established(&mut self, link_id: LinkId, _dest_hash: DestHash, _rtt: f64, is_initiator: bool) {
         if is_initiator {
             let _ = self.tx.send(ControlEvent::LinkEstablished(link_id.0));
         }
