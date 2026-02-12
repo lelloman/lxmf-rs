@@ -13,6 +13,7 @@ use rns_net::destination::{AnnouncedIdentity, Destination};
 use rns_net::driver::Callbacks;
 use rns_net::node::RnsNode;
 
+use crate::peer::LxmPeer;
 use crate::storage::{self, StoragePaths};
 
 /// Callback function types for the router.
@@ -150,6 +151,9 @@ pub struct LxmRouter {
     pub prioritised_list: Vec<[u8; 16]>,
     pub control_allowed_list: Vec<[u8; 16]>,
 
+    // Peers
+    pub peers: HashMap<[u8; 16], LxmPeer>,
+
     // Propagation transfer state (client-side)
     pub propagation_transfer_state: PropagationTransferState,
     pub propagation_transfer_progress: f64,
@@ -180,6 +184,15 @@ impl LxmRouter {
             storage::load_transient_ids(&paths.locally_processed);
         let outbound_stamp_costs = storage::load_stamp_costs(&paths.outbound_stamp_costs);
 
+        // Load peers from storage
+        let mut peers = HashMap::new();
+        for peer_val in storage::load_peers(&paths.peers) {
+            let peer_bytes = msgpack::pack(&peer_val);
+            if let Some(peer) = LxmPeer::from_bytes(&peer_bytes) {
+                peers.insert(peer.destination_hash, peer);
+            }
+        }
+
         Self {
             identity,
             propagation_dest_hash,
@@ -204,6 +217,7 @@ impl LxmRouter {
             ignored_list: Vec::new(),
             prioritised_list: Vec::new(),
             control_allowed_list: Vec::new(),
+            peers,
             propagation_transfer_state: PropagationTransferState::Idle,
             propagation_transfer_progress: 0.0,
             propagation_transfer_max_messages: None,
@@ -373,9 +387,9 @@ impl LxmRouter {
             self.clean_transient_id_caches();
         }
 
-        // Message store cleanup (every 120 cycles = 8 min)
+        // Message store cleanup and peer save (every 120 cycles = 8 min)
         if self.processing_count % JOB_STORE_INTERVAL == 0 {
-            // Implemented in propagation module
+            self.save_peers();
         }
     }
 
@@ -632,6 +646,32 @@ impl LxmRouter {
         None
     }
 
+    /// Trigger sync with a specific peer by resetting its next sync attempt to now.
+    pub fn sync_peer(&mut self, dest_hash: &[u8; 16]) -> Result<(), PeerError> {
+        let peer = self.peers.get_mut(dest_hash).ok_or(PeerError::NotFound)?;
+        peer.next_sync_attempt = 0.0;
+        Ok(())
+    }
+
+    /// Remove a peer from the peer list.
+    pub fn unpeer(&mut self, dest_hash: &[u8; 16]) -> Result<(), PeerError> {
+        self.peers.remove(dest_hash).ok_or(PeerError::NotFound)?;
+        Ok(())
+    }
+
+    /// Persist peers to storage.
+    fn save_peers(&self) {
+        let peer_values: Vec<Value> = self
+            .peers
+            .values()
+            .filter_map(|peer| {
+                let bytes = peer.to_bytes();
+                msgpack::unpack_exact(&bytes).ok()
+            })
+            .collect();
+        let _ = storage::save_peers(&self.paths.peers, &peer_values);
+    }
+
     /// Exit handler: save state and tear down connections.
     pub fn exit_handler(&mut self) {
         self.exit_handler_running = true;
@@ -662,6 +702,12 @@ impl LxmRouter {
             &self.paths.outbound_stamp_costs,
             &self.outbound_stamp_costs,
         );
+
+        // Save peers
+        self.save_peers();
+
+        // Drop node reference so the daemon can reclaim ownership for full shutdown.
+        self.node = None;
     }
 }
 

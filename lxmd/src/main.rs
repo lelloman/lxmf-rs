@@ -2,10 +2,17 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{mpsc, Arc, Mutex};
 use std::{env, fs, thread, time};
 
+use lxmf::router::{LxmRouter, LxmfCallbacks, RouterConfig};
 use lxmf_core::constants::*;
+use rns_core::destination::destination_hash;
+use rns_core::msgpack::{self, Value};
+use rns_core::types::{DestHash, LinkId, PacketHash};
+use rns_crypto::identity::Identity;
+use rns_net::driver::Callbacks;
+use rns_net::{Event, RnsNode};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -447,6 +454,19 @@ fn load_or_create_identity(path: &Path) -> rns_crypto::identity::Identity {
     id
 }
 
+
+fn load_identity(path: &Path) -> Option<rns_crypto::identity::Identity> {
+    use rns_crypto::identity::Identity;
+
+    let data = fs::read(path).ok()?;
+    if data.len() != 64 {
+        return None;
+    }
+
+    let mut key = [0u8; 64];
+    key.copy_from_slice(&data);
+    Some(Identity::from_private_key(&key))
+}
 /// Load hex destination hashes from a file (one per line).
 fn load_hash_file(path: &Path) -> Vec<[u8; 16]> {
     let content = match fs::read_to_string(path) {
@@ -741,10 +761,472 @@ fn display_peers(stats: &rns_core::msgpack::Value) {
         }
     }
 }
+fn build_router_config(config: &LxmdConfig, paths: &LxmdPaths) -> RouterConfig {
+    RouterConfig {
+        storagepath: paths.storagepath.clone(),
+        autopeer: config.autopeer,
+        autopeer_maxdepth: config.autopeer_maxdepth.unwrap_or(AUTOPEER_MAXDEPTH),
+        propagation_limit: config.propagation_message_max_accepted_size as u32,
+        delivery_limit: config.delivery_transfer_max_accepted_size as u32,
+        sync_limit: config.propagation_sync_max_accepted_size as u32,
+        enforce_ratchets: false,
+        enforce_stamps: false,
+        static_peers: config.static_peers.clone(),
+        max_peers: config.max_peers.unwrap_or(MAX_PEERS),
+        from_static_only: config.from_static_only,
+        sync_strategy: DEFAULT_SYNC_STRATEGY,
+        propagation_cost: config.propagation_stamp_cost_target,
+        propagation_cost_flexibility: config.propagation_stamp_cost_flexibility,
+        peering_cost: config.peering_cost,
+        max_peering_cost: config.remote_peering_cost_max,
+        name: config.node_name.clone(),
+    }
+}
 
-// ============================================================
-// Main daemon
-// ============================================================
+fn messagestore_stats(path: &Path) -> (u64, u64) {
+    let mut count = 0u64;
+    let mut bytes = 0u64;
+
+    let entries = match fs::read_dir(path) {
+        Ok(entries) => entries,
+        Err(_) => return (0, 0),
+    };
+
+    for entry in entries.flatten() {
+        let file_type = match entry.file_type() {
+            Ok(ft) => ft,
+            Err(_) => continue,
+        };
+        if !file_type.is_file() {
+            continue;
+        }
+        count += 1;
+        if let Ok(metadata) = entry.metadata() {
+            bytes = bytes.saturating_add(metadata.len());
+        }
+    }
+
+    (count, bytes)
+}
+
+fn build_status_payload(
+    router: &LxmRouter,
+    start_time: f64,
+    message_store_limit_bytes: u64,
+) -> Value {
+    let now = lxmf::router::now_timestamp();
+    let (store_count, store_bytes) = messagestore_stats(&router.paths.messagestore);
+    let persisted_stats = lxmf::storage::load_node_stats(&router.paths.node_stats);
+    let persisted_peers = lxmf::storage::load_peers(&router.paths.peers);
+
+    let mut peer_stats = Vec::new();
+    for peer in persisted_peers {
+        let map = match peer.as_map() {
+            Some(m) => m,
+            None => continue,
+        };
+
+        let mut destination = None;
+        for (k, v) in map {
+            if k.as_str() == Some("destination_hash") || k.as_str() == Some("destination") {
+                if let Some(bin) = v.as_bin() {
+                    if bin.len() == 16 {
+                        destination = Some(bin.to_vec());
+                    }
+                } else if let Some(hex) = v.as_str() {
+                    if let Some(parsed) = parse_hex_hash(hex) {
+                        destination = Some(parsed.to_vec());
+                    }
+                }
+            }
+        }
+
+        if let Some(dest) = destination {
+            peer_stats.push((Value::Bin(dest), Value::Map(map.to_vec())));
+        }
+    }
+    let total_peers = peer_stats.len() as u64;
+
+    let client_received = *persisted_stats
+        .get("client_propagation_messages_received")
+        .unwrap_or(&0);
+    let client_served = *persisted_stats
+        .get("client_propagation_messages_served")
+        .unwrap_or(&0);
+    let unpeered_incoming = *persisted_stats
+        .get("unpeered_propagation_incoming")
+        .unwrap_or(&0);
+    let unpeered_rx_bytes = *persisted_stats
+        .get("unpeered_propagation_rx_bytes")
+        .unwrap_or(&0);
+
+    Value::Map(vec![
+        (
+            Value::Str("identity_hash".to_string()),
+            Value::Bin(router.identity.hash().to_vec()),
+        ),
+        (
+            Value::Str("destination_hash".to_string()),
+            Value::Bin(router.propagation_dest_hash.to_vec()),
+        ),
+        (
+            Value::Str("uptime".to_string()),
+            Value::Float(now - start_time),
+        ),
+        (
+            Value::Str("delivery_limit".to_string()),
+            Value::UInt(router.config.delivery_limit as u64),
+        ),
+        (
+            Value::Str("propagation_limit".to_string()),
+            Value::UInt(router.config.propagation_limit as u64),
+        ),
+        (
+            Value::Str("sync_limit".to_string()),
+            Value::UInt(router.config.sync_limit as u64),
+        ),
+        (
+            Value::Str("target_stamp_cost".to_string()),
+            Value::UInt(router.config.propagation_cost as u64),
+        ),
+        (
+            Value::Str("stamp_cost_flexibility".to_string()),
+            Value::UInt(router.config.propagation_cost_flexibility as u64),
+        ),
+        (
+            Value::Str("peering_cost".to_string()),
+            Value::UInt(router.config.peering_cost as u64),
+        ),
+        (
+            Value::Str("max_peering_cost".to_string()),
+            Value::UInt(router.config.max_peering_cost as u64),
+        ),
+        (
+            Value::Str("messagestore".to_string()),
+            Value::Map(vec![
+                (Value::Str("count".to_string()), Value::UInt(store_count)),
+                (Value::Str("bytes".to_string()), Value::UInt(store_bytes)),
+                (
+                    Value::Str("limit".to_string()),
+                    Value::UInt(message_store_limit_bytes),
+                ),
+            ]),
+        ),
+        (
+            Value::Str("clients".to_string()),
+            Value::Map(vec![
+                (
+                    Value::Str("client_propagation_messages_received".to_string()),
+                    Value::UInt(client_received),
+                ),
+                (
+                    Value::Str("client_propagation_messages_served".to_string()),
+                    Value::UInt(client_served),
+                ),
+            ]),
+        ),
+        (
+            Value::Str("unpeered_propagation_incoming".to_string()),
+            Value::UInt(unpeered_incoming),
+        ),
+        (
+            Value::Str("unpeered_propagation_rx_bytes".to_string()),
+            Value::UInt(unpeered_rx_bytes),
+        ),
+        (Value::Str("total_peers".to_string()), Value::UInt(total_peers)),
+        (
+            Value::Str("max_peers".to_string()),
+            Value::UInt(router.config.max_peers as u64),
+        ),
+        (Value::Str("peers".to_string()), Value::Map(peer_stats)),
+    ])
+}
+
+fn register_control_handlers(
+    node: &Arc<RnsNode>,
+    router: Arc<Mutex<LxmRouter>>,
+    config: &LxmdConfig,
+    start_time: f64,
+) {
+    let allowed = if config.auth_required {
+        Some(config.control_allowed.clone())
+    } else {
+        None
+    };
+    let message_store_limit_bytes = (config.message_storage_limit * 1_000_000.0) as u64;
+
+    let status_router = router.clone();
+    let _ = node.register_request_handler(
+        "lxmf.propagation.status",
+        allowed.clone(),
+        move |_remote, _path, _data, _auth| {
+            let payload = {
+                let router = status_router.lock().unwrap();
+                build_status_payload(&router, start_time, message_store_limit_bytes)
+            };
+            Some(msgpack::pack(&payload))
+        },
+    );
+
+    let sync_router = router.clone();
+    let _ = node.register_request_handler(
+        "lxmf.propagation.sync",
+        allowed.clone(),
+        move |_remote, _path, data, _auth| {
+            if data.len() != 16 {
+                return Some(vec![lxmf_core::constants::PeerError::InvalidData as u8]);
+            }
+            let mut peer_hash = [0u8; 16];
+            peer_hash.copy_from_slice(&data);
+            let mut r = sync_router.lock().unwrap();
+            match r.sync_peer(&peer_hash) {
+                Ok(()) => Some(msgpack::pack(&Value::Bool(true))),
+                Err(e) => Some(vec![e as u8]),
+            }
+        },
+    );
+
+    let unpeer_router = router.clone();
+    let _ = node.register_request_handler(
+        "lxmf.propagation.unpeer",
+        allowed,
+        move |_remote, _path, data, _auth| {
+            if data.len() != 16 {
+                return Some(vec![lxmf_core::constants::PeerError::InvalidData as u8]);
+            }
+            let mut peer_hash = [0u8; 16];
+            peer_hash.copy_from_slice(&data);
+            let mut r = unpeer_router.lock().unwrap();
+            match r.unpeer(&peer_hash) {
+                Ok(()) => Some(msgpack::pack(&Value::Bool(true))),
+                Err(e) => Some(vec![e as u8]),
+            }
+        },
+    );
+}
+
+
+enum ControlAction {
+    Status,
+    Peers,
+    Sync([u8; 16]),
+    Unpeer([u8; 16]),
+}
+
+enum ControlEvent {
+    LinkEstablished([u8; 16]),
+    Response(Vec<u8>),
+}
+
+struct ControlCallbacks {
+    tx: mpsc::Sender<ControlEvent>,
+}
+
+impl Callbacks for ControlCallbacks {
+    fn on_announce(&mut self, _announced: rns_net::destination::AnnouncedIdentity) {}
+
+    fn on_path_updated(&mut self, _dest_hash: DestHash, _hops: u8) {}
+
+    fn on_local_delivery(&mut self, _dest_hash: DestHash, _raw: Vec<u8>, _packet_hash: PacketHash) {}
+
+    fn on_link_established(&mut self, link_id: LinkId, _rtt: f64, is_initiator: bool) {
+        if is_initiator {
+            let _ = self.tx.send(ControlEvent::LinkEstablished(link_id.0));
+        }
+    }
+
+    fn on_response(&mut self, _link_id: LinkId, _request_id: [u8; 16], data: Vec<u8>) {
+        let _ = self.tx.send(ControlEvent::Response(data));
+    }
+}
+
+fn parse_peer_error_response(response: &[u8]) -> Option<lxmf_core::constants::PeerError> {
+    if response.len() == 1 {
+        lxmf_core::constants::PeerError::from_u8(response[0])
+    } else {
+        None
+    }
+}
+
+fn resolve_remote_control_dest(args: &Args, paths: &LxmdPaths) -> Result<[u8; 16], String> {
+    if let Some(ref remote) = args.remote {
+        return parse_hex_hash(remote)
+            .ok_or_else(|| "Invalid --remote hash (expected 32 hex characters)".to_string());
+    }
+
+    let local_identity = load_identity(&paths.identitypath).ok_or_else(|| {
+        "No local daemon identity found; provide --remote with a destination hash".to_string()
+    })?;
+
+    Ok(destination_hash(
+        APP_NAME,
+        &["propagation", "control"],
+        Some(local_identity.hash()),
+    ))
+}
+
+fn run_remote_control_operation(args: &Args, paths: &LxmdPaths) -> Result<(), String> {
+    let action = if args.status {
+        ControlAction::Status
+    } else if args.peers {
+        ControlAction::Peers
+    } else if let Some(ref peer) = args.sync {
+        let peer_hash = parse_hex_hash(peer)
+            .ok_or_else(|| "Invalid --sync hash (expected 32 hex characters)".to_string())?;
+        ControlAction::Sync(peer_hash)
+    } else if let Some(ref peer) = args.unpeer {
+        let peer_hash = parse_hex_hash(peer)
+            .ok_or_else(|| "Invalid --break hash (expected 32 hex characters)".to_string())?;
+        ControlAction::Unpeer(peer_hash)
+    } else {
+        return Err("No remote operation selected".to_string());
+    };
+
+    let control_dest = resolve_remote_control_dest(args, paths)?;
+    let timeout_secs = args.timeout.unwrap_or(15.0).max(1.0);
+    let timeout = time::Duration::from_secs_f64(timeout_secs);
+
+    let control_identity = if let Some(ref identity_path) = args.identity {
+        load_or_create_identity(Path::new(identity_path))
+    } else {
+        load_or_create_identity(&paths.identitypath)
+    };
+
+    let (tx, rx) = mpsc::channel();
+    let callbacks = ControlCallbacks { tx };
+
+    let node = RnsNode::from_config(
+        args.rnsconfig.as_deref().map(Path::new),
+        Box::new(callbacks),
+    )
+    .map_err(|e| format!("Failed to start RNS node: {e}"))?;
+
+    node.request_path(&DestHash(control_dest))
+        .map_err(|_| "Failed to request path".to_string())?;
+
+    let deadline = time::Instant::now() + timeout;
+    while time::Instant::now() < deadline {
+        if node.has_path(&DestHash(control_dest)).unwrap_or(false) {
+            break;
+        }
+        thread::sleep(time::Duration::from_millis(200));
+    }
+
+    if !node.has_path(&DestHash(control_dest)).unwrap_or(false) {
+        node.shutdown();
+        return Err("Timed out waiting for path to control destination".to_string());
+    }
+
+    let announced = node
+        .recall_identity(&DestHash(control_dest))
+        .map_err(|_| "Failed to recall control destination identity".to_string())?
+        .ok_or_else(|| "No identity known for control destination".to_string())?;
+
+    let sig_pub: [u8; 32] = announced.public_key[32..]
+        .try_into()
+        .map_err(|_| "Invalid control destination public key".to_string())?;
+
+    let link_id = node
+        .create_link(control_dest, sig_pub)
+        .map_err(|_| "Failed to create control link".to_string())?;
+
+    let mut link_ready = false;
+    while !link_ready {
+        let now = time::Instant::now();
+        if now >= deadline {
+            node.shutdown();
+            return Err("Timed out waiting for control link establishment".to_string());
+        }
+
+        let remaining = deadline - now;
+        match rx.recv_timeout(remaining) {
+            Ok(ControlEvent::LinkEstablished(established)) if established == link_id => {
+                link_ready = true;
+            }
+            Ok(_) => {}
+            Err(_) => {
+                node.shutdown();
+                return Err("Timed out waiting for control link establishment".to_string());
+            }
+        }
+    }
+
+    let identity_prv = control_identity
+        .get_private_key()
+        .ok_or_else(|| "Control identity is missing private key".to_string())?;
+    node.identify_on_link(link_id, identity_prv)
+        .map_err(|_| "Failed to identify on control link".to_string())?;
+
+    let (request_path, payload) = match action {
+        ControlAction::Status | ControlAction::Peers => ("lxmf.propagation.status", Vec::new()),
+        ControlAction::Sync(peer_hash) => ("lxmf.propagation.sync", peer_hash.to_vec()),
+        ControlAction::Unpeer(peer_hash) => ("lxmf.propagation.unpeer", peer_hash.to_vec()),
+    };
+
+    node.send_request(link_id, request_path, &payload)
+        .map_err(|_| "Failed to send control request".to_string())?;
+
+    let response = loop {
+        let now = time::Instant::now();
+        if now >= deadline {
+            let _ = node.teardown_link(link_id);
+            node.shutdown();
+            return Err("Timed out waiting for control response".to_string());
+        }
+
+        let remaining = deadline - now;
+        match rx.recv_timeout(remaining) {
+            Ok(ControlEvent::Response(data)) => break data,
+            Ok(_) => {}
+            Err(_) => {
+                let _ = node.teardown_link(link_id);
+                node.shutdown();
+                return Err("Timed out waiting for control response".to_string());
+            }
+        }
+    };
+
+    match action {
+        ControlAction::Status => {
+            let value = msgpack::unpack_exact(&response)
+                .map_err(|_| "Invalid status response".to_string())?;
+            display_status(&value);
+        }
+        ControlAction::Peers => {
+            let value = msgpack::unpack_exact(&response)
+                .map_err(|_| "Invalid peers response".to_string())?;
+            display_peers(&value);
+        }
+        ControlAction::Sync(_) => {
+            if let Some(code) = parse_peer_error_response(&response) {
+                return Err(format!("Sync request rejected: {:?}", code));
+            }
+            let value = msgpack::unpack_exact(&response)
+                .map_err(|_| "Invalid sync response".to_string())?;
+            if value.as_bool() == Some(true) {
+                println!("Sync request sent");
+            } else {
+                return Err("Sync request failed".to_string());
+            }
+        }
+        ControlAction::Unpeer(_) => {
+            if let Some(code) = parse_peer_error_response(&response) {
+                return Err(format!("Unpeer request rejected: {:?}", code));
+            }
+            let value = msgpack::unpack_exact(&response)
+                .map_err(|_| "Invalid break response".to_string())?;
+            if value.as_bool() == Some(true) {
+                println!("Unpeer request sent");
+            } else {
+                return Err("Unpeer request failed".to_string());
+            }
+        }
+    }
+
+    let _ = node.teardown_link(link_id);
+    node.shutdown();
+    Ok(())
+}
 
 fn main() {
     let args = parse_args();
@@ -752,23 +1234,6 @@ fn main() {
     if args.exampleconfig {
         print!("{}", EXAMPLE_CONFIG);
         return;
-    }
-
-    // Remote control operations
-    if args.status || args.peers {
-        eprintln!("Remote status/peers query not yet implemented");
-        eprintln!("This requires an active RNS link to the control destination");
-        process::exit(1);
-    }
-
-    if args.sync.is_some() {
-        eprintln!("Remote sync request not yet implemented");
-        process::exit(1);
-    }
-
-    if args.unpeer.is_some() {
-        eprintln!("Remote unpeer request not yet implemented");
-        process::exit(1);
     }
 
     // Setup paths and config
@@ -801,10 +1266,6 @@ fn main() {
     } else {
         // Write default config
         let _ = fs::write(&paths.configpath, EXAMPLE_CONFIG);
-        log::info!(
-            "Created default config at {}",
-            paths.configpath.display()
-        );
     }
 
     // Apply CLI overrides after config file (CLI takes precedence)
@@ -812,7 +1273,7 @@ fn main() {
         config.enable_node = true;
     }
     if args.on_inbound.is_some() {
-        config.on_inbound = args.on_inbound;
+        config.on_inbound = args.on_inbound.clone();
     }
 
     // Determine log level
@@ -828,8 +1289,21 @@ fn main() {
         6 => log::LevelFilter::Debug,
         _ => log::LevelFilter::Trace,
     };
-    // Simple stderr logger
-    log::set_max_level(log_level);
+
+    let mut logger = env_logger::Builder::new();
+    logger.filter_level(log_level);
+    let _ = logger.try_init();
+
+    // Remote control operations
+    if args.status || args.peers || args.sync.is_some() || args.unpeer.is_some() {
+        match run_remote_control_operation(&args, &paths) {
+            Ok(()) => process::exit(0),
+            Err(e) => {
+                eprintln!("{}", e);
+                process::exit(1);
+            }
+        }
+    }
 
     println!("lxmd v{} starting...", VERSION);
 
@@ -839,8 +1313,8 @@ fn main() {
     println!("Identity  : {}", hex_display(identity_hash));
 
     // Load ignored/allowed lists
-    let _ignored = load_hash_file(&paths.ignoredpath);
-    let _allowed = load_hash_file(&paths.allowedpath);
+    let ignored = load_hash_file(&paths.ignoredpath);
+    let allowed = load_hash_file(&paths.allowedpath);
 
     // Display configuration
     println!("Display   : {}", config.display_name);
@@ -849,12 +1323,17 @@ fn main() {
         if let Some(ref name) = config.node_name {
             println!("Node name : {}", name);
         }
+        println!("Storage   : {:.0} MB limit", config.message_storage_limit);
         println!(
-            "Storage   : {:.0} MB limit",
-            config.message_storage_limit
+            "Stamp cost: {} (flex: {})",
+            config.propagation_stamp_cost_target,
+            config.propagation_stamp_cost_flexibility
         );
-        println!("Stamp cost: {} (flex: {})", config.propagation_stamp_cost_target, config.propagation_stamp_cost_flexibility);
-        println!("Peer cost : {} (max remote: {})", config.peering_cost, config.remote_peering_cost_max);
+        println!(
+            "Peer cost : {} (max remote: {})",
+            config.peering_cost,
+            config.remote_peering_cost_max
+        );
         if config.autopeer {
             print!("Autopeer  : enabled");
             if let Some(depth) = config.autopeer_maxdepth {
@@ -877,6 +1356,63 @@ fn main() {
     println!("Storage   : {}", paths.storagepath.display());
     println!();
 
+    let identity_prv = identity
+        .get_private_key()
+        .expect("Identity must include private key");
+    let router_identity = Identity::from_private_key(&identity_prv);
+    let delivery_identity = Identity::from_private_key(&identity_prv);
+
+    let router_config = build_router_config(&config, &paths);
+    let mut router = LxmRouter::new(router_identity, router_config);
+    router.ignored_list = ignored;
+    router.allowed_list = allowed;
+    router.control_allowed_list = config.control_allowed.clone();
+
+    let message_dir = paths.messagedir.clone();
+    let on_inbound = config.on_inbound.clone();
+    router.set_delivery_callback(Box::new(move |delivery| {
+        handle_inbound_message(&message_dir, on_inbound.as_deref(), &delivery.content);
+    }));
+
+    let router = Arc::new(Mutex::new(router));
+    let callbacks = LxmfCallbacks::new(router.clone());
+
+    let node = match RnsNode::from_config(
+        args.rnsconfig.as_deref().map(Path::new),
+        Box::new(callbacks),
+    ) {
+        Ok(n) => Arc::new(n),
+        Err(e) => {
+            eprintln!("Failed to start RNS node: {}", e);
+            process::exit(1);
+        }
+    };
+
+    {
+        let mut router_guard = router.lock().unwrap();
+        router_guard.set_node(node.clone());
+        router_guard.register_delivery_identity(
+            &identity,
+            Some(config.propagation_stamp_cost_target),
+            Some(config.display_name.clone()),
+        );
+
+        if config.enable_node {
+            router_guard.enable_propagation();
+        }
+
+        if config.announce_at_start {
+            router_guard.announce_delivery(&identity);
+        }
+
+        if config.enable_node {
+            register_control_handlers(&node, router.clone(), &config, lxmf::router::now_timestamp());
+            if config.pn_announce_at_start {
+                router_guard.announce_propagation_node();
+            }
+        }
+    }
+
     // Setup signal handler for graceful shutdown
     let running = Arc::new(AtomicBool::new(true));
     let r = running.clone();
@@ -885,15 +1421,73 @@ fn main() {
         log::warn!("Failed to setup signal handler: {}", e);
     }
 
+    let jobs_running = running.clone();
+    let jobs_router = router.clone();
+    let announce_router = router.clone();
+    let delivery_interval = config.announce_interval;
+    let propagation_interval = config.pn_announce_interval;
+    let propagation_enabled = config.enable_node;
+
+    let worker = thread::spawn(move || {
+        let mut last_jobs = lxmf::router::now_timestamp();
+        let mut last_delivery_announce = last_jobs;
+        let mut last_pn_announce = last_jobs;
+
+        while jobs_running.load(Ordering::Relaxed) {
+            let now = lxmf::router::now_timestamp();
+
+            if now - last_jobs >= PROCESSING_INTERVAL as f64 {
+                if let Ok(mut guard) = jobs_router.lock() {
+                    guard.jobs();
+                }
+                last_jobs = now;
+            }
+
+            if let Some(interval) = delivery_interval {
+                if now - last_delivery_announce >= interval as f64 {
+                    if let Ok(guard) = announce_router.lock() {
+                        guard.announce_delivery(&delivery_identity);
+                    }
+                    last_delivery_announce = now;
+                }
+            }
+
+            if propagation_enabled {
+                if let Some(interval) = propagation_interval {
+                    if now - last_pn_announce >= interval as f64 {
+                        if let Ok(guard) = announce_router.lock() {
+                            guard.announce_propagation_node();
+                        }
+                        last_pn_announce = now;
+                    }
+                }
+            }
+
+            thread::sleep(time::Duration::from_millis(200));
+        }
+    });
+
     println!("lxmd running. Press Ctrl+C to exit.");
 
-    // Main loop
     while running.load(Ordering::Relaxed) {
         thread::sleep(time::Duration::from_secs(1));
     }
 
     println!();
     println!("Shutting down...");
+
+    let _ = worker.join();
+
+    if let Ok(mut guard) = router.lock() {
+        guard.exit_handler();
+    }
+
+    match Arc::try_unwrap(node) {
+        Ok(node) => node.shutdown(),
+        Err(node) => {
+            let _ = node.event_sender().send(Event::Shutdown);
+        }
+    }
 }
 
 fn setup_signal_handler(running: Arc<AtomicBool>) -> Result<(), String> {

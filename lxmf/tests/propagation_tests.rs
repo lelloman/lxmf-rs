@@ -51,6 +51,7 @@ fn test_store_message_basic() {
     assert_eq!(entry.destination_hash, dest);
     assert_eq!(entry.stamp_value, 16);
     assert_eq!(entry.size, lxm_data.len() + STAMP_SIZE);
+    assert!(entry.has_stamp);
     assert!(entry.filepath.exists());
 
     // Verify file contents
@@ -72,6 +73,7 @@ fn test_store_message_no_stamp() {
     let tid = store.store_message(&lxm_data, None, 0, None).unwrap();
     let entry = store.entries.get(&tid).unwrap();
     assert_eq!(entry.size, lxm_data.len());
+    assert!(!entry.has_stamp);
 
     cleanup(&dir);
 }
@@ -162,10 +164,12 @@ fn test_scan_messagestore() {
     assert_eq!(e1.destination_hash, dest);
     assert_eq!(e1.stamp_value, 10);
     assert_eq!(e1.size, lxm1.len() + STAMP_SIZE);
+    assert!(e1.has_stamp);
 
     let e2 = store2.entries.get(&tid2).unwrap();
     assert_eq!(e2.destination_hash, dest);
     assert_eq!(e2.stamp_value, 5);
+    assert!(e2.has_stamp);
 
     cleanup(&dir);
 }
@@ -670,6 +674,22 @@ fn test_filename_format_no_stamp_value() {
     // No stamp_value component when value is 0
     let parts: Vec<&str> = filename.splitn(3, '_').collect();
     assert_eq!(parts.len(), 2); // just hex_id and timestamp
+
+    cleanup(&dir);
+}
+
+#[test]
+fn test_handle_get_wants_without_stamp_keeps_payload() {
+    let dir = temp_dir("get_wants_no_stamp");
+    let mut store = PropagationStore::new(dir.clone(), 1024);
+
+    let dest = [0x34; 16];
+    let lxm = make_lxm_data(&dest, b"unstamped payload");
+    let tid = store.store_message(&lxm, None, 0, None).unwrap();
+
+    let messages = store.handle_get_wants(&dest, &[tid], None);
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0], lxm);
 
     cleanup(&dir);
 }

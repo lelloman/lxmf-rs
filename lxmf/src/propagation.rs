@@ -16,6 +16,7 @@ pub struct PropagationEntry {
     pub size: usize,
     pub handled_peers: Vec<[u8; 16]>,
     pub unhandled_peers: Vec<[u8; 16]>,
+    pub has_stamp: bool,
     pub stamp_value: u32,
 }
 
@@ -100,6 +101,7 @@ impl PropagationStore {
             } else {
                 0
             };
+            let has_stamp = stamp_value > 0;
 
             // Read destination hash from first 16 bytes of file
             let file_data = match fs::read(&path) {
@@ -125,6 +127,7 @@ impl PropagationStore {
                     size,
                     handled_peers: Vec::new(),
                     unhandled_peers: Vec::new(),
+                    has_stamp,
                     stamp_value,
                 },
             );
@@ -165,6 +168,7 @@ impl PropagationStore {
             }
             None => lxm_data.to_vec(),
         };
+        let has_stamp = stamp_data.is_some();
 
         // Build filename
         let hex_id = bytes_to_hex(&transient_id);
@@ -196,6 +200,7 @@ impl PropagationStore {
                 size,
                 handled_peers: Vec::new(),
                 unhandled_peers: Vec::new(),
+                has_stamp,
                 stamp_value,
             },
         );
@@ -319,8 +324,8 @@ impl PropagationStore {
                     Err(_) => continue,
                 };
 
-                // Strip stamp from stored data
-                let lxm_data = if file_data.len() > STAMP_SIZE {
+                // Strip stamp only when this entry actually has one.
+                let lxm_data = if entry.has_stamp && file_data.len() > STAMP_SIZE {
                     &file_data[..file_data.len() - STAMP_SIZE]
                 } else {
                     &file_data

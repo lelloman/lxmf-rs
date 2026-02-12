@@ -11,3 +11,4 @@ rns-net.workspace = true
 rns-core = { workspace = true, features = ["std"] }
 rns-crypto = { workspace = true, features = ["std"] }
 log.workspace = true
+env_logger = "0.11"
