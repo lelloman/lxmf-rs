@@ -75,6 +75,56 @@ fn main() {
 }
 ```
 
+## Embedded / no_std Usage
+
+The `lxmf-core` crate supports `no_std` environments for embedded systems. To use without the standard library:
+
+```toml
+[dependencies]
+# Core only - no std, no alloc
+lxmf-core = { version = "0.1", default-features = false }
+
+# Or with alloc support (requires defining a global allocator)
+lxmf-core = { version = "0.1", default-features = false, features = ["alloc"] }
+```
+
+### With `alloc` (requires global allocator)
+
+```rust
+#[global_allocator]
+static ALLOCATOR: cortex_m_rt::Heap = cortex_m_rt::Heap::empty();
+
+use lxmf_core::{constants::*, message, stamp};
+
+fn pack_message() {
+    // Pack/unpack messages
+    let packed = message::pack(
+        &dest_hash,
+        &src_hash,
+        timestamp,
+        b"Hello",
+        b"World",
+        alloc::vec::[],  // Use alloc::vec![] with feature
+        None,
+        |data| Ok([0u8; 64]), // Your signing implementation
+    ).unwrap();
+
+    // Validate stamps
+    let workblock = stamp::stamp_workblock(&message_hash, 3000);
+    let is_valid = stamp::stamp_valid(&stamp, 16, &workblock);
+}
+```
+
+### Core-only (no alloc)
+
+Without the `alloc` feature, you get:
+- All constants from `constants` module
+- Message enums (`MessageState`, `DeliveryMethod`, etc.)
+- Stamp validation functions that take slices
+- Hash and field parsing utilities
+
+This is useful when you want to implement your own memory management.
+
 ## Key Features
 
 ### Messaging
