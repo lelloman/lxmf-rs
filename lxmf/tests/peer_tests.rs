@@ -1,4 +1,4 @@
-use lxmf::peer::{LxmPeer, SyncAction, SyncPostponeReason};
+use lxmf_rs::peer::{LxmPeer, SyncAction, SyncPostponeReason};
 use lxmf_core::constants::*;
 use rns_core::msgpack::{pack, unpack_exact, Value};
 
@@ -366,7 +366,7 @@ fn test_peer_selection() {
     peers[0].sync_transfer_rate = 100000.0;
     peers[1].sync_transfer_rate = 50000.0;
 
-    let selected = lxmf::peer::select_peers_for_sync(&peers, 2);
+    let selected = lxmf_rs::peer::select_peers_for_sync(&peers, 2);
     assert!(!selected.is_empty());
     assert!(selected.contains(&0)); // fastest
     assert!(selected.contains(&1)); // second fastest
@@ -381,7 +381,7 @@ fn test_peer_resource_completed() {
 
     peer.unhandled_ids = vec![tid1, tid2];
     peer.currently_transferring_messages = Some(vec![tid1, tid2]);
-    peer.current_sync_transfer_started = lxmf::router::now_timestamp() - 1.0;
+    peer.current_sync_transfer_started = lxmf_rs::router::now_timestamp() - 1.0;
     peer.state = PeerState::ResourceTransferring;
 
     peer.handle_resource_completed(1024);

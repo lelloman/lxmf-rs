@@ -14,7 +14,7 @@ rns-crypto = { version = "0.1.0", default-features = false, path = "../rns-rs/rn
 rns-core = { version = "0.1.0", default-features = false, path = "../rns-rs/rns-core" }
 rns-net = { version = "0.1.0", path = "../rns-rs/rns-net" }
 lxmf-core = { version = "0.1.0", path = "lxmf-core" }
-lxmf = { version = "0.1.0", path = "lxmf" }
+lxmf-rs = { version = "0.1.0", path = "lxmf" }
 log = "0.4"
 rayon = "1"
 

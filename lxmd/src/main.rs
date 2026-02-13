@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::{env, fs, thread, time};
 
-use lxmf::router::{LxmRouter, LxmfCallbacks, RouterConfig};
+use lxmf_rs::router::{LxmRouter, LxmfCallbacks, RouterConfig};
 use lxmf_core::constants::*;
 use rns_core::destination::destination_hash;
 use rns_core::msgpack::{self, Value};
@@ -814,10 +814,10 @@ fn build_status_payload(
     start_time: f64,
     message_store_limit_bytes: u64,
 ) -> Value {
-    let now = lxmf::router::now_timestamp();
+    let now = lxmf_rs::router::now_timestamp();
     let (store_count, store_bytes) = messagestore_stats(&router.paths.messagestore);
-    let persisted_stats = lxmf::storage::load_node_stats(&router.paths.node_stats);
-    let persisted_peers = lxmf::storage::load_peers(&router.paths.peers);
+    let persisted_stats = lxmf_rs::storage::load_node_stats(&router.paths.node_stats);
+    let persisted_peers = lxmf_rs::storage::load_peers(&router.paths.peers);
 
     let mut peer_stats = Vec::new();
     for peer in persisted_peers {
@@ -1434,7 +1434,7 @@ fn main() {
         }
 
         if config.enable_node {
-            register_control_handlers(&node, router.clone(), &config, lxmf::router::now_timestamp());
+            register_control_handlers(&node, router.clone(), &config, lxmf_rs::router::now_timestamp());
             if config.pn_announce_at_start {
                 router_guard.announce_propagation_node();
             }
@@ -1457,12 +1457,12 @@ fn main() {
     let propagation_enabled = config.enable_node;
 
     let worker = thread::spawn(move || {
-        let mut last_jobs = lxmf::router::now_timestamp();
+        let mut last_jobs = lxmf_rs::router::now_timestamp();
         let mut last_delivery_announce = last_jobs;
         let mut last_pn_announce = last_jobs;
 
         while jobs_running.load(Ordering::Relaxed) {
-            let now = lxmf::router::now_timestamp();
+            let now = lxmf_rs::router::now_timestamp();
 
             if now - last_jobs >= PROCESSING_INTERVAL as f64 {
                 if let Ok(mut guard) = jobs_router.lock() {

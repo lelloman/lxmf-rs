@@ -15,7 +15,7 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use lxmf::router::{LxmDelivery, LxmRouter, LxmfCallbacks, RouterConfig};
+use lxmf_rs::router::{LxmDelivery, LxmRouter, LxmfCallbacks, RouterConfig};
 use lxmf_core::constants::*;
 use lxmf_core::message;
 use rns_core::types::{DestHash, IdentityHash, LinkId, PacketHash};
@@ -36,6 +36,7 @@ enum AppEvent {
         source_hash: [u8; 16],
         title: Vec<u8>,
         content: Vec<u8>,
+        method: DeliveryMethod,
     },
     Announce(AnnouncedIdentity),
 }
@@ -160,8 +161,22 @@ fn main() {
         None
     };
 
-    // Generate a fresh identity for ourselves
-    let identity = Identity::new(&mut rns_crypto::OsRng);
+    // Stable temp dir (not per-process) so identity persists across runs
+    let tmp_dir = std::env::temp_dir().join("lxmf_live_test");
+    let _ = std::fs::create_dir_all(&tmp_dir);
+
+    // Load or generate a persistent identity for ourselves
+    let own_identity_path = tmp_dir.join("identity");
+    let identity = if own_identity_path.exists() {
+        let key_bytes = std::fs::read(&own_identity_path).expect("read own identity");
+        let mut prv_key = [0u8; 64];
+        prv_key.copy_from_slice(&key_bytes);
+        Identity::from_private_key(&prv_key)
+    } else {
+        let id = Identity::new(&mut rns_crypto::OsRng);
+        std::fs::write(&own_identity_path, id.get_private_key().unwrap()).expect("save own identity");
+        id
+    };
     let delivery_dest_hash = rns_core::destination::destination_hash(
         APP_NAME,
         &["delivery"],
@@ -184,9 +199,6 @@ fn main() {
     println!();
 
     // Set up router
-    let tmp_dir = std::env::temp_dir().join(format!("lxmf_live_{}", std::process::id()));
-    let _ = std::fs::create_dir_all(&tmp_dir);
-
     let router_config = RouterConfig {
         storagepath: tmp_dir.clone(),
         ..RouterConfig::default()
@@ -205,6 +217,7 @@ fn main() {
             source_hash: delivery.source_hash,
             title: delivery.title.clone(),
             content: delivery.content.clone(),
+            method: delivery.method,
         });
     }));
 
@@ -266,34 +279,11 @@ fn main() {
 
     let sign_identity = Identity::from_private_key(&identity.get_private_key().unwrap());
 
-    // Send initial message directly if we have a target identity
+    // Send messages if we have a target identity
     if let Some(ref target_id) = target_identity {
         let target_dest = rns_core::destination::destination_hash(
             APP_NAME, &["delivery"], Some(target_id.hash()),
         );
-
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs_f64();
-
-        let pack_result = message::pack(
-            &target_dest,
-            &src_hash,
-            timestamp,
-            b"ping",
-            b"Hello from lxmf-rs!",
-            vec![],
-            None,
-            |data| {
-                sign_identity
-                    .sign(data)
-                    .map_err(|_| message::Error::SignError)
-            },
-        )
-        .expect("Failed to pack message");
-
-        // Build destination from target's public key and send directly
         let pub_key = target_id.get_public_key().unwrap();
         let announced = AnnouncedIdentity {
             dest_hash: DestHash(target_dest),
@@ -303,12 +293,70 @@ fn main() {
             hops: 0,
             received_at: 0.0,
         };
+
+        // 1) Small opportunistic message
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64();
+        let small_msg = message::pack(
+            &target_dest, &src_hash, timestamp,
+            b"small", b"Hello from lxmf-rs!",
+            vec![], None,
+            |data| sign_identity.sign(data).map_err(|_| message::Error::SignError),
+        ).expect("pack small");
+
         let dest = Destination::single_out(APP_NAME, &["delivery"], &announced);
-        let lxmf_payload = &pack_result.packed[DESTINATION_LENGTH..];
+        let lxmf_payload = &small_msg.packed[DESTINATION_LENGTH..];
         match node.send_packet(&dest, lxmf_payload) {
-            Ok(ph) => println!("Sent message to {} (packet {})", hex(&target_dest), hex(&ph.0)),
-            Err(e) => println!("Failed to send: {}", e),
+            Ok(ph) => println!("[SEND] small opportunistic (packet {})", hex(&ph.0)),
+            Err(e) => println!("[SEND] small failed: {}", e),
         }
+
+        // 2) Big message via direct link delivery
+        let big_content = "B".repeat(500).into_bytes();
+        let timestamp2 = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64();
+        let big_msg = message::pack(
+            &target_dest, &src_hash, timestamp2,
+            b"big", &big_content,
+            vec![], None,
+            |data| sign_identity.sign(data).map_err(|_| message::Error::SignError),
+        ).expect("pack big");
+
+        // Queue as Direct delivery (will create link and send)
+        {
+            use lxmf_rs::router::OutboundMessage;
+            let mut r = router.lock().unwrap();
+            let msg = OutboundMessage {
+                destination_hash: target_dest,
+                source_hash: src_hash,
+                packed: big_msg.packed,
+                message_hash: big_msg.message_hash,
+                method: DeliveryMethod::Direct,
+                state: MessageState::Outbound,
+                representation: Representation::Unknown,
+                attempts: 0,
+                last_attempt: 0.0,
+                stamp: None,
+                stamp_cost: None,
+                propagation_packed: None,
+                propagation_stamp: None,
+                transient_id: None,
+                delivery_callback: None,
+                failed_callback: None,
+                progress_callback: None,
+                link_id: None,
+                packet_hash: None,
+            };
+            r.handle_outbound(msg);
+        }
+        println!("[SEND] big message queued for direct link delivery");
+
+        // Trigger outbound processing (outside router lock)
+        { router.lock().unwrap().jobs(); }
     }
     println!();
     println!("Running... (Ctrl+C to stop)");
@@ -321,12 +369,14 @@ fn main() {
                     source_hash,
                     title,
                     content,
+                    method,
                 } => {
                     let title_str = String::from_utf8_lossy(&title);
                     let content_str = String::from_utf8_lossy(&content);
                     println!(
-                        "[RECV] from={} title=\"{}\" content=\"{}\"",
+                        "[RECV] from={} method={:?} title=\"{}\" content=\"{}\"",
                         hex(&source_hash),
+                        method,
                         title_str,
                         content_str
                     );
@@ -341,6 +391,9 @@ fn main() {
             }
         }
 
-        std::thread::sleep(Duration::from_secs(1));
+        // Periodic outbound processing (retry queued messages)
+        { router.lock().unwrap().jobs(); }
+
+        std::thread::sleep(Duration::from_secs(4));
     }
 }

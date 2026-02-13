@@ -3,6 +3,9 @@ name = "lxmd"
 description = "LXMF propagation daemon"
 version.workspace = true
 edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+authors.workspace = true
 
 [features]
 default = ["init-logger"]
@@ -10,7 +13,7 @@ init-logger = ["dep:env_logger"]
 android-logger = ["dep:android_logger"]
 
 [dependencies]
-lxmf.workspace = true
+lxmf-rs.workspace = true
 lxmf-core.workspace = true
 rns-net.workspace = true
 rns-core = { workspace = true, features = ["std"] }

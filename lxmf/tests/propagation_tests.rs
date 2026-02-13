@@ -1,4 +1,4 @@
-use lxmf::propagation::{ConfigStats, PropagationStore};
+use lxmf_rs::propagation::{ConfigStats, PropagationStore};
 use lxmf_core::constants::*;
 use rns_crypto::sha256::sha256;
 use std::fs;
@@ -396,7 +396,7 @@ fn test_clean_expired_messages() {
 
     // Manually backdate the entry past MESSAGE_EXPIRY
     let entry = store.entries.get_mut(&tid).unwrap();
-    entry.received = lxmf::router::now_timestamp() - MESSAGE_EXPIRY as f64 - 100.0;
+    entry.received = lxmf_rs::router::now_timestamp() - MESSAGE_EXPIRY as f64 - 100.0;
 
     store.clean_messagestore(&[]);
     assert_eq!(store.message_count(), 0);
@@ -566,7 +566,7 @@ fn test_compile_stats() {
 
     let identity_hash = [0x11; 16];
     let prop_dest_hash = [0x22; 16];
-    let start_time = lxmf::router::now_timestamp() - 3600.0;
+    let start_time = lxmf_rs::router::now_timestamp() - 3600.0;
 
     let config = ConfigStats {
         delivery_limit: 256,

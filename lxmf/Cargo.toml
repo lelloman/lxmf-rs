@@ -1,8 +1,11 @@
 [package]
-name = "lxmf"
+name = "lxmf-rs"
 description = "LXMF message delivery protocol for Reticulum"
 version.workspace = true
 edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+authors.workspace = true
 
 [dependencies]
 lxmf-core.workspace = true

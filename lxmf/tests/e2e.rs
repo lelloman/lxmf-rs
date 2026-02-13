@@ -9,7 +9,7 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 use std::{fs, thread};
 
-use lxmf::router::{LxmDelivery, LxmRouter, LxmfCallbacks, OutboundMessage, RouterConfig};
+use lxmf_rs::router::{LxmDelivery, LxmRouter, LxmfCallbacks, OutboundMessage, RouterConfig};
 use lxmf_core::constants::*;
 use lxmf_core::message;
 use rns_core::types::{DestHash, IdentityHash, LinkId, PacketHash};

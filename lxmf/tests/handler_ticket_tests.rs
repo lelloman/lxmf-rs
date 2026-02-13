@@ -1,8 +1,8 @@
-use lxmf::handlers::{
+use lxmf_rs::handlers::{
     decide_propagation_action, handle_delivery_announce, parse_propagation_announce,
     PropagationAnnounceResult, PropagationPeerInfo,
 };
-use lxmf::tickets::{ticket_stamp, validate_stamp_with_tickets, TicketStore};
+use lxmf_rs::tickets::{ticket_stamp, validate_stamp_with_tickets, TicketStore};
 use lxmf_core::constants::*;
 use rns_crypto::sha256::sha256;
 
@@ -370,7 +370,7 @@ fn test_ticket_store_generate() {
 
     let (expiry, ticket_bytes) = ticket.unwrap();
     assert_eq!(ticket_bytes.len(), TICKET_LENGTH);
-    assert!(expiry > lxmf::router::now_timestamp());
+    assert!(expiry > lxmf_rs::router::now_timestamp());
 }
 
 #[test]
@@ -401,7 +401,7 @@ fn test_ticket_store_outbound() {
     let mut store = TicketStore::new();
     let dest = [0xCC; 16];
     let ticket = vec![0x42u8; TICKET_LENGTH];
-    let expiry = lxmf::router::now_timestamp() + 86400.0; // +1 day
+    let expiry = lxmf_rs::router::now_timestamp() + 86400.0; // +1 day
 
     store.remember_ticket(dest, expiry, ticket.clone());
 
@@ -417,7 +417,7 @@ fn test_ticket_store_outbound_expired() {
     let mut store = TicketStore::new();
     let dest = [0xDD; 16];
     let ticket = vec![0x42u8; TICKET_LENGTH];
-    let expiry = lxmf::router::now_timestamp() - 1.0; // already expired
+    let expiry = lxmf_rs::router::now_timestamp() - 1.0; // already expired
 
     store.remember_ticket(dest, expiry, ticket);
 
@@ -436,7 +436,7 @@ fn test_ticket_store_inbound() {
 
     // Create a second ticket manually
     let ticket2 = vec![0x99u8; TICKET_LENGTH];
-    let expiry2 = lxmf::router::now_timestamp() + TICKET_EXPIRY as f64;
+    let expiry2 = lxmf_rs::router::now_timestamp() + TICKET_EXPIRY as f64;
     store
         .inbound
         .entry(dest)
@@ -453,20 +453,20 @@ fn test_ticket_store_clean() {
     let dest = [0xFF; 16];
 
     // Add expired outbound
-    store.remember_ticket(dest, lxmf::router::now_timestamp() - 100.0, vec![0x11; 16]);
+    store.remember_ticket(dest, lxmf_rs::router::now_timestamp() - 100.0, vec![0x11; 16]);
 
     // Add valid outbound
     let dest2 = [0xFE; 16];
     store.remember_ticket(
         dest2,
-        lxmf::router::now_timestamp() + 86400.0,
+        lxmf_rs::router::now_timestamp() + 86400.0,
         vec![0x22; 16],
     );
 
     // Add expired inbound (past grace period)
     let expired_ticket = vec![0x33u8; TICKET_LENGTH];
     let expired_expiry =
-        lxmf::router::now_timestamp() - TICKET_GRACE as f64 - 100.0;
+        lxmf_rs::router::now_timestamp() - TICKET_GRACE as f64 - 100.0;
     store
         .inbound
         .entry(dest)
