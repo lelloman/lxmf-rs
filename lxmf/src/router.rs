@@ -307,6 +307,41 @@ impl LxmRouter {
         }
     }
 
+    /// Disable propagation node functionality at runtime.
+    pub fn disable_propagation(&mut self) {
+        if !self.propagation_node {
+            return;
+        }
+        self.propagation_node = false;
+
+        if let Some(node) = &self.node {
+            // Tear down active propagation links
+            for &link_id in &self.active_propagation_links {
+                let _ = node.teardown_link(link_id);
+            }
+            self.active_propagation_links.clear();
+
+            // Deregister propagation destination (link + regular)
+            let _ = node.deregister_link_destination(self.propagation_dest_hash);
+            let _ = node.deregister_destination(self.propagation_dest_hash);
+
+            // Deregister control destination
+            if let Some(control_hash) = self.control_dest_hash.take() {
+                let _ = node.deregister_destination(control_hash);
+            }
+
+            // Re-announce with propagation_enabled=false
+            self.announce_propagation_node();
+        }
+
+        // Clear peers and save empty state
+        let peer_hashes: Vec<[u8; 16]> = self.peers.keys().copied().collect();
+        for hash in &peer_hashes {
+            let _ = self.unpeer(hash);
+        }
+        self.save_peers();
+    }
+
     /// Announce the delivery destination.
     pub fn announce_delivery(&self, delivery_identity: &Identity) {
         if let (Some(node), Some(_dest_hash)) = (&self.node, self.delivery_dest_hash) {
