@@ -306,6 +306,9 @@ fn start_transport_node(port: u16) -> (RnsNode, PathBuf) {
         rpc_port: 0,
         cache_dir: Some(dir.clone()),
         management: ManagementConfig::default(),
+        probe_port: None,
+        probe_addr: None,
+        device: None,
     };
 
     struct NoopCallbacks;
@@ -339,6 +342,9 @@ fn start_client_node(port: u16, callbacks: Box<dyn Callbacks>) -> RnsNode {
         rpc_port: 0,
         cache_dir: None,
         management: ManagementConfig::default(),
+        probe_port: None,
+        probe_addr: None,
+        device: None,
     };
 
     RnsNode::start(config, callbacks).expect("client node start")
@@ -463,13 +469,8 @@ fn setup_two_lxmf_peers_announced(
         r.announce_delivery(&peers.alice.identity);
     }
 
-    // Bob announces
-    {
-        let r = peers.bob.router.lock().unwrap();
-        r.announce_delivery(&peers.bob.identity);
-    }
-
-    // Wait for Bob to receive Alice's announce
+    // Wait for Bob to receive Alice's announce before Bob announces,
+    // to avoid announce burst detection on the transport node.
     let alice_announce = wait_for_announce(
         &peers.bob.rx,
         &peers.alice.delivery_dest_hash,
@@ -479,6 +480,12 @@ fn setup_two_lxmf_peers_announced(
         alice_announce.is_some(),
         "Bob should receive Alice's announce"
     );
+
+    // Bob announces
+    {
+        let r = peers.bob.router.lock().unwrap();
+        r.announce_delivery(&peers.bob.identity);
+    }
 
     // Wait for Alice to receive Bob's announce
     let bob_announce = wait_for_announce(
@@ -837,12 +844,6 @@ fn test_stamp_cost_propagation_via_announce() {
         r.announce_delivery(&peers.bob.identity);
     }
 
-    // Alice announces with stamp_cost=4
-    {
-        let r = peers.alice.router.lock().unwrap();
-        r.announce_delivery(&peers.alice.identity);
-    }
-
     // Alice should receive Bob's announce and store stamp_cost=16
     let bob_ann = wait_for_announce(
         &peers.alice.rx,
@@ -853,6 +854,12 @@ fn test_stamp_cost_propagation_via_announce() {
         bob_ann.is_some(),
         "Alice should receive Bob's announce"
     );
+
+    // Alice announces with stamp_cost=4
+    {
+        let r = peers.alice.router.lock().unwrap();
+        r.announce_delivery(&peers.alice.identity);
+    }
 
     // Bob should receive Alice's announce and store stamp_cost=4
     let alice_ann = wait_for_announce(

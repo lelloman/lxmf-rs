@@ -198,6 +198,9 @@ fn main() {
             rpc_port: 0,
             cache_dir: Some(tmp_dir.clone()),
             management: ManagementConfig::default(),
+            probe_port: None,
+            probe_addr: None,
+            device: None,
         },
         Box::new(app_callbacks),
     ).expect("Failed to start RNS node"));
