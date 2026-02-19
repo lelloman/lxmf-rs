@@ -762,7 +762,13 @@ fn send_on_link(node: &RnsNode, msg: &mut OutboundMessage, link_id: [u8; 16]) {
         msg.representation = Representation::Packet;
         match node.send_on_link(link_id, msg.packed.clone(), 0) {
             Ok(()) => {
-                msg.state = MessageState::Sending;
+                // Link packets have no completion callback (unlike resources),
+                // so mark as Sent immediately. The encrypted link frame has been
+                // dispatched; there is no multi-part transfer to wait for.
+                msg.state = MessageState::Sent;
+                if let Some(cb) = &msg.delivery_callback {
+                    cb(msg);
+                }
             }
             Err(_) => {
                 log::warn!("Failed to send on direct link");
