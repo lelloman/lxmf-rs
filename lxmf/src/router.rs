@@ -270,6 +270,7 @@ impl LxmRouter {
                 dest_hash,
                 sig_prv[32..].try_into().unwrap(),
                 sig_pub[32..].try_into().unwrap(),
+                1, // AcceptAll
             );
             let _ = node.register_destination(dest_hash, 1); // SINGLE type
         }
@@ -293,6 +294,7 @@ impl LxmRouter {
                 self.propagation_dest_hash,
                 sig_prv[32..].try_into().unwrap(),
                 sig_pub[32..].try_into().unwrap(),
+                1, // AcceptAll
             );
             let _ = node.register_destination(self.propagation_dest_hash, 1);
 
@@ -910,11 +912,6 @@ impl Callbacks for LxmfCallbacks {
         } else {
             // Incoming link — map link_id to its destination for delivery routing
             router.link_destinations.insert(link_id.0, dest_hash.0);
-
-            if let Some(node) = &router.node {
-                // Accept resources on this link
-                let _ = node.set_resource_strategy(link_id.0, 1); // AcceptAll
-            }
 
             // Track if it's a propagation link
             if router.propagation_node {
