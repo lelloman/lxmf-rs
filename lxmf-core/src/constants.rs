@@ -381,6 +381,7 @@ pub const PN_VALIDATION_POOL_MIN_SIZE: usize = 256;
 // ============================================================
 
 // Delivery and processing
+pub const OPPORTUNISTIC_PROOF_TIMEOUT: f64 = 30.0; // seconds
 pub const MAX_DELIVERY_ATTEMPTS: u32 = 5;
 pub const PROCESSING_INTERVAL: u64 = 4; // seconds
 pub const DELIVERY_RETRY_WAIT: u64 = 10; // seconds

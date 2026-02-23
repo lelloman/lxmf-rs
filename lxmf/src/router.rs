@@ -410,6 +410,14 @@ impl LxmRouter {
         self.outbound.push(msg);
     }
 
+    /// Update the propagation destination hash at runtime.
+    ///
+    /// Used by the alternative relay fallback to re-target propagated delivery
+    /// at a different propagation node.
+    pub fn set_propagation_dest_hash(&mut self, dest_hash: [u8; 16]) {
+        self.propagation_dest_hash = dest_hash;
+    }
+
     /// Run periodic jobs. Called every PROCESSING_INTERVAL seconds.
     pub fn jobs(&mut self) {
         if self.exit_handler_running {
@@ -454,6 +462,16 @@ impl LxmRouter {
         let completed_indices: Vec<usize> = Vec::new();
 
         for (idx, msg) in self.outbound.iter_mut().enumerate() {
+            // Timeout stale opportunistic messages stuck in Sent state (no proof received)
+            if msg.state == MessageState::Sent
+                && msg.method == DeliveryMethod::Opportunistic
+                && (now - msg.last_attempt) >= OPPORTUNISTIC_PROOF_TIMEOUT
+            {
+                msg.state = MessageState::Failed;
+                failed_indices.push(idx);
+                continue;
+            }
+
             if msg.state != MessageState::Outbound {
                 continue;
             }
