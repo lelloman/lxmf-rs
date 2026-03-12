@@ -126,6 +126,7 @@ pub struct LxmRouter {
 
     // Link tracking
     pub direct_links: HashMap<[u8; 16], [u8; 16]>,       // dest_hash -> link_id
+    pub pending_direct_links: HashMap<[u8; 16], [u8; 16]>, // dest_hash -> link_id (being established)
     pub backchannel_links: HashMap<[u8; 16], [u8; 16]>,   // dest_hash -> link_id
     pub link_destinations: HashMap<[u8; 16], [u8; 16]>,   // link_id -> dest_hash
     pub active_propagation_links: Vec<[u8; 16]>,
@@ -207,6 +208,7 @@ impl LxmRouter {
             outbound: Vec::new(),
             pending_inbound: VecDeque::new(),
             direct_links: HashMap::new(),
+            pending_direct_links: HashMap::new(),
             backchannel_links: HashMap::new(),
             link_destinations: HashMap::new(),
             active_propagation_links: Vec::new(),
@@ -244,6 +246,44 @@ impl LxmRouter {
     /// Get a reference to the RNS node.
     pub fn node(&self) -> Option<&RnsNode> {
         self.node.as_deref()
+    }
+
+    /// Ensure a direct link exists to the given destination.
+    ///
+    /// If a link is already active or pending, this is a no-op and returns `true`.
+    /// If a new link is successfully created, returns `true`.
+    /// Returns `false` only on actual failure (no node, unknown identity, link
+    /// creation error).
+    pub fn ensure_direct_link(&mut self, dest_hash: [u8; 16]) -> bool {
+        // Already active
+        if self.direct_links.contains_key(&dest_hash) {
+            return true;
+        }
+        // Already pending
+        if self.pending_direct_links.contains_key(&dest_hash) {
+            return true;
+        }
+        // Need a node to create links
+        let node = match &self.node {
+            Some(n) => n.clone(),
+            None => return false,
+        };
+        // Need identity to get sig_pub
+        let announced = match node.recall_identity(&DestHash(dest_hash)) {
+            Ok(Some(info)) => info,
+            _ => return false,
+        };
+        let sig_pub: [u8; 32] = announced.public_key[32..].try_into().unwrap();
+        match node.create_link(dest_hash, sig_pub) {
+            Ok(link_id) => {
+                self.pending_direct_links.insert(dest_hash, link_id);
+                true
+            }
+            Err(_) => {
+                log::warn!("ensure_direct_link: failed to create link");
+                false
+            }
+        }
     }
 
     /// Register a delivery identity for receiving direct messages.
@@ -517,12 +557,15 @@ impl LxmRouter {
                 DeliveryMethod::Direct => {
                     if let Some(&link_id) = self.direct_links.get(&msg.destination_hash) {
                         send_on_link(&node, msg, link_id);
+                    } else if self.pending_direct_links.contains_key(&msg.destination_hash) {
+                        // Link is being established, wait for it
                     } else if let Ok(Some(announced)) =
                         node.recall_identity(&DestHash(msg.destination_hash))
                     {
                         let sig_pub: [u8; 32] = announced.public_key[32..].try_into().unwrap();
                         match node.create_link(msg.destination_hash, sig_pub) {
                             Ok(link_id) => {
+                                self.pending_direct_links.insert(msg.destination_hash, link_id);
                                 msg.link_id = Some(link_id);
                                 msg.state = MessageState::Sending;
                             }
@@ -916,6 +959,13 @@ impl Callbacks for LxmfCallbacks {
         let mut router = self.router.lock().unwrap();
 
         if is_initiator {
+            // Promote pending → active if this link was created via ensure_direct_link
+            if let Some((&dest, _)) = router.pending_direct_links.iter().find(|(_, &lid)| lid == link_id.0) {
+                let dest = dest; // copy
+                router.pending_direct_links.remove(&dest);
+                router.direct_links.insert(dest, link_id.0);
+            }
+
             // We initiated this link - check if it's for a direct delivery
             let node = match &router.node {
                 Some(n) => n.clone(),
@@ -947,6 +997,7 @@ impl Callbacks for LxmfCallbacks {
 
         // Remove from link tracking
         router.direct_links.retain(|_, v| *v != link_id.0);
+        router.pending_direct_links.retain(|_, v| *v != link_id.0);
         router.backchannel_links.retain(|_, v| *v != link_id.0);
         router.link_destinations.remove(&link_id.0);
         router
