@@ -3,7 +3,7 @@ members = ["lxmf-core", "lxmf", "lxmd"]
 resolver = "2"
 
 [workspace.package]
-version = "0.1.4"
+version = "0.1.5"
 edition = "2021"
 license-file = "LICENSE"
 repository = "https://github.com/lelloman/lxmf-rs"
@@ -13,8 +13,8 @@ authors = ["lxmf-rs contributors"]
 rns-crypto = { version = "0.1.3", default-features = false, path = "../rns-rs/rns-crypto" }
 rns-core = { version = "0.1.3", default-features = false, path = "../rns-rs/rns-core" }
 rns-net = { version = "0.4.0", path = "../rns-rs/rns-net" }
-lxmf-core = { version = "0.1.4", path = "lxmf-core" }
-lxmf-rs = { version = "0.1.4", path = "lxmf" }
+lxmf-core = { version = "0.1.5", path = "lxmf-core" }
+lxmf-rs = { version = "0.1.5", path = "lxmf" }
 log = "0.4"
 rayon = "1"
 
