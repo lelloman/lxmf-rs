@@ -16,8 +16,8 @@ use rns_core::types::{DestHash, IdentityHash, LinkId, PacketHash};
 use rns_crypto::identity::Identity;
 use rns_net::destination::AnnouncedIdentity;
 use rns_net::driver::Callbacks;
-use rns_net::node::{InterfaceConfig, InterfaceVariant, NodeConfig, RnsNode};
-use rns_net::{InterfaceId, ManagementConfig, RNodeConfig, RNodeSubConfig};
+use rns_net::node::{InterfaceConfig, NodeConfig, RnsNode};
+use rns_net::{InterfaceId, RNodeConfig, RNodeSubConfig};
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{:02x}", b)).collect()
@@ -49,14 +49,27 @@ impl Callbacks for AppCallbacks {
     fn on_local_delivery(&mut self, dest_hash: DestHash, raw: Vec<u8>, packet_hash: PacketHash) {
         self.inner.on_local_delivery(dest_hash, raw, packet_hash);
     }
-    fn on_link_established(&mut self, link_id: LinkId, dest_hash: DestHash, rtt: f64, is_initiator: bool) {
-        self.inner.on_link_established(link_id, dest_hash, rtt, is_initiator);
+    fn on_link_established(
+        &mut self,
+        link_id: LinkId,
+        dest_hash: DestHash,
+        rtt: f64,
+        is_initiator: bool,
+    ) {
+        self.inner
+            .on_link_established(link_id, dest_hash, rtt, is_initiator);
     }
     fn on_link_closed(&mut self, link_id: LinkId, reason: Option<rns_core::link::TeardownReason>) {
         self.inner.on_link_closed(link_id, reason);
     }
-    fn on_remote_identified(&mut self, link_id: LinkId, identity_hash: IdentityHash, public_key: [u8; 64]) {
-        self.inner.on_remote_identified(link_id, identity_hash, public_key);
+    fn on_remote_identified(
+        &mut self,
+        link_id: LinkId,
+        identity_hash: IdentityHash,
+        public_key: [u8; 64],
+    ) {
+        self.inner
+            .on_remote_identified(link_id, identity_hash, public_key);
     }
     fn on_resource_received(&mut self, link_id: LinkId, data: Vec<u8>, metadata: Option<Vec<u8>>) {
         self.inner.on_resource_received(link_id, data, metadata);
@@ -85,11 +98,11 @@ fn main() {
     env_logger::init();
 
     let args: Vec<String> = std::env::args().collect();
-    let port = args.get(1).cloned().unwrap_or_else(|| "/dev/ttyUSB0".into());
-    let freq_mhz: f64 = args
-        .get(2)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(868.0);
+    let port = args
+        .get(1)
+        .cloned()
+        .unwrap_or_else(|| "/dev/ttyUSB0".into());
+    let freq_mhz: f64 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(868.0);
     let frequency = (freq_mhz * 1_000_000.0) as u32;
 
     let data_dir = std::env::temp_dir().join("lxmf_rnode_echo");
@@ -106,7 +119,8 @@ fn main() {
         id
     };
 
-    let src_hash = rns_core::destination::destination_hash(APP_NAME, &["delivery"], Some(identity.hash()));
+    let src_hash =
+        rns_core::destination::destination_hash(APP_NAME, &["delivery"], Some(identity.hash()));
 
     println!("=== lxmf rnode echo ===");
     println!("Identity: {}", hex(identity.hash()));
@@ -117,7 +131,10 @@ fn main() {
     let (tx, rx) = mpsc::channel::<AppEvent>();
     let mut router = LxmRouter::new(
         Identity::from_private_key(&identity.get_private_key().unwrap()),
-        RouterConfig { storagepath: data_dir.clone(), ..RouterConfig::default() },
+        RouterConfig {
+            storagepath: data_dir.clone(),
+            ..RouterConfig::default()
+        },
     );
     let delivery_tx = tx.clone();
     let own_dest = src_hash;
@@ -136,51 +153,46 @@ fn main() {
         tx,
     };
 
+    let mut rnode_config = RNodeConfig {
+        name: format!("RNode {}", port),
+        port: port.clone(),
+        speed: 115200,
+        subinterfaces: vec![RNodeSubConfig {
+            name: "LoRa".into(),
+            frequency,
+            bandwidth: 125000,
+            txpower: 14,
+            spreading_factor: 8,
+            coding_rate: 5,
+            flow_control: false,
+            st_alock: None,
+            lt_alock: None,
+        }],
+        id_interval: None,
+        id_callsign: None,
+        base_interface_id: InterfaceId(1),
+        ..RNodeConfig::default()
+    };
+    rnode_config.runtime = Arc::new(Mutex::new(
+        rns_net::interface::rnode::RNodeRuntime::from_config(&rnode_config),
+    ));
+
     let node = Arc::new(
         RnsNode::start(
             NodeConfig {
                 transport_enabled: false,
                 identity: Some(Identity::new(&mut rns_crypto::OsRng)),
                 interfaces: vec![InterfaceConfig {
-                    variant: InterfaceVariant::RNode(RNodeConfig {
-                        name: format!("RNode {}", port),
-                        port: port.clone(),
-                        speed: 115200,
-                        subinterfaces: vec![RNodeSubConfig {
-                            name: "LoRa".into(),
-                            frequency,
-                            bandwidth: 125000,
-                            txpower: 14,
-                            spreading_factor: 8,
-                            coding_rate: 5,
-                            flow_control: false,
-                            st_alock: None,
-                            lt_alock: None,
-                        }],
-                        id_interval: None,
-                        id_callsign: None,
-                        base_interface_id: InterfaceId(1),
-                    }),
+                    name: String::new(),
+                    type_name: "RNodeInterface".to_string(),
+                    config_data: Box::new(rnode_config),
                     mode: rns_core::constants::MODE_FULL,
+                    ingress_control: rns_core::transport::types::IngressControlConfig::disabled(),
                     ifac: None,
                     discovery: None,
                 }],
-                share_instance: false,
-                instance_name: "default".into(),
-                shared_instance_port: 37428,
-                rpc_port: 0,
                 cache_dir: Some(data_dir.clone()),
-                management: ManagementConfig::default(),
-                probe_port: None,
-                probe_addrs: vec![],
-                probe_protocol: rns_core::holepunch::ProbeProtocol::Rnsp,
-                device: None,
-                hooks: vec![],
-                discover_interfaces: false,
-                discovery_required_value: None,
-                respond_to_probes: false,
-                prefer_shorter_path: false,
-                max_paths_per_destination: 1,
+                ..NodeConfig::default()
             },
             Box::new(app_callbacks),
         )
@@ -220,12 +232,20 @@ fn main() {
 
         while let Ok(event) = rx.try_recv() {
             match event {
-                AppEvent::MessageReceived { source_hash, title, content, method } => {
+                AppEvent::MessageReceived {
+                    source_hash,
+                    title,
+                    content,
+                    method,
+                } => {
                     let title_str = String::from_utf8_lossy(&title);
                     let content_str = String::from_utf8_lossy(&content);
                     println!(
                         "[RECV] from={} method={:?} title=\"{}\" content=\"{}\"",
-                        hex(&source_hash), method, title_str, content_str
+                        hex(&source_hash),
+                        method,
+                        title_str,
+                        content_str
                     );
 
                     if source_hash == own_dest {
@@ -250,10 +270,18 @@ fn main() {
                         .as_secs_f64();
 
                     match message::pack(
-                        &source_hash, &src_hash, timestamp,
-                        b"echo", echo_content.as_bytes(),
-                        vec![], None,
-                        |data| sign_identity.sign(data).map_err(|_| message::Error::SignError),
+                        &source_hash,
+                        &src_hash,
+                        timestamp,
+                        b"echo",
+                        echo_content.as_bytes(),
+                        vec![],
+                        None,
+                        |data| {
+                            sign_identity
+                                .sign(data)
+                                .map_err(|_| message::Error::SignError)
+                        },
                     ) {
                         Ok(packed) => {
                             let mut r = router.lock().unwrap();
@@ -284,12 +312,16 @@ fn main() {
                     }
                 }
                 AppEvent::Announce(announced) => {
-                    let app_str = announced.app_data.as_ref()
+                    let app_str = announced
+                        .app_data
+                        .as_ref()
                         .and_then(|d| std::str::from_utf8(d).ok())
                         .unwrap_or("");
                     println!(
                         "[ANN ] dest={} hops={} \"{}\"",
-                        hex(&announced.dest_hash.0), announced.hops, app_str
+                        hex(&announced.dest_hash.0),
+                        announced.hops,
+                        app_str
                     );
                 }
             }

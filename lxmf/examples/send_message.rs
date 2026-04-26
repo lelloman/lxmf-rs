@@ -19,8 +19,8 @@ use rns_crypto::identity::Identity;
 use rns_net::destination::AnnouncedIdentity;
 use rns_net::driver::Callbacks;
 use rns_net::interface::tcp::TcpClientConfig;
-use rns_net::node::{InterfaceConfig, InterfaceVariant, NodeConfig, RnsNode};
-use rns_net::{InterfaceId, ManagementConfig};
+use rns_net::node::{InterfaceConfig, NodeConfig, RnsNode};
+use rns_net::InterfaceId;
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{:02x}", b)).collect()
@@ -59,14 +59,27 @@ impl Callbacks for AppCallbacks {
     fn on_local_delivery(&mut self, dest_hash: DestHash, raw: Vec<u8>, packet_hash: PacketHash) {
         self.inner.on_local_delivery(dest_hash, raw, packet_hash);
     }
-    fn on_link_established(&mut self, link_id: LinkId, dest_hash: DestHash, rtt: f64, is_initiator: bool) {
-        self.inner.on_link_established(link_id, dest_hash, rtt, is_initiator);
+    fn on_link_established(
+        &mut self,
+        link_id: LinkId,
+        dest_hash: DestHash,
+        rtt: f64,
+        is_initiator: bool,
+    ) {
+        self.inner
+            .on_link_established(link_id, dest_hash, rtt, is_initiator);
     }
     fn on_link_closed(&mut self, link_id: LinkId, reason: Option<rns_core::link::TeardownReason>) {
         self.inner.on_link_closed(link_id, reason);
     }
-    fn on_remote_identified(&mut self, link_id: LinkId, identity_hash: IdentityHash, public_key: [u8; 64]) {
-        self.inner.on_remote_identified(link_id, identity_hash, public_key);
+    fn on_remote_identified(
+        &mut self,
+        link_id: LinkId,
+        identity_hash: IdentityHash,
+        public_key: [u8; 64],
+    ) {
+        self.inner
+            .on_remote_identified(link_id, identity_hash, public_key);
     }
     fn on_resource_received(&mut self, link_id: LinkId, data: Vec<u8>, metadata: Option<Vec<u8>>) {
         self.inner.on_resource_received(link_id, data, metadata);
@@ -113,7 +126,10 @@ fn main() {
     if !listen_only {
         let target_hex = &args[2];
         if target_hex.len() != 32 {
-            eprintln!("Error: dest hash must be 32 hex chars, got {}", target_hex.len());
+            eprintln!(
+                "Error: dest hash must be 32 hex chars, got {}",
+                target_hex.len()
+            );
             std::process::exit(1);
         }
         let bytes = parse_hex(target_hex);
@@ -144,7 +160,8 @@ fn main() {
         id
     };
 
-    let src_hash = rns_core::destination::destination_hash(APP_NAME, &["delivery"], Some(identity.hash()));
+    let src_hash =
+        rns_core::destination::destination_hash(APP_NAME, &["delivery"], Some(identity.hash()));
 
     println!("Own identity: {}", hex(identity.hash()));
     println!("Own dest:     {}", hex(&src_hash));
@@ -160,7 +177,10 @@ fn main() {
     let (tx, rx) = mpsc::channel::<AppEvent>();
     let mut router = LxmRouter::new(
         Identity::from_private_key(&identity.get_private_key().unwrap()),
-        RouterConfig { storagepath: tmp_dir.clone(), ..RouterConfig::default() },
+        RouterConfig {
+            storagepath: tmp_dir.clone(),
+            ..RouterConfig::default()
+        },
     );
     let delivery_tx = tx.clone();
     router.set_delivery_callback(Box::new(move |d: &LxmDelivery| {
@@ -179,41 +199,33 @@ fn main() {
     };
 
     // Start node
-    let node = Arc::new(RnsNode::start(
-        NodeConfig {
-            transport_enabled: false,
-            identity: Some(Identity::new(&mut rns_crypto::OsRng)),
-            interfaces: vec![InterfaceConfig {
-                variant: InterfaceVariant::TcpClient(TcpClientConfig {
-                    name: "send_msg".into(),
-                    target_host: host.to_string(),
-                    target_port: port,
-                    interface_id: InterfaceId(1),
-                    ..TcpClientConfig::default()
-                }),
-                mode: rns_core::constants::MODE_FULL,
-                ifac: None,
-                discovery: None,
-            }],
-            share_instance: false,
-            instance_name: "default".into(),
-            shared_instance_port: 37428,
-            rpc_port: 0,
-            cache_dir: Some(tmp_dir.clone()),
-            management: ManagementConfig::default(),
-            probe_port: None,
-            probe_addrs: vec![],
-            probe_protocol: rns_core::holepunch::ProbeProtocol::Rnsp,
-            device: None,
-            hooks: vec![],
-            discover_interfaces: false,
-            discovery_required_value: None,
-            respond_to_probes: false,
-            prefer_shorter_path: false,
-            max_paths_per_destination: 1,
-        },
-        Box::new(app_callbacks),
-    ).expect("Failed to start RNS node"));
+    let node = Arc::new(
+        RnsNode::start(
+            NodeConfig {
+                transport_enabled: false,
+                identity: Some(Identity::new(&mut rns_crypto::OsRng)),
+                interfaces: vec![InterfaceConfig {
+                    name: String::new(),
+                    type_name: "TCPClientInterface".to_string(),
+                    config_data: Box::new(TcpClientConfig {
+                        name: "send_msg".into(),
+                        target_host: host.to_string(),
+                        target_port: port,
+                        interface_id: InterfaceId(1),
+                        ..TcpClientConfig::default()
+                    }),
+                    mode: rns_core::constants::MODE_FULL,
+                    ingress_control: rns_core::transport::types::IngressControlConfig::enabled(),
+                    ifac: None,
+                    discovery: None,
+                }],
+                cache_dir: Some(tmp_dir.clone()),
+                ..NodeConfig::default()
+            },
+            Box::new(app_callbacks),
+        )
+        .expect("Failed to start RNS node"),
+    );
 
     {
         let mut r = router.lock().unwrap();
@@ -236,11 +248,20 @@ fn main() {
             .unwrap()
             .as_secs_f64();
         let packed = message::pack(
-            &target_dest, &src_hash, timestamp,
-            b"hello", b"Hello from lxmf-rs!",
-            vec![], None,
-            |data| sign_identity.sign(data).map_err(|_| message::Error::SignError),
-        ).expect("pack message");
+            &target_dest,
+            &src_hash,
+            timestamp,
+            b"hello",
+            b"Hello from lxmf-rs!",
+            vec![],
+            None,
+            |data| {
+                sign_identity
+                    .sign(data)
+                    .map_err(|_| message::Error::SignError)
+            },
+        )
+        .expect("pack message");
 
         println!("[QUEUE] message queued for {}", hex(&target_dest));
 
@@ -274,9 +295,18 @@ fn main() {
         while let Ok(event) = rx.try_recv() {
             match event {
                 AppEvent::Announce(announced) => {
-                    println!("[ANN] dest={} hops={}", hex(&announced.dest_hash.0), announced.hops);
+                    println!(
+                        "[ANN] dest={} hops={}",
+                        hex(&announced.dest_hash.0),
+                        announced.hops
+                    );
                 }
-                AppEvent::MessageReceived { source_hash, title, content, method } => {
+                AppEvent::MessageReceived {
+                    source_hash,
+                    title,
+                    content,
+                    method,
+                } => {
                     println!(
                         "[RECV] from={} method={:?} title=\"{}\" content=\"{}\"",
                         hex(&source_hash),

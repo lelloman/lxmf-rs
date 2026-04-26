@@ -125,10 +125,10 @@ pub struct LxmRouter {
     pub pending_inbound: VecDeque<Vec<u8>>,
 
     // Link tracking
-    pub direct_links: HashMap<[u8; 16], [u8; 16]>,       // dest_hash -> link_id
+    pub direct_links: HashMap<[u8; 16], [u8; 16]>, // dest_hash -> link_id
     pub pending_direct_links: HashMap<[u8; 16], [u8; 16]>, // dest_hash -> link_id (being established)
-    pub backchannel_links: HashMap<[u8; 16], [u8; 16]>,   // dest_hash -> link_id
-    pub link_destinations: HashMap<[u8; 16], [u8; 16]>,   // link_id -> dest_hash
+    pub backchannel_links: HashMap<[u8; 16], [u8; 16]>,    // dest_hash -> link_id
+    pub link_destinations: HashMap<[u8; 16], [u8; 16]>,    // link_id -> dest_hash
     pub active_propagation_links: Vec<[u8; 16]>,
     pub propagation_link: Option<[u8; 16]>,
 
@@ -181,14 +181,11 @@ impl LxmRouter {
         let _ = paths.ensure_dirs();
 
         // Compute propagation destination hash
-        let propagation_dest_hash =
-            compute_dest_hash(APP_NAME, &["propagation"], identity.hash());
+        let propagation_dest_hash = compute_dest_hash(APP_NAME, &["propagation"], identity.hash());
 
         // Load persisted state
-        let locally_delivered_transient_ids =
-            storage::load_transient_ids(&paths.local_deliveries);
-        let locally_processed_transient_ids =
-            storage::load_transient_ids(&paths.locally_processed);
+        let locally_delivered_transient_ids = storage::load_transient_ids(&paths.local_deliveries);
+        let locally_processed_transient_ids = storage::load_transient_ids(&paths.locally_processed);
         let outbound_stamp_costs = storage::load_stamp_costs(&paths.outbound_stamp_costs);
 
         // Load peers from storage
@@ -293,8 +290,7 @@ impl LxmRouter {
         stamp_cost: Option<u8>,
         display_name: Option<String>,
     ) {
-        let dest_hash =
-            compute_dest_hash(APP_NAME, &["delivery"], delivery_identity.hash());
+        let dest_hash = compute_dest_hash(APP_NAME, &["delivery"], delivery_identity.hash());
         self.delivery_dest_hash = Some(dest_hash);
         self.delivery_stamp_cost = stamp_cost;
         self.display_name = display_name;
@@ -339,11 +335,8 @@ impl LxmRouter {
             let _ = node.register_destination(self.propagation_dest_hash, 1);
 
             // Register control destination
-            let control_hash = compute_dest_hash(
-                APP_NAME,
-                &["propagation", "control"],
-                self.identity.hash(),
-            );
+            let control_hash =
+                compute_dest_hash(APP_NAME, &["propagation", "control"], self.identity.hash());
             self.control_dest_hash = Some(control_hash);
             let _ = node.register_destination(control_hash, 1);
         }
@@ -533,12 +526,14 @@ impl LxmRouter {
 
             match msg.method {
                 DeliveryMethod::Opportunistic => {
-                    if node.has_path(&DestHash(msg.destination_hash)).unwrap_or(false) {
+                    if node
+                        .has_path(&DestHash(msg.destination_hash))
+                        .unwrap_or(false)
+                    {
                         if let Ok(Some(announced)) =
                             node.recall_identity(&DestHash(msg.destination_hash))
                         {
-                            let dest =
-                                Destination::single_out(APP_NAME, &["delivery"], &announced);
+                            let dest = Destination::single_out(APP_NAME, &["delivery"], &announced);
                             let data = &msg.packed[DESTINATION_LENGTH..];
                             match node.send_packet(&dest, data) {
                                 Ok(packet_hash) => {
@@ -557,7 +552,10 @@ impl LxmRouter {
                 DeliveryMethod::Direct => {
                     if let Some(&link_id) = self.direct_links.get(&msg.destination_hash) {
                         send_on_link(&node, msg, link_id);
-                    } else if self.pending_direct_links.contains_key(&msg.destination_hash) {
+                    } else if self
+                        .pending_direct_links
+                        .contains_key(&msg.destination_hash)
+                    {
                         // Link is being established, wait for it
                     } else if let Ok(Some(announced)) =
                         node.recall_identity(&DestHash(msg.destination_hash))
@@ -565,7 +563,8 @@ impl LxmRouter {
                         let sig_pub: [u8; 32] = announced.public_key[32..].try_into().unwrap();
                         match node.create_link(msg.destination_hash, sig_pub) {
                             Ok(link_id) => {
-                                self.pending_direct_links.insert(msg.destination_hash, link_id);
+                                self.pending_direct_links
+                                    .insert(msg.destination_hash, link_id);
                                 msg.link_id = Some(link_id);
                                 msg.state = MessageState::Sending;
                             }
@@ -585,14 +584,12 @@ impl LxmRouter {
                                 let _ = node.send_on_link(link_id, prop_packed.clone(), 0);
                             } else {
                                 msg.representation = Representation::Resource;
-                                let _ =
-                                    node.send_resource(link_id, prop_packed.clone(), None);
+                                let _ = node.send_resource(link_id, prop_packed.clone(), None);
                             }
                             msg.state = MessageState::Sending;
                         }
                     } else {
-                        let _ =
-                            node.request_path(&DestHash(self.propagation_dest_hash));
+                        let _ = node.request_path(&DestHash(self.propagation_dest_hash));
                     }
                 }
                 DeliveryMethod::Paper => {
@@ -737,10 +734,8 @@ impl LxmRouter {
     pub fn update_stamp_cost(&mut self, dest_hash: [u8; 16], cost: u8) {
         let now = now_timestamp();
         self.outbound_stamp_costs.insert(dest_hash, (now, cost));
-        let _ = storage::save_stamp_costs(
-            &self.paths.outbound_stamp_costs,
-            &self.outbound_stamp_costs,
-        );
+        let _ =
+            storage::save_stamp_costs(&self.paths.outbound_stamp_costs, &self.outbound_stamp_costs);
     }
 
     /// Get the known stamp cost for a destination.
@@ -806,10 +801,8 @@ impl LxmRouter {
             &self.paths.locally_processed,
             &self.locally_processed_transient_ids,
         );
-        let _ = storage::save_stamp_costs(
-            &self.paths.outbound_stamp_costs,
-            &self.outbound_stamp_costs,
-        );
+        let _ =
+            storage::save_stamp_costs(&self.paths.outbound_stamp_costs, &self.outbound_stamp_costs);
 
         // Save peers
         self.save_peers();
@@ -876,7 +869,9 @@ impl Callbacks for LxmfCallbacks {
         }
 
         // Cache the public key for signature verification in lxmf_delivery
-        router.identity_cache.insert(announced.dest_hash.0, announced.public_key);
+        router
+            .identity_cache
+            .insert(announced.dest_hash.0, announced.public_key);
 
         // Extract stamp cost from delivery announces
         if let Some(ref app_data) = announced.app_data {
@@ -888,10 +883,7 @@ impl Callbacks for LxmfCallbacks {
                         if let Some(arr) = val.as_array() {
                             if arr.len() >= 2 {
                                 if let Some(cost) = arr[1].as_uint() {
-                                    router.update_stamp_cost(
-                                        announced.dest_hash.0,
-                                        cost as u8,
-                                    );
+                                    router.update_stamp_cost(announced.dest_hash.0, cost as u8);
                                 }
                             }
                         }
@@ -907,12 +899,7 @@ impl Callbacks for LxmfCallbacks {
         // Could trigger outbound processing for waiting messages
     }
 
-    fn on_local_delivery(
-        &mut self,
-        dest_hash: DestHash,
-        raw: Vec<u8>,
-        _packet_hash: PacketHash,
-    ) {
+    fn on_local_delivery(&mut self, dest_hash: DestHash, raw: Vec<u8>, _packet_hash: PacketHash) {
         let mut router = self.router.lock().unwrap();
 
         // Check if this is for our delivery destination
@@ -935,8 +922,7 @@ impl Callbacks for LxmfCallbacks {
                     }
                 };
                 // Opportunistic delivery: prepend destination hash to decrypted payload
-                let mut lxmf_bytes =
-                    Vec::with_capacity(DESTINATION_LENGTH + plaintext.len());
+                let mut lxmf_bytes = Vec::with_capacity(DESTINATION_LENGTH + plaintext.len());
                 lxmf_bytes.extend_from_slice(&dest_hash.0);
                 lxmf_bytes.extend_from_slice(&plaintext);
                 router.lxmf_delivery(
@@ -960,21 +946,22 @@ impl Callbacks for LxmfCallbacks {
 
         if is_initiator {
             // Promote pending → active if this link was created via ensure_direct_link
-            if let Some((&dest, _)) = router.pending_direct_links.iter().find(|(_, &lid)| lid == link_id.0) {
+            if let Some((&dest, _)) = router
+                .pending_direct_links
+                .iter()
+                .find(|(_, &lid)| lid == link_id.0)
+            {
                 let dest = dest; // copy
                 router.pending_direct_links.remove(&dest);
                 router.direct_links.insert(dest, link_id.0);
             }
 
-            // We initiated this link - check if it's for a direct delivery
-            let node = match &router.node {
-                Some(n) => n.clone(),
-                None => return,
-            };
+            // We initiated this link. Mark queued direct messages ready; the
+            // next jobs() cycle will send them outside the driver callback.
             for msg in &mut router.outbound {
-                if msg.link_id == Some(link_id.0) {
-                    send_on_link(&node, msg, link_id.0);
-                    break;
+                if msg.link_id == Some(link_id.0) && msg.state == MessageState::Sending {
+                    msg.state = MessageState::Outbound;
+                    msg.last_attempt = 0.0;
                 }
             }
         } else {
@@ -988,11 +975,7 @@ impl Callbacks for LxmfCallbacks {
         }
     }
 
-    fn on_link_closed(
-        &mut self,
-        link_id: LinkId,
-        _reason: Option<rns_core::link::TeardownReason>,
-    ) {
+    fn on_link_closed(&mut self, link_id: LinkId, _reason: Option<rns_core::link::TeardownReason>) {
         let mut router = self.router.lock().unwrap();
 
         // Remove from link tracking
@@ -1027,12 +1010,7 @@ impl Callbacks for LxmfCallbacks {
         router.backchannel_links.insert(identity_hash.0, link_id.0);
     }
 
-    fn on_resource_received(
-        &mut self,
-        link_id: LinkId,
-        data: Vec<u8>,
-        _metadata: Option<Vec<u8>>,
-    ) {
+    fn on_resource_received(&mut self, link_id: LinkId, data: Vec<u8>, _metadata: Option<Vec<u8>>) {
         let mut router = self.router.lock().unwrap();
 
         // Check if this link is for delivery
@@ -1082,21 +1060,11 @@ impl Callbacks for LxmfCallbacks {
         }
     }
 
-    fn on_response(
-        &mut self,
-        _link_id: LinkId,
-        _request_id: [u8; 16],
-        _data: Vec<u8>,
-    ) {
+    fn on_response(&mut self, _link_id: LinkId, _request_id: [u8; 16], _data: Vec<u8>) {
         // Response handling for propagation requests is done in peer module
     }
 
-    fn on_proof(
-        &mut self,
-        _dest_hash: DestHash,
-        packet_hash: PacketHash,
-        _rtt: f64,
-    ) {
+    fn on_proof(&mut self, _dest_hash: DestHash, packet_hash: PacketHash, _rtt: f64) {
         let mut router = self.router.lock().unwrap();
 
         // Check if this proof matches an outbound message
@@ -1111,22 +1079,13 @@ impl Callbacks for LxmfCallbacks {
         }
     }
 
-    fn on_proof_requested(
-        &mut self,
-        dest_hash: DestHash,
-        _packet_hash: PacketHash,
-    ) -> bool {
+    fn on_proof_requested(&mut self, dest_hash: DestHash, _packet_hash: PacketHash) -> bool {
         let router = self.router.lock().unwrap();
         // Auto-prove delivery packets
         router.delivery_dest_hash == Some(dest_hash.0)
     }
 
-    fn on_link_data(
-        &mut self,
-        link_id: LinkId,
-        _context: u8,
-        data: Vec<u8>,
-    ) {
+    fn on_link_data(&mut self, link_id: LinkId, _context: u8, data: Vec<u8>) {
         let mut router = self.router.lock().unwrap();
 
         // Direct delivery via link packet

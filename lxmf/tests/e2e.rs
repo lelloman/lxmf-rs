@@ -9,17 +9,17 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 use std::{fs, thread};
 
-use lxmf_rs::router::{LxmDelivery, LxmRouter, LxmfCallbacks, OutboundMessage, RouterConfig};
 use lxmf_core::constants::*;
 use lxmf_core::message;
+use lxmf_rs::router::{LxmDelivery, LxmRouter, LxmfCallbacks, OutboundMessage, RouterConfig};
 use rns_core::types::{DestHash, IdentityHash, LinkId, PacketHash};
 use rns_crypto::identity::Identity;
 use rns_net::destination::{AnnouncedIdentity, Destination};
 use rns_net::driver::Callbacks;
 use rns_net::interface::tcp::TcpClientConfig;
 use rns_net::interface::tcp_server::TcpServerConfig;
-use rns_net::node::{InterfaceConfig, InterfaceVariant, NodeConfig, RnsNode};
-use rns_net::{Event, InterfaceId, ManagementConfig};
+use rns_net::node::{InterfaceConfig, NodeConfig, RnsNode};
+use rns_net::{Event, InterfaceId};
 
 // ============================================================
 // Constants
@@ -96,23 +96,26 @@ impl Callbacks for LxmfTestCallbacks {
         self.inner.on_local_delivery(dest_hash, raw, packet_hash);
     }
 
-    fn on_link_established(&mut self, link_id: LinkId, dest_hash: DestHash, rtt: f64, is_initiator: bool) {
+    fn on_link_established(
+        &mut self,
+        link_id: LinkId,
+        dest_hash: DestHash,
+        rtt: f64,
+        is_initiator: bool,
+    ) {
         let _ = self.tx.send(LxmfTestEvent::LinkEstablished {
             link_id: link_id.0,
             rtt,
             is_initiator,
         });
-        self.inner.on_link_established(link_id, dest_hash, rtt, is_initiator);
+        self.inner
+            .on_link_established(link_id, dest_hash, rtt, is_initiator);
     }
 
-    fn on_link_closed(
-        &mut self,
-        link_id: LinkId,
-        reason: Option<rns_core::link::TeardownReason>,
-    ) {
-        let _ = self.tx.send(LxmfTestEvent::LinkClosed {
-            link_id: link_id.0,
-        });
+    fn on_link_closed(&mut self, link_id: LinkId, reason: Option<rns_core::link::TeardownReason>) {
+        let _ = self
+            .tx
+            .send(LxmfTestEvent::LinkClosed { link_id: link_id.0 });
         self.inner.on_link_closed(link_id, reason);
     }
 
@@ -126,12 +129,7 @@ impl Callbacks for LxmfTestCallbacks {
             .on_remote_identified(link_id, identity_hash, public_key);
     }
 
-    fn on_resource_received(
-        &mut self,
-        link_id: LinkId,
-        data: Vec<u8>,
-        metadata: Option<Vec<u8>>,
-    ) {
+    fn on_resource_received(&mut self, link_id: LinkId, data: Vec<u8>, metadata: Option<Vec<u8>>) {
         self.inner.on_resource_received(link_id, data, metadata);
     }
 
@@ -207,8 +205,7 @@ fn find_free_port() -> u16 {
 }
 
 fn temp_dir(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir()
-        .join(format!("lxmf_e2e_{}_{}", name, std::process::id()));
+    let dir = std::env::temp_dir().join(format!("lxmf_e2e_{}_{}", name, std::process::id()));
     let _ = fs::create_dir_all(&dir);
     dir
 }
@@ -246,9 +243,11 @@ fn wait_for_announce(
     timeout: Duration,
 ) -> Option<AnnouncedIdentity> {
     let hash = *expected_hash;
-    wait_for_event(rx, timeout, move |e| {
-        matches!(e, LxmfTestEvent::Announce(a) if a.dest_hash.0 == hash)
-    })
+    wait_for_event(
+        rx,
+        timeout,
+        move |e| matches!(e, LxmfTestEvent::Announce(a) if a.dest_hash.0 == hash),
+    )
     .and_then(|e| match e {
         LxmfTestEvent::Announce(a) => Some(a),
         _ => None,
@@ -265,10 +264,7 @@ fn wait_for_message_delivery(
 }
 
 #[allow(dead_code)]
-fn wait_for_proof(
-    rx: &mpsc::Receiver<LxmfTestEvent>,
-    timeout: Duration,
-) -> Option<LxmfTestEvent> {
+fn wait_for_proof(rx: &mpsc::Receiver<LxmfTestEvent>, timeout: Duration) -> Option<LxmfTestEvent> {
     wait_for_event(rx, timeout, |e| matches!(e, LxmfTestEvent::Proof { .. }))
 }
 
@@ -293,32 +289,22 @@ fn start_transport_node(port: u16) -> (RnsNode, PathBuf) {
         transport_enabled: true,
         identity: Some(Identity::new(&mut rns_crypto::OsRng)),
         interfaces: vec![InterfaceConfig {
-            variant: InterfaceVariant::TcpServer(TcpServerConfig {
+            name: String::new(),
+            type_name: "TCPServerInterface".to_string(),
+            config_data: Box::new(TcpServerConfig {
                 name: "e2e_server".into(),
                 listen_ip: "127.0.0.1".into(),
                 listen_port: port,
                 interface_id: InterfaceId(1),
+                ..TcpServerConfig::default()
             }),
             mode: rns_core::constants::MODE_FULL,
+            ingress_control: rns_core::transport::types::IngressControlConfig::enabled(),
             ifac: None,
             discovery: None,
         }],
-        share_instance: false,
-        instance_name: "default".into(),
-        shared_instance_port: 37428,
-        rpc_port: 0,
         cache_dir: Some(dir.clone()),
-        management: ManagementConfig::default(),
-        probe_port: None,
-        probe_addrs: vec![],
-        probe_protocol: rns_core::holepunch::ProbeProtocol::Rnsp,
-        device: None,
-        hooks: vec![],
-        discover_interfaces: false,
-        discovery_required_value: None,
-        respond_to_probes: false,
-        prefer_shorter_path: false,
-        max_paths_per_destination: 1,
+        ..NodeConfig::default()
     };
 
     struct NoopCallbacks;
@@ -338,7 +324,9 @@ fn start_client_node(port: u16, callbacks: Box<dyn Callbacks>) -> RnsNode {
         transport_enabled: false,
         identity: Some(Identity::new(&mut rns_crypto::OsRng)),
         interfaces: vec![InterfaceConfig {
-            variant: InterfaceVariant::TcpClient(TcpClientConfig {
+            name: String::new(),
+            type_name: "TCPClientInterface".to_string(),
+            config_data: Box::new(TcpClientConfig {
                 name: "e2e_client".into(),
                 target_host: "127.0.0.1".into(),
                 target_port: port,
@@ -346,25 +334,11 @@ fn start_client_node(port: u16, callbacks: Box<dyn Callbacks>) -> RnsNode {
                 ..TcpClientConfig::default()
             }),
             mode: rns_core::constants::MODE_FULL,
+            ingress_control: rns_core::transport::types::IngressControlConfig::enabled(),
             ifac: None,
             discovery: None,
         }],
-        share_instance: false,
-        instance_name: "default".into(),
-        shared_instance_port: 37428,
-        rpc_port: 0,
-        cache_dir: None,
-        management: ManagementConfig::default(),
-        probe_port: None,
-        probe_addrs: vec![],
-        probe_protocol: rns_core::holepunch::ProbeProtocol::Rnsp,
-        device: None,
-        hooks: vec![],
-        discover_interfaces: false,
-        discovery_required_value: None,
-        respond_to_probes: false,
-        prefer_shorter_path: false,
-        max_paths_per_destination: 1,
+        ..NodeConfig::default()
     };
 
     RnsNode::start(config, callbacks).expect("client node start")
@@ -410,20 +384,13 @@ fn setup_lxmf_node(port: u16, name: &str, stamp_cost: Option<u8>) -> LxmfNodeHan
     let node = Arc::new(start_client_node(port, Box::new(test_callbacks)));
 
     // Compute delivery dest hash for assertions
-    let delivery_dest_hash = rns_core::destination::destination_hash(
-        APP_NAME,
-        &["delivery"],
-        Some(identity.hash()),
-    );
+    let delivery_dest_hash =
+        rns_core::destination::destination_hash(APP_NAME, &["delivery"], Some(identity.hash()));
 
     {
         let mut r = router.lock().unwrap();
         r.set_node(node.clone());
-        r.register_delivery_identity(
-            &identity,
-            stamp_cost,
-            Some(name.to_string()),
-        );
+        r.register_delivery_identity(&identity, stamp_cost, Some(name.to_string()));
     }
 
     LxmfNodeHandle {
@@ -453,10 +420,7 @@ impl TwoPeers {
     }
 }
 
-fn setup_two_lxmf_peers(
-    alice_stamp_cost: Option<u8>,
-    bob_stamp_cost: Option<u8>,
-) -> TwoPeers {
+fn setup_two_lxmf_peers(alice_stamp_cost: Option<u8>, bob_stamp_cost: Option<u8>) -> TwoPeers {
     let port = find_free_port();
     let (transport_node, transport_dir) = start_transport_node(port);
 
@@ -761,18 +725,26 @@ fn test_opportunistic_delivery() {
     // synchronous RPCs to the driver, which may be mid-callback trying
     // to acquire the same router lock.
     assert!(
-        peers.alice.node.has_path(&DestHash(peers.bob.delivery_dest_hash)).unwrap(),
+        peers
+            .alice
+            .node
+            .has_path(&DestHash(peers.bob.delivery_dest_hash))
+            .unwrap(),
         "Alice should have Bob's path from the announce exchange"
     );
 
-    let announced = peers.alice.node
+    let announced = peers
+        .alice
+        .node
         .recall_identity(&DestHash(peers.bob.delivery_dest_hash))
         .unwrap()
         .expect("Alice should have Bob's announced identity");
 
     let dest = Destination::single_out(APP_NAME, &["delivery"], &announced);
     let lxmf_payload = &pack_result.packed[DESTINATION_LENGTH..];
-    let _packet_hash = peers.alice.node
+    let _packet_hash = peers
+        .alice
+        .node
         .send_packet(&dest, lxmf_payload)
         .expect("send_packet should succeed");
 
@@ -870,10 +842,7 @@ fn test_stamp_cost_propagation_via_announce() {
         &peers.bob.delivery_dest_hash,
         DEFAULT_TIMEOUT,
     );
-    assert!(
-        bob_ann.is_some(),
-        "Alice should receive Bob's announce"
-    );
+    assert!(bob_ann.is_some(), "Alice should receive Bob's announce");
 
     // Alice announces with stamp_cost=4
     {
@@ -887,10 +856,7 @@ fn test_stamp_cost_propagation_via_announce() {
         &peers.alice.delivery_dest_hash,
         DEFAULT_TIMEOUT,
     );
-    assert!(
-        alice_ann.is_some(),
-        "Bob should receive Alice's announce"
-    );
+    assert!(alice_ann.is_some(), "Bob should receive Alice's announce");
 
     // Allow announce processing
     thread::sleep(Duration::from_millis(500));
@@ -975,15 +941,31 @@ fn test_direct_delivery_via_link() {
         peers.alice.router.lock().unwrap().jobs();
     }
 
-    // Bob should receive via direct link delivery
-    let event = wait_for_message_delivery(&peers.bob.rx, DEFAULT_TIMEOUT);
+    // Bob should receive via direct link delivery. Link establishment happens
+    // asynchronously, so keep driving Alice's router jobs until the link is
+    // promoted and the queued message is sent.
+    let deadline = Instant::now() + DEFAULT_TIMEOUT;
+    let mut event = None;
+    while Instant::now() < deadline {
+        {
+            peers.alice.router.lock().unwrap().jobs();
+        }
+        if let Some(delivery) = wait_for_message_delivery(&peers.bob.rx, Duration::from_millis(200))
+        {
+            event = Some(delivery);
+            break;
+        }
+    }
     assert!(
         event.is_some(),
         "Bob should receive the message via direct link"
     );
 
     if let Some(LxmfTestEvent::MessageDelivered {
-        method, title, content, ..
+        method,
+        title,
+        content,
+        ..
     }) = event
     {
         assert_eq!(method, DeliveryMethod::Direct);

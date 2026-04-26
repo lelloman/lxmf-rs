@@ -15,16 +15,16 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use lxmf_rs::router::{LxmDelivery, LxmRouter, LxmfCallbacks, RouterConfig};
 use lxmf_core::constants::*;
 use lxmf_core::message;
+use lxmf_rs::router::{LxmDelivery, LxmRouter, LxmfCallbacks, RouterConfig};
 use rns_core::types::{DestHash, IdentityHash, LinkId, PacketHash};
 use rns_crypto::identity::Identity;
 use rns_net::destination::{AnnouncedIdentity, Destination};
 use rns_net::driver::Callbacks;
 use rns_net::interface::tcp::TcpClientConfig;
-use rns_net::node::{InterfaceConfig, InterfaceVariant, NodeConfig, RnsNode};
-use rns_net::{InterfaceId, ManagementConfig};
+use rns_net::node::{InterfaceConfig, NodeConfig, RnsNode};
+use rns_net::InterfaceId;
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{:02x}", b)).collect()
@@ -61,15 +61,18 @@ impl Callbacks for AppCallbacks {
         self.inner.on_local_delivery(dest_hash, raw, packet_hash);
     }
 
-    fn on_link_established(&mut self, link_id: LinkId, dest_hash: DestHash, rtt: f64, is_initiator: bool) {
-        self.inner.on_link_established(link_id, dest_hash, rtt, is_initiator);
-    }
-
-    fn on_link_closed(
+    fn on_link_established(
         &mut self,
         link_id: LinkId,
-        reason: Option<rns_core::link::TeardownReason>,
+        dest_hash: DestHash,
+        rtt: f64,
+        is_initiator: bool,
     ) {
+        self.inner
+            .on_link_established(link_id, dest_hash, rtt, is_initiator);
+    }
+
+    fn on_link_closed(&mut self, link_id: LinkId, reason: Option<rns_core::link::TeardownReason>) {
         self.inner.on_link_closed(link_id, reason);
     }
 
@@ -83,12 +86,7 @@ impl Callbacks for AppCallbacks {
             .on_remote_identified(link_id, identity_hash, public_key);
     }
 
-    fn on_resource_received(
-        &mut self,
-        link_id: LinkId,
-        data: Vec<u8>,
-        metadata: Option<Vec<u8>>,
-    ) {
+    fn on_resource_received(&mut self, link_id: LinkId, data: Vec<u8>, metadata: Option<Vec<u8>>) {
         self.inner.on_resource_received(link_id, data, metadata);
     }
 
@@ -122,10 +120,7 @@ fn main() {
 
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 || args.len() > 3 {
-        eprintln!(
-            "Usage: {} <node_host:port> [target_identity_file]",
-            args[0]
-        );
+        eprintln!("Usage: {} <node_host:port> [target_identity_file]", args[0]);
         eprintln!("  node_host:port        - TCP address of an RNS transport node");
         eprintln!("  target_identity_file  - Optional path to target's 64-byte identity key file");
         std::process::exit(1);
@@ -147,11 +142,17 @@ fn main() {
     let target_identity: Option<Identity> = if args.len() == 3 {
         let path = &args[2];
         let key_bytes = std::fs::read(path).unwrap_or_else(|e| {
-            eprintln!("Error: failed to read target identity file '{}': {}", path, e);
+            eprintln!(
+                "Error: failed to read target identity file '{}': {}",
+                path, e
+            );
             std::process::exit(1);
         });
         if key_bytes.len() != 64 {
-            eprintln!("Error: identity file must be 64 bytes, got {}", key_bytes.len());
+            eprintln!(
+                "Error: identity file must be 64 bytes, got {}",
+                key_bytes.len()
+            );
             std::process::exit(1);
         }
         let mut prv_key = [0u8; 64];
@@ -174,21 +175,21 @@ fn main() {
         Identity::from_private_key(&prv_key)
     } else {
         let id = Identity::new(&mut rns_crypto::OsRng);
-        std::fs::write(&own_identity_path, id.get_private_key().unwrap()).expect("save own identity");
+        std::fs::write(&own_identity_path, id.get_private_key().unwrap())
+            .expect("save own identity");
         id
     };
-    let delivery_dest_hash = rns_core::destination::destination_hash(
-        APP_NAME,
-        &["delivery"],
-        Some(identity.hash()),
-    );
+    let delivery_dest_hash =
+        rns_core::destination::destination_hash(APP_NAME, &["delivery"], Some(identity.hash()));
 
     println!("=== lxmf-rs live test ===");
     println!("Own identity hash: {}", hex(identity.hash()));
     println!("Own delivery dest:  {}", hex(&delivery_dest_hash));
     if let Some(ref target_id) = target_identity {
         let target_dest = rns_core::destination::destination_hash(
-            APP_NAME, &["delivery"], Some(target_id.hash()),
+            APP_NAME,
+            &["delivery"],
+            Some(target_id.hash()),
         );
         println!("Target identity:    {}", hex(target_id.hash()));
         println!("Target dest:        {}", hex(&target_dest));
@@ -233,7 +234,9 @@ fn main() {
         transport_enabled: false,
         identity: Some(Identity::new(&mut rns_crypto::OsRng)),
         interfaces: vec![InterfaceConfig {
-            variant: InterfaceVariant::TcpClient(TcpClientConfig {
+            name: String::new(),
+            type_name: "TCPClientInterface".to_string(),
+            config_data: Box::new(TcpClientConfig {
                 name: "live_test".into(),
                 target_host: host.to_string(),
                 target_port: port,
@@ -241,25 +244,12 @@ fn main() {
                 ..TcpClientConfig::default()
             }),
             mode: rns_core::constants::MODE_FULL,
+            ingress_control: rns_core::transport::types::IngressControlConfig::enabled(),
             ifac: None,
             discovery: None,
         }],
-        share_instance: false,
-        instance_name: "default".into(),
-        shared_instance_port: 37428,
-        rpc_port: 0,
         cache_dir: Some(tmp_dir.clone()),
-        management: ManagementConfig::default(),
-        probe_port: None,
-        probe_addrs: vec![],
-        probe_protocol: rns_core::holepunch::ProbeProtocol::Rnsp,
-        device: None,
-        hooks: vec![],
-        discover_interfaces: false,
-        discovery_required_value: None,
-        respond_to_probes: false,
-        prefer_shorter_path: false,
-        max_paths_per_destination: 1,
+        ..NodeConfig::default()
     };
 
     let node = Arc::new(
@@ -284,18 +274,17 @@ fn main() {
     }
     println!("Announced delivery destination");
 
-    let src_hash = rns_core::destination::destination_hash(
-        APP_NAME,
-        &["delivery"],
-        Some(identity.hash()),
-    );
+    let src_hash =
+        rns_core::destination::destination_hash(APP_NAME, &["delivery"], Some(identity.hash()));
 
     let sign_identity = Identity::from_private_key(&identity.get_private_key().unwrap());
 
     // Send messages if we have a target identity
     if let Some(ref target_id) = target_identity {
         let target_dest = rns_core::destination::destination_hash(
-            APP_NAME, &["delivery"], Some(target_id.hash()),
+            APP_NAME,
+            &["delivery"],
+            Some(target_id.hash()),
         );
         let pub_key = target_id.get_public_key().unwrap();
         let announced = AnnouncedIdentity {
@@ -314,11 +303,20 @@ fn main() {
             .unwrap()
             .as_secs_f64();
         let small_msg = message::pack(
-            &target_dest, &src_hash, timestamp,
-            b"small", b"Hello from lxmf-rs!",
-            vec![], None,
-            |data| sign_identity.sign(data).map_err(|_| message::Error::SignError),
-        ).expect("pack small");
+            &target_dest,
+            &src_hash,
+            timestamp,
+            b"small",
+            b"Hello from lxmf-rs!",
+            vec![],
+            None,
+            |data| {
+                sign_identity
+                    .sign(data)
+                    .map_err(|_| message::Error::SignError)
+            },
+        )
+        .expect("pack small");
 
         let dest = Destination::single_out(APP_NAME, &["delivery"], &announced);
         let lxmf_payload = &small_msg.packed[DESTINATION_LENGTH..];
@@ -334,11 +332,20 @@ fn main() {
             .unwrap()
             .as_secs_f64();
         let big_msg = message::pack(
-            &target_dest, &src_hash, timestamp2,
-            b"big", &big_content,
-            vec![], None,
-            |data| sign_identity.sign(data).map_err(|_| message::Error::SignError),
-        ).expect("pack big");
+            &target_dest,
+            &src_hash,
+            timestamp2,
+            b"big",
+            &big_content,
+            vec![],
+            None,
+            |data| {
+                sign_identity
+                    .sign(data)
+                    .map_err(|_| message::Error::SignError)
+            },
+        )
+        .expect("pack big");
 
         // Queue as Direct delivery (will create link and send)
         {
@@ -370,7 +377,9 @@ fn main() {
         println!("[SEND] big message queued for direct link delivery");
 
         // Trigger outbound processing (outside router lock)
-        { router.lock().unwrap().jobs(); }
+        {
+            router.lock().unwrap().jobs();
+        }
     }
     println!();
     println!("Running... (Ctrl+C to stop)");
@@ -406,7 +415,9 @@ fn main() {
         }
 
         // Periodic outbound processing (retry queued messages)
-        { router.lock().unwrap().jobs(); }
+        {
+            router.lock().unwrap().jobs();
+        }
 
         std::thread::sleep(Duration::from_secs(4));
     }
