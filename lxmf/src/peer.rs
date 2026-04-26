@@ -178,10 +178,7 @@ impl LxmPeer {
     /// Returns the msgpack-packed offer and the list of offered transient IDs.
     /// The caller should filter `unhandled_ids` against propagation entries
     /// and stamp costs before calling this.
-    pub fn build_offer(
-        &mut self,
-        available_messages: &[OfferEntry],
-    ) -> Option<Vec<u8>> {
+    pub fn build_offer(&mut self, available_messages: &[OfferEntry]) -> Option<Vec<u8>> {
         let peering_key = match &self.peering_key {
             Some((key, _)) => key.clone(),
             None => return None,
@@ -207,7 +204,11 @@ impl LxmPeer {
             .filter(|e| e.stamp_value >= min_accepted_cost as u32)
             .filter(|e| e.size <= transfer_limit_bytes)
             .collect();
-        entries.sort_by(|a, b| a.weight.partial_cmp(&b.weight).unwrap_or(std::cmp::Ordering::Equal));
+        entries.sort_by(|a, b| {
+            a.weight
+                .partial_cmp(&b.weight)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         // Accumulate up to sync limit
         let per_message_overhead = 16usize;
@@ -226,15 +227,10 @@ impl LxmPeer {
 
         self.last_offer = offer_ids.clone();
 
-        let offer_id_values: Vec<Value> = offer_ids
-            .iter()
-            .map(|id| Value::Bin(id.to_vec()))
-            .collect();
+        let offer_id_values: Vec<Value> =
+            offer_ids.iter().map(|id| Value::Bin(id.to_vec())).collect();
 
-        let offer = Value::Array(vec![
-            Value::Bin(peering_key),
-            Value::Array(offer_id_values),
-        ]);
+        let offer = Value::Array(vec![Value::Bin(peering_key), Value::Array(offer_id_values)]);
 
         self.state = PeerState::RequestSent;
         Some(msgpack::pack(&offer))
@@ -460,14 +456,8 @@ impl LxmPeer {
                 Value::Str("peering_timebase".to_string()),
                 Value::Float(self.peering_timebase),
             ),
-            (
-                Value::Str("alive".to_string()),
-                Value::Bool(self.alive),
-            ),
-            (
-                Value::Str("metadata".to_string()),
-                metadata_val,
-            ),
+            (Value::Str("alive".to_string()), Value::Bool(self.alive)),
+            (Value::Str("metadata".to_string()), metadata_val),
             (
                 Value::Str("last_heard".to_string()),
                 Value::Float(self.last_heard),
@@ -476,10 +466,7 @@ impl LxmPeer {
                 Value::Str("sync_strategy".to_string()),
                 Value::UInt(self.sync_strategy as u64),
             ),
-            (
-                Value::Str("peering_key".to_string()),
-                peering_key_val,
-            ),
+            (Value::Str("peering_key".to_string()), peering_key_val),
             (
                 Value::Str("destination_hash".to_string()),
                 Value::Bin(self.destination_hash.to_vec()),
@@ -516,10 +503,7 @@ impl LxmPeer {
                 Value::Str("last_sync_attempt".to_string()),
                 Value::Float(self.last_sync_attempt),
             ),
-            (
-                Value::Str("offered".to_string()),
-                Value::UInt(self.offered),
-            ),
+            (Value::Str("offered".to_string()), Value::UInt(self.offered)),
             (
                 Value::Str("outgoing".to_string()),
                 Value::UInt(self.outgoing),
@@ -576,16 +560,14 @@ impl LxmPeer {
 
         // Sync strategy
         if let Some(s) = map_get_uint(map, "sync_strategy") {
-            peer.sync_strategy =
-                SyncStrategy::from_u8(s as u8).unwrap_or(DEFAULT_SYNC_STRATEGY);
+            peer.sync_strategy = SyncStrategy::from_u8(s as u8).unwrap_or(DEFAULT_SYNC_STRATEGY);
         }
 
         // Peering key: [key_bytes, value]
         if let Some(pk_val) = map_get(map, "peering_key") {
             if let Some(arr) = pk_val.as_array() {
                 if arr.len() >= 2 {
-                    if let (Some(key_bytes), Some(value)) = (arr[0].as_bin(), arr[1].as_uint())
-                    {
+                    if let (Some(key_bytes), Some(value)) = (arr[0].as_bin(), arr[1].as_uint()) {
                         peer.peering_key = Some((key_bytes.to_vec(), value as u32));
                     }
                 }
@@ -593,15 +575,13 @@ impl LxmPeer {
         }
 
         // Rates
-        peer.link_establishment_rate =
-            map_get_float(map, "link_establishment_rate").unwrap_or(0.0);
+        peer.link_establishment_rate = map_get_float(map, "link_establishment_rate").unwrap_or(0.0);
         peer.sync_transfer_rate = map_get_float(map, "sync_transfer_rate").unwrap_or(0.0);
 
         // Limits
         peer.propagation_transfer_limit = map_get_float(map, "propagation_transfer_limit");
         peer.propagation_sync_limit = map_get_uint(map, "propagation_sync_limit");
-        peer.propagation_stamp_cost =
-            map_get_uint(map, "propagation_stamp_cost").map(|v| v as u8);
+        peer.propagation_stamp_cost = map_get_uint(map, "propagation_stamp_cost").map(|v| v as u8);
         peer.propagation_stamp_cost_flexibility =
             map_get_uint(map, "propagation_stamp_cost_flexibility").map(|v| v as u8);
         peer.peering_cost = map_get_uint(map, "peering_cost").map(|v| v as u8);
@@ -658,17 +638,12 @@ pub enum SyncAction {
 ///
 /// Returns indices of peers to sync, prioritizing fastest peers
 /// with a random pool for discovery.
-pub fn select_peers_for_sync(
-    peers: &[LxmPeer],
-    fastest_n: usize,
-) -> Vec<usize> {
+pub fn select_peers_for_sync(peers: &[LxmPeer], fastest_n: usize) -> Vec<usize> {
     let candidates: Vec<(usize, &LxmPeer)> = peers
         .iter()
         .enumerate()
         .filter(|(_, p)| {
-            p.state == PeerState::Idle
-                && !p.unhandled_ids.is_empty()
-                && !p.is_unreachable()
+            p.state == PeerState::Idle && !p.unhandled_ids.is_empty() && !p.is_unreachable()
         })
         .collect();
 
@@ -713,10 +688,7 @@ pub fn select_peers_for_sync(
 /// Calculate peer rotation: identify peers to drop.
 ///
 /// Returns indices of peers that should be removed.
-pub fn peers_to_drop(
-    peers: &[LxmPeer],
-    max_peers: usize,
-) -> Vec<usize> {
+pub fn peers_to_drop(peers: &[LxmPeer], max_peers: usize) -> Vec<usize> {
     if peers.len() <= max_peers {
         return Vec::new();
     }

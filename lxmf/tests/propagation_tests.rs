@@ -1,5 +1,5 @@
-use lxmf_rs::propagation::{ConfigStats, PropagationStore};
 use lxmf_core::constants::*;
+use lxmf_rs::propagation::{ConfigStats, PropagationStore};
 use rns_crypto::sha256::sha256;
 use std::fs;
 use std::path::PathBuf;
@@ -148,9 +148,7 @@ fn test_scan_messagestore() {
     let lxm2 = make_lxm_data(&dest, b"scan msg 2");
     let stamp = [0x55u8; STAMP_SIZE];
 
-    let tid1 = store
-        .store_message(&lxm1, Some(&stamp), 10, None)
-        .unwrap();
+    let tid1 = store.store_message(&lxm1, Some(&stamp), 10, None).unwrap();
     let tid2 = store.store_message(&lxm2, Some(&stamp), 5, None).unwrap();
 
     // Create a new store and scan
@@ -262,9 +260,7 @@ fn test_handle_get_wants() {
     let lxm = make_lxm_data(&dest, b"serve this message");
     let stamp = [0x77u8; STAMP_SIZE];
 
-    let tid = store
-        .store_message(&lxm, Some(&stamp), 16, None)
-        .unwrap();
+    let tid = store.store_message(&lxm, Some(&stamp), 16, None).unwrap();
 
     let messages = store.handle_get_wants(&dest, &[tid], None);
     assert_eq!(messages.len(), 1);
@@ -580,20 +576,11 @@ fn test_compile_stats() {
         max_peers: 20,
     };
 
-    let stats = store.compile_stats(
-        &identity_hash,
-        &prop_dest_hash,
-        start_time,
-        &config,
-        vec![],
-    );
+    let stats = store.compile_stats(&identity_hash, &prop_dest_hash, start_time, &config, vec![]);
 
     // Verify it's a map with expected keys
     let map = stats.as_map().unwrap();
-    let keys: Vec<&str> = map
-        .iter()
-        .filter_map(|(k, _)| k.as_str())
-        .collect();
+    let keys: Vec<&str> = map.iter().filter_map(|(k, _)| k.as_str()).collect();
 
     assert!(keys.contains(&"identity_hash"));
     assert!(keys.contains(&"destination_hash"));

@@ -55,9 +55,8 @@ pub fn compute_hash(
     src_hash: &[u8; DESTINATION_LENGTH],
     packed_payload: &[u8],
 ) -> [u8; 32] {
-    let mut hashed_part = Vec::with_capacity(
-        DESTINATION_LENGTH + DESTINATION_LENGTH + packed_payload.len(),
-    );
+    let mut hashed_part =
+        Vec::with_capacity(DESTINATION_LENGTH + DESTINATION_LENGTH + packed_payload.len());
     hashed_part.extend_from_slice(dest_hash);
     hashed_part.extend_from_slice(src_hash);
     hashed_part.extend_from_slice(packed_payload);
@@ -151,7 +150,8 @@ pub fn unpack(
     src_hash.copy_from_slice(&data[DESTINATION_LENGTH..DESTINATION_LENGTH * 2]);
 
     let mut signature = [0u8; SIGNATURE_LENGTH];
-    signature.copy_from_slice(&data[DESTINATION_LENGTH * 2..DESTINATION_LENGTH * 2 + SIGNATURE_LENGTH]);
+    signature
+        .copy_from_slice(&data[DESTINATION_LENGTH * 2..DESTINATION_LENGTH * 2 + SIGNATURE_LENGTH]);
 
     let payload_bytes = &data[min_size..];
 
@@ -295,9 +295,7 @@ pub fn as_uri(paper_packed: &[u8]) -> String {
 
 /// Decode an lxm:// URI back to paper-packed bytes.
 pub fn from_uri(uri: &str) -> Result<Vec<u8>, Error> {
-    let data_str = uri
-        .strip_prefix("lxm://")
-        .ok_or(Error::InvalidUri)?;
+    let data_str = uri.strip_prefix("lxm://").ok_or(Error::InvalidUri)?;
     base64url_decode(data_str).ok_or(Error::InvalidUri)
 }
 
@@ -384,8 +382,7 @@ pub fn unpack_container(data: &[u8]) -> Result<ContainerData, Error> {
 // ============================================================
 
 fn base64url_encode(data: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
     let mut out = String::with_capacity((data.len() + 2) / 3 * 4);
     let mut i = 0;
@@ -438,8 +435,7 @@ fn base64url_decode(input: &str) -> Option<Vec<u8>> {
         if a == 255 || b == 255 || c == 255 || d == 255 {
             return None;
         }
-        let triple =
-            ((a as u32) << 18) | ((b as u32) << 12) | ((c as u32) << 6) | (d as u32);
+        let triple = ((a as u32) << 18) | ((b as u32) << 12) | ((c as u32) << 6) | (d as u32);
         out.push((triple >> 16) as u8);
         out.push((triple >> 8) as u8);
         out.push(triple as u8);

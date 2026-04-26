@@ -1,5 +1,6 @@
 # lxmf-rs
 
+[![CI](https://github.com/lelloman/lxmf-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/lelloman/lxmf-rs/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/lxmf-rs)](https://crates.io/crates/lxmf-rs)
 [![docs.rs](https://img.shields.io/docsrs/lxmf-rs)](https://docs.rs/lxmf-rs)
 [![License](https://img.shields.io/badge/license-Reticulum-blue)](./LICENSE)
@@ -12,7 +13,7 @@ LXMF is a messaging protocol built on [Reticulum](https://reticulum.network), de
 
 This implementation is built on top of [rns-rs](https://github.com/lelloman/rns-rs), the Rust implementation of Reticulum, providing a robust foundation for delay-tolerant networking. LXMF-rs is particularly well-suited for embedded systems, Android applications, and any scenario where Rust's performance and `no_std` support are advantageous.
 
-The project is organized as a Cargo workspace with three crates: `lxmf-core` (lightweight, `no_std` compatible), `lxmf` (full-featured message router), and `lxmd` (propagation daemon with configurable logging). All 129 tests pass, and the implementation is ready for crates.io publication.
+The project is organized as a Cargo workspace with three crates: `lxmf-core` (lightweight, `no_std` compatible), `lxmf` (full-featured message router), and `lxmd` (propagation daemon with configurable logging). All 135 tests pass, and the implementation is ready for crates.io publication.
 
 ## Workspace Crates
 

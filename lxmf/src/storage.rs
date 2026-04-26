@@ -94,10 +94,7 @@ pub fn load_transient_ids(path: &Path) -> HashMap<[u8; 32], f64> {
 }
 
 /// Save stamp costs: dest_hash -> [timestamp, cost].
-pub fn save_stamp_costs(
-    path: &Path,
-    costs: &HashMap<[u8; 16], (f64, u8)>,
-) -> std::io::Result<()> {
+pub fn save_stamp_costs(path: &Path, costs: &HashMap<[u8; 16], (f64, u8)>) -> std::io::Result<()> {
     let entries: Vec<(Value, Value)> = costs
         .iter()
         .map(|(k, (ts, cost))| {
@@ -130,10 +127,7 @@ pub fn load_stamp_costs(path: &Path) -> HashMap<[u8; 16], (f64, u8)> {
 }
 
 /// Save node statistics.
-pub fn save_node_stats(
-    path: &Path,
-    stats: &HashMap<String, u64>,
-) -> std::io::Result<()> {
+pub fn save_node_stats(path: &Path, stats: &HashMap<String, u64>) -> std::io::Result<()> {
     let entries: Vec<(Value, Value)> = stats
         .iter()
         .map(|(k, v)| (Value::Str(k.clone()), Value::UInt(*v)))

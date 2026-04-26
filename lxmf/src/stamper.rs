@@ -1,8 +1,8 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use lxmf_core::stamp::{stamp_valid, stamp_value, stamp_workblock};
 use lxmf_core::constants::STAMP_SIZE;
+use lxmf_core::stamp::{stamp_valid, stamp_value, stamp_workblock};
 use rns_crypto::OsRng;
 use rns_crypto::Rng;
 

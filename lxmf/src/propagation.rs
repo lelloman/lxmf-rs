@@ -273,10 +273,7 @@ impl PropagationStore {
     /// Process the offer request from a peer.
     ///
     /// Returns the response data to send back.
-    pub fn handle_offer(
-        &self,
-        transient_ids: &[[u8; 32]],
-    ) -> Value {
+    pub fn handle_offer(&self, transient_ids: &[[u8; 32]]) -> Value {
         let mut wanted = Vec::new();
         let mut has_all = true;
 
@@ -501,10 +498,7 @@ impl PropagationStore {
                 Value::Str("max_peers".to_string()),
                 Value::UInt(config_stats.max_peers as u64),
             ),
-            (
-                Value::Str("peers".to_string()),
-                Value::Map(peer_stats),
-            ),
+            (Value::Str("peers".to_string()), Value::Map(peer_stats)),
         ]);
         node_stats
     }

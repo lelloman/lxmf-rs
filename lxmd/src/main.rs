@@ -5,8 +5,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::{env, fs, thread, time};
 
-use lxmf_rs::router::{LxmRouter, LxmfCallbacks, RouterConfig};
 use lxmf_core::constants::*;
+use lxmf_rs::router::{LxmRouter, LxmfCallbacks, RouterConfig};
 use rns_core::destination::destination_hash;
 use rns_core::msgpack::{self, Value};
 use rns_core::types::{DestHash, LinkId, PacketHash};
@@ -233,10 +233,7 @@ fn parse_ini(content: &str) -> HashMap<String, HashMap<String, String>> {
 }
 
 fn parse_bool(s: &str) -> bool {
-    matches!(
-        s.to_lowercase().as_str(),
-        "yes" | "true" | "1" | "on"
-    )
+    matches!(s.to_lowercase().as_str(), "yes" | "true" | "1" | "on")
 }
 
 fn parse_hex_list(s: &str) -> Vec<[u8; 16]> {
@@ -439,7 +436,10 @@ fn load_or_create_identity(path: &Path) -> rns_crypto::identity::Identity {
                 return id;
             }
         }
-        log::warn!("Failed to load identity from {}, creating new", path.display());
+        log::warn!(
+            "Failed to load identity from {}, creating new",
+            path.display()
+        );
     }
 
     let mut rng = rns_crypto::OsRng;
@@ -453,7 +453,6 @@ fn load_or_create_identity(path: &Path) -> rns_crypto::identity::Identity {
     }
     id
 }
-
 
 fn load_identity(path: &Path) -> Option<rns_crypto::identity::Identity> {
     use rns_crypto::identity::Identity;
@@ -754,10 +753,16 @@ fn display_peers(stats: &rns_core::msgpack::Value) {
             println!("    Incoming     : {}", v.as_uint().unwrap_or(0));
         }
         if let Some(v) = pfind("tx_bytes") {
-            println!("    TX           : {}", pretty_size(v.as_uint().unwrap_or(0)));
+            println!(
+                "    TX           : {}",
+                pretty_size(v.as_uint().unwrap_or(0))
+            );
         }
         if let Some(v) = pfind("rx_bytes") {
-            println!("    RX           : {}", pretty_size(v.as_uint().unwrap_or(0)));
+            println!(
+                "    RX           : {}",
+                pretty_size(v.as_uint().unwrap_or(0))
+            );
         }
     }
 }
@@ -933,7 +938,10 @@ fn build_status_payload(
             Value::Str("unpeered_propagation_rx_bytes".to_string()),
             Value::UInt(unpeered_rx_bytes),
         ),
-        (Value::Str("total_peers".to_string()), Value::UInt(total_peers)),
+        (
+            Value::Str("total_peers".to_string()),
+            Value::UInt(total_peers),
+        ),
         (
             Value::Str("max_peers".to_string()),
             Value::UInt(router.config.max_peers as u64),
@@ -1005,7 +1013,6 @@ fn register_control_handlers(
     );
 }
 
-
 enum ControlAction {
     Status,
     Peers,
@@ -1027,9 +1034,16 @@ impl Callbacks for ControlCallbacks {
 
     fn on_path_updated(&mut self, _dest_hash: DestHash, _hops: u8) {}
 
-    fn on_local_delivery(&mut self, _dest_hash: DestHash, _raw: Vec<u8>, _packet_hash: PacketHash) {}
+    fn on_local_delivery(&mut self, _dest_hash: DestHash, _raw: Vec<u8>, _packet_hash: PacketHash) {
+    }
 
-    fn on_link_established(&mut self, link_id: LinkId, _dest_hash: DestHash, _rtt: f64, is_initiator: bool) {
+    fn on_link_established(
+        &mut self,
+        link_id: LinkId,
+        _dest_hash: DestHash,
+        _rtt: f64,
+        is_initiator: bool,
+    ) {
         if is_initiator {
             let _ = self.tx.send(ControlEvent::LinkEstablished(link_id.0));
         }
@@ -1298,11 +1312,14 @@ fn main() {
         android_logger::init_once(
             android_logger::Config::default()
                 .with_min_level(log_level.to_level().unwrap_or(log::Level::Info))
-                .with_tag("lxmd")
+                .with_tag("lxmd"),
         );
     }
 
-    #[cfg(all(feature = "init-logger", not(all(feature = "android-logger", target_os = "android"))))]
+    #[cfg(all(
+        feature = "init-logger",
+        not(all(feature = "android-logger", target_os = "android"))
+    ))]
     {
         // Use env_logger when:
         // - init-logger feature is enabled AND
@@ -1354,13 +1371,11 @@ fn main() {
         println!("Storage   : {:.0} MB limit", config.message_storage_limit);
         println!(
             "Stamp cost: {} (flex: {})",
-            config.propagation_stamp_cost_target,
-            config.propagation_stamp_cost_flexibility
+            config.propagation_stamp_cost_target, config.propagation_stamp_cost_flexibility
         );
         println!(
             "Peer cost : {} (max remote: {})",
-            config.peering_cost,
-            config.remote_peering_cost_max
+            config.peering_cost, config.remote_peering_cost_max
         );
         if config.autopeer {
             print!("Autopeer  : enabled");
@@ -1434,7 +1449,12 @@ fn main() {
         }
 
         if config.enable_node {
-            register_control_handlers(&node, router.clone(), &config, lxmf_rs::router::now_timestamp());
+            register_control_handlers(
+                &node,
+                router.clone(),
+                &config,
+                lxmf_rs::router::now_timestamp(),
+            );
             if config.pn_announce_at_start {
                 router_guard.announce_propagation_node();
             }
@@ -1532,7 +1552,7 @@ fn setup_signal_handler(running: Arc<AtomicBool>) -> Result<(), String> {
         }
 
         unsafe {
-            signal(2, handler);  // SIGINT
+            signal(2, handler); // SIGINT
             signal(15, handler); // SIGTERM
         }
     }

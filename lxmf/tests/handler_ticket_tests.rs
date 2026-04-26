@@ -1,9 +1,9 @@
+use lxmf_core::constants::*;
 use lxmf_rs::handlers::{
     decide_propagation_action, handle_delivery_announce, parse_propagation_announce,
     PropagationAnnounceResult, PropagationPeerInfo,
 };
 use lxmf_rs::tickets::{ticket_stamp, validate_stamp_with_tickets, TicketStore};
-use lxmf_core::constants::*;
 use rns_crypto::sha256::sha256;
 
 // Simple base64 decoder
@@ -167,9 +167,9 @@ fn test_decide_static_peer_path_response_ignores() {
 
     let action = decide_propagation_action(
         &info,
-        true,  // is path response
-        true,  // is static peer
-        true,  // existing peer
+        true,   // is path response
+        true,   // is static peer
+        true,   // existing peer
         1000.0, // already heard from
         false,
         Some(2),
@@ -188,7 +188,7 @@ fn test_decide_static_peer_path_response_first_time() {
         true, // is path response
         true, // is static peer
         true,
-        0.0,  // never heard from
+        0.0, // never heard from
         false,
         Some(2),
         4,
@@ -207,9 +207,9 @@ fn test_decide_autopeer_in_range() {
         false, // not static
         false, // not existing
         0.0,
-        true,  // autopeer enabled
+        true, // autopeer enabled
         Some(3),
-        4,     // maxdepth
+        4, // maxdepth
     );
     assert!(matches!(action, PropagationAnnounceResult::Peer(_)));
 }
@@ -223,7 +223,7 @@ fn test_decide_autopeer_out_of_range_existing() {
         &info,
         false,
         false,
-        true,  // existing peer
+        true, // existing peer
         1000.0,
         true,
         Some(5), // hops > maxdepth
@@ -255,16 +255,7 @@ fn test_decide_autopeer_disabled_propagation() {
     let data = make_pn_announce_data(false, 1700000000); // propagation disabled
     let info = parse_propagation_announce([0x77; 16], Some(&data)).unwrap();
 
-    let action = decide_propagation_action(
-        &info,
-        false,
-        false,
-        true,
-        1000.0,
-        true,
-        Some(2),
-        4,
-    );
+    let action = decide_propagation_action(&info, false, false, true, 1000.0, true, Some(2), 4);
     assert!(matches!(action, PropagationAnnounceResult::Unpeer { .. }));
 }
 
@@ -453,7 +444,11 @@ fn test_ticket_store_clean() {
     let dest = [0xFF; 16];
 
     // Add expired outbound
-    store.remember_ticket(dest, lxmf_rs::router::now_timestamp() - 100.0, vec![0x11; 16]);
+    store.remember_ticket(
+        dest,
+        lxmf_rs::router::now_timestamp() - 100.0,
+        vec![0x11; 16],
+    );
 
     // Add valid outbound
     let dest2 = [0xFE; 16];
@@ -465,8 +460,7 @@ fn test_ticket_store_clean() {
 
     // Add expired inbound (past grace period)
     let expired_ticket = vec![0x33u8; TICKET_LENGTH];
-    let expired_expiry =
-        lxmf_rs::router::now_timestamp() - TICKET_GRACE as f64 - 100.0;
+    let expired_expiry = lxmf_rs::router::now_timestamp() - TICKET_GRACE as f64 - 100.0;
     store
         .inbound
         .entry(dest)
@@ -477,10 +471,7 @@ fn test_ticket_store_clean() {
 
     assert!(store.outbound.get(&dest).is_none()); // expired, cleaned
     assert!(store.outbound.get(&dest2).is_some()); // valid, kept
-    assert!(
-        store.inbound.get(&dest).is_none()
-            || store.inbound.get(&dest).unwrap().is_empty()
-    );
+    assert!(store.inbound.get(&dest).is_none() || store.inbound.get(&dest).unwrap().is_empty());
 }
 
 #[test]

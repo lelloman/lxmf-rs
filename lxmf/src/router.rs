@@ -459,15 +459,9 @@ impl LxmRouter {
 
         self.processing_count = self.processing_count.wrapping_add(1);
 
-        // Outbound processing (every cycle)
-        if self.processing_count % JOB_OUTBOUND_INTERVAL == 0 {
-            self.process_outbound();
-        }
-
-        // Link cleanup (every cycle)
-        if self.processing_count % JOB_LINKS_INTERVAL == 0 {
-            self.clean_links();
-        }
+        // Outbound processing and link cleanup run every cycle.
+        self.process_outbound();
+        self.clean_links();
 
         // Transient ID cleanup (every 60 cycles = 4 min)
         if self.processing_count % JOB_TRANSIENT_INTERVAL == 0 {

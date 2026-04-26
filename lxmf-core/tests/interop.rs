@@ -461,10 +461,7 @@ fn test_pn_announce_data_roundtrip() {
 
 #[test]
 fn test_delivery_announce_data_roundtrip() {
-    let value = Value::Array(vec![
-        Value::Bin(b"TestNode".to_vec()),
-        Value::UInt(16),
-    ]);
+    let value = Value::Array(vec![Value::Bin(b"TestNode".to_vec()), Value::UInt(16)]);
 
     let vectors = load_vectors();
     let v = find_vector(&vectors, "delivery_announce_data");
@@ -673,11 +670,7 @@ fn test_message_hash_computation() {
     src_hash.copy_from_slice(&src_hash_bytes);
 
     let hash = message::compute_hash(&dst_hash, &src_hash, &packed_payload);
-    assert_eq!(
-        &hash[..],
-        &expected_hash[..],
-        "Message hash mismatch"
-    );
+    assert_eq!(&hash[..], &expected_hash[..], "Message hash mismatch");
 }
 
 #[test]
@@ -726,7 +719,10 @@ fn test_message_pack_deterministic() {
         &expected_sig[..],
         "Deterministic signature mismatch"
     );
-    assert_eq!(result.packed, expected_packed, "Deterministic packed mismatch");
+    assert_eq!(
+        result.packed, expected_packed,
+        "Deterministic packed mismatch"
+    );
 }
 
 #[test]
@@ -830,7 +826,11 @@ fn test_message_pack_unpack_roundtrip() {
         b"Test Content",
         vec![(Value::UInt(15), Value::UInt(2))],
         None,
-        |data| src_identity.sign(data).map_err(|_| message::Error::SignError),
+        |data| {
+            src_identity
+                .sign(data)
+                .map_err(|_| message::Error::SignError)
+        },
     )
     .expect("pack failed");
 
@@ -872,7 +872,11 @@ fn test_message_pack_with_stamp_roundtrip() {
         b"Content",
         vec![],
         Some(&stamp),
-        |data| src_identity.sign(data).map_err(|_| message::Error::SignError),
+        |data| {
+            src_identity
+                .sign(data)
+                .map_err(|_| message::Error::SignError)
+        },
     )
     .expect("pack failed");
 
@@ -963,21 +967,21 @@ fn test_propagation_pack_format() {
         b"World",
         vec![],
         None,
-        |data| src_identity.sign(data).map_err(|_| message::Error::SignError),
+        |data| {
+            src_identity
+                .sign(data)
+                .map_err(|_| message::Error::SignError)
+        },
     )
     .expect("pack failed");
 
-    let (prop_packed, transient_id) = message::propagation_pack(
-        &pack_result.packed,
-        1700000000.0,
-        None,
-        |data| {
+    let (prop_packed, transient_id) =
+        message::propagation_pack(&pack_result.packed, 1700000000.0, None, |data| {
             dst_identity
                 .encrypt(data, &mut rng)
                 .map_err(|_| message::Error::EncryptError)
-        },
-    )
-    .expect("propagation_pack failed");
+        })
+        .expect("propagation_pack failed");
 
     // Verify the structure: msgpack([timestamp, [lxmf_data]])
     let outer = unpack_exact(&prop_packed).expect("Failed to unpack propagation_packed");
@@ -1023,7 +1027,11 @@ fn test_signature_invalid_detection() {
         b"World",
         vec![],
         None,
-        |data| src_identity.sign(data).map_err(|_| message::Error::SignError),
+        |data| {
+            src_identity
+                .sign(data)
+                .map_err(|_| message::Error::SignError)
+        },
     )
     .expect("pack failed");
 
@@ -1154,12 +1162,7 @@ fn test_hkdf_salt_computation() {
         salt_input.extend_from_slice(&material);
         salt_input.extend_from_slice(&packed_n);
         let salt = sha256(&salt_input);
-        assert_eq!(
-            &salt[..],
-            &expected_salt[..],
-            "Salt for n={} differs",
-            sv.n
-        );
+        assert_eq!(&salt[..], &expected_salt[..], "Salt for n={} differs", sv.n);
     }
 }
 
@@ -1230,7 +1233,8 @@ fn test_stamp_value_edge_cases() {
         // Verify value
         let value = stamp::stamp_value(&workblock, &stamp_bytes);
         assert_eq!(
-            value, case.value,
+            value,
+            case.value,
             "Value mismatch for stamp {:?}",
             &stamp_bytes[..4]
         );
@@ -1241,26 +1245,38 @@ fn test_stamp_value_edge_cases() {
 fn test_leading_zeros() {
     // Test with known values
     assert_eq!(stamp::leading_zeros(&[0u8; 32]), 256);
-    assert_eq!(stamp::leading_zeros(&{
-        let mut h = [0u8; 32];
-        h[0] = 0x80;
-        h
-    }), 0);
-    assert_eq!(stamp::leading_zeros(&{
-        let mut h = [0u8; 32];
-        h[0] = 0x40;
-        h
-    }), 1);
-    assert_eq!(stamp::leading_zeros(&{
-        let mut h = [0u8; 32];
-        h[0] = 0x01;
-        h
-    }), 7);
-    assert_eq!(stamp::leading_zeros(&{
-        let mut h = [0u8; 32];
-        h[1] = 0x01;
-        h
-    }), 15);
+    assert_eq!(
+        stamp::leading_zeros(&{
+            let mut h = [0u8; 32];
+            h[0] = 0x80;
+            h
+        }),
+        0
+    );
+    assert_eq!(
+        stamp::leading_zeros(&{
+            let mut h = [0u8; 32];
+            h[0] = 0x40;
+            h
+        }),
+        1
+    );
+    assert_eq!(
+        stamp::leading_zeros(&{
+            let mut h = [0u8; 32];
+            h[0] = 0x01;
+            h
+        }),
+        7
+    );
+    assert_eq!(
+        stamp::leading_zeros(&{
+            let mut h = [0u8; 32];
+            h[1] = 0x01;
+            h
+        }),
+        15
+    );
 }
 
 #[test]
@@ -1419,15 +1435,15 @@ fn test_peers_load() {
 
     for peer in arr {
         let map: &[(Value, Value)] = peer.as_map().expect("Peer should be a map");
-        let has_dest_hash = map
-            .iter()
-            .any(|(k, v): &(Value, Value)| k.as_str() == Some("destination_hash") && v.as_bin().is_some());
-        let has_last_heard = map
-            .iter()
-            .any(|(k, v): &(Value, Value)| k.as_str() == Some("last_heard") && v.as_number().is_some());
-        let has_alive = map.iter().any(|(k, v): &(Value, Value)| {
-            k.as_str() == Some("alive") && v.as_bool().is_some()
+        let has_dest_hash = map.iter().any(|(k, v): &(Value, Value)| {
+            k.as_str() == Some("destination_hash") && v.as_bin().is_some()
         });
+        let has_last_heard = map.iter().any(|(k, v): &(Value, Value)| {
+            k.as_str() == Some("last_heard") && v.as_number().is_some()
+        });
+        let has_alive = map
+            .iter()
+            .any(|(k, v): &(Value, Value)| k.as_str() == Some("alive") && v.as_bool().is_some());
         assert!(has_dest_hash, "Peer missing destination_hash");
         assert!(has_last_heard, "Peer missing last_heard");
         assert!(has_alive, "Peer missing alive");
@@ -1489,11 +1505,7 @@ fn test_dest_hash_control() {
     let full = sha256(&material);
     let result = &full[..16];
 
-    assert_eq!(
-        result,
-        &expected_hash[..],
-        "Control dest_hash mismatch"
-    );
+    assert_eq!(result, &expected_hash[..], "Control dest_hash mismatch");
 }
 
 #[test]

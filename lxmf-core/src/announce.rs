@@ -138,7 +138,9 @@ pub fn pn_name_from_app_data(app_data: &[u8]) -> Option<String> {
     for (k, v) in metadata {
         if k.as_uint() == Some(PN_META_NAME as u64) {
             let name_bytes = v.as_bin()?;
-            return core::str::from_utf8(name_bytes).ok().map(|s| String::from(s));
+            return core::str::from_utf8(name_bytes)
+                .ok()
+                .map(|s| String::from(s));
         }
     }
     None

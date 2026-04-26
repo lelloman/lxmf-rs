@@ -104,7 +104,8 @@ impl TicketStore {
 
     /// Record that a ticket was delivered.
     pub fn record_delivery(&mut self, destination_hash: [u8; 16]) {
-        self.last_deliveries.insert(destination_hash, now_timestamp());
+        self.last_deliveries
+            .insert(destination_hash, now_timestamp());
     }
 
     /// Clean expired tickets.

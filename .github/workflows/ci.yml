@@ -1,0 +1,102 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: lxmf-rs
+
+jobs:
+  cargo-test:
+    name: Cargo Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout lxmf-rs
+        uses: actions/checkout@v4
+        with:
+          path: lxmf-rs
+
+      - name: Checkout rns-rs
+        uses: actions/checkout@v4
+        with:
+          repository: lelloman/rns-rs
+          ref: dev
+          path: rns-rs
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@1.93.1
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: lxmf-rs -> target
+
+      - name: Run workspace tests
+        run: cargo test --workspace
+
+  rustfmt:
+    name: Rustfmt
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout lxmf-rs
+        uses: actions/checkout@v4
+        with:
+          path: lxmf-rs
+
+      - name: Checkout rns-rs
+        uses: actions/checkout@v4
+        with:
+          repository: lelloman/rns-rs
+          ref: dev
+          path: rns-rs
+
+      - name: Install Rust with rustfmt
+        uses: dtolnay/rust-toolchain@1.93.1
+        with:
+          components: rustfmt
+
+      - name: Run rustfmt check
+        run: cargo fmt --check
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout lxmf-rs
+        uses: actions/checkout@v4
+        with:
+          path: lxmf-rs
+
+      - name: Checkout rns-rs
+        uses: actions/checkout@v4
+        with:
+          repository: lelloman/rns-rs
+          ref: dev
+          path: rns-rs
+
+      - name: Install Rust with Clippy
+        uses: dtolnay/rust-toolchain@1.93.1
+        with:
+          components: clippy
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: lxmf-rs -> target
+
+      - name: Run Clippy
+        run: bash scripts/lint-host.sh

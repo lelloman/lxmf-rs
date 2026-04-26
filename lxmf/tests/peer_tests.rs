@@ -1,5 +1,5 @@
-use lxmf_rs::peer::{LxmPeer, SyncAction, SyncPostponeReason};
 use lxmf_core::constants::*;
+use lxmf_rs::peer::{LxmPeer, SyncAction, SyncPostponeReason};
 use rns_core::msgpack::{pack, unpack_exact, Value};
 
 // Simple base64 decoder
@@ -16,7 +16,10 @@ mod base64_impl {
             t
         };
 
-        let bytes: Vec<u8> = input.bytes().filter(|&b| b != b'=' && b != b'\n' && b != b'\r').collect();
+        let bytes: Vec<u8> = input
+            .bytes()
+            .filter(|&b| b != b'=' && b != b'\n' && b != b'\r')
+            .collect();
         let mut out = Vec::with_capacity(bytes.len() * 3 / 4);
         let chunks = bytes.chunks(4);
         for chunk in chunks {
@@ -25,8 +28,12 @@ mod base64_impl {
                 buf[i] = TABLE[b as usize & 0x7F];
             }
             out.push((buf[0] << 2) | (buf[1] >> 4));
-            if chunk.len() > 2 { out.push((buf[1] << 4) | (buf[2] >> 2)); }
-            if chunk.len() > 3 { out.push((buf[2] << 6) | buf[3]); }
+            if chunk.len() > 2 {
+                out.push((buf[1] << 4) | (buf[2] >> 2));
+            }
+            if chunk.len() > 3 {
+                out.push((buf[2] << 6) | buf[3]);
+            }
         }
         out
     }
@@ -91,8 +98,7 @@ fn test_peer_deserialize_minimal() {
     let v = find_peer_vector(&vectors, "minimal_peer");
     let packed_bytes = b64(v.packed.as_ref().unwrap());
 
-    let peer = LxmPeer::from_bytes(&packed_bytes)
-        .expect("Failed to deserialize minimal peer");
+    let peer = LxmPeer::from_bytes(&packed_bytes).expect("Failed to deserialize minimal peer");
 
     let expected_hash = b64(v.destination_hash.as_ref().unwrap());
     assert_eq!(&peer.destination_hash[..], &expected_hash[..]);
@@ -112,8 +118,7 @@ fn test_peer_deserialize_full() {
     let v = find_peer_vector(&vectors, "full_peer");
     let packed_bytes = b64(v.packed.as_ref().unwrap());
 
-    let peer = LxmPeer::from_bytes(&packed_bytes)
-        .expect("Failed to deserialize full peer");
+    let peer = LxmPeer::from_bytes(&packed_bytes).expect("Failed to deserialize full peer");
 
     let expected_hash = b64(v.destination_hash.as_ref().unwrap());
     assert_eq!(&peer.destination_hash[..], &expected_hash[..]);
