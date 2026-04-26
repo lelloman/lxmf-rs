@@ -22,12 +22,12 @@ jobs:
 
     steps:
       - name: Checkout lxmf-rs
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           path: lxmf-rs
 
       - name: Checkout rns-rs
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: lelloman/rns-rs
           ref: dev
@@ -51,12 +51,12 @@ jobs:
 
     steps:
       - name: Checkout lxmf-rs
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           path: lxmf-rs
 
       - name: Checkout rns-rs
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: lelloman/rns-rs
           ref: dev
@@ -77,12 +77,12 @@ jobs:
 
     steps:
       - name: Checkout lxmf-rs
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           path: lxmf-rs
 
       - name: Checkout rns-rs
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: lelloman/rns-rs
           ref: dev
