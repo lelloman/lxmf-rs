@@ -42,7 +42,7 @@ jobs:
           workspaces: lxmf-rs -> target
 
       - name: Run workspace tests
-        run: cargo test --workspace
+        run: timeout 15m cargo test --workspace -- --test-threads=1
 
   rustfmt:
     name: Rustfmt

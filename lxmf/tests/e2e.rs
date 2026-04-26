@@ -199,13 +199,15 @@ impl LxmfNodeHandle {
 
 /// Thread-safe port allocator. Starts above ephemeral range to avoid conflicts.
 static NEXT_PORT: AtomicU16 = AtomicU16::new(17100);
+static NEXT_TEMP_ID: AtomicU16 = AtomicU16::new(1);
 
 fn find_free_port() -> u16 {
     NEXT_PORT.fetch_add(1, Ordering::SeqCst)
 }
 
 fn temp_dir(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("lxmf_e2e_{}_{}", name, std::process::id()));
+    let id = NEXT_TEMP_ID.fetch_add(1, Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!("lxmf_e2e_{}_{}_{}", name, std::process::id(), id));
     let _ = fs::create_dir_all(&dir);
     dir
 }

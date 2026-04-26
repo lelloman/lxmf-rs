@@ -169,6 +169,7 @@ This is useful when you want to implement your own memory management.
 | `echo` | Echo server for testing |
 | `send_message` | Send messages to a destination |
 | `live_test` | Live network interoperability testing |
+| `test_node` | HTTP-controlled LXMF endpoint for Docker E2E tests |
 
 Run examples:
 
@@ -178,12 +179,15 @@ RUST_LOG=info cargo run --example send_message -- <host:port> <dest_hash>
 
 # Listen for announces
 RUST_LOG=info cargo run --example send_message -- <host:port> listen
+
+# Run an HTTP-controlled LXMF test endpoint
+RUST_LOG=info cargo run --example test_node -- <host:port> 0.0.0.0:8080 /tmp/lxmf-test-node
 ```
 
 ## Project Status
 
-- **Version**: 0.1.0
-- **Tests**: 129 passing
+- **Version**: 0.1.5
+- **Tests**: 135 passing
 - **Compatibility**: Wire-compatible with Python LXMF v0.9.4
 - **Repository**: [https://github.com/lelloman/lxmf-rs](https://github.com/lelloman/lxmf-rs)
 

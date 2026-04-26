@@ -1,6 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
+use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use lxmf_core::constants::*;
@@ -19,6 +20,11 @@ use crate::storage::{self, StoragePaths};
 /// Callback function types for the router.
 pub type DeliveryCallback = Box<dyn Fn(&LxmDelivery) + Send>;
 pub type ProgressCallback = Box<dyn Fn(&[u8; 32], f64) + Send>;
+
+struct DirectLinkResult {
+    dest_hash: [u8; 16],
+    link_id: Option<[u8; 16]>,
+}
 
 /// Information about a delivered message passed to the delivery callback.
 pub struct LxmDelivery {
@@ -127,8 +133,11 @@ pub struct LxmRouter {
     // Link tracking
     pub direct_links: HashMap<[u8; 16], [u8; 16]>, // dest_hash -> link_id
     pub pending_direct_links: HashMap<[u8; 16], [u8; 16]>, // dest_hash -> link_id (being established)
-    pub backchannel_links: HashMap<[u8; 16], [u8; 16]>,    // dest_hash -> link_id
-    pub link_destinations: HashMap<[u8; 16], [u8; 16]>,    // link_id -> dest_hash
+    pending_direct_link_creations: HashMap<[u8; 16], f64>, // dest_hash -> requested_at
+    direct_link_tx: mpsc::Sender<DirectLinkResult>,
+    direct_link_rx: mpsc::Receiver<DirectLinkResult>,
+    pub backchannel_links: HashMap<[u8; 16], [u8; 16]>, // dest_hash -> link_id
+    pub link_destinations: HashMap<[u8; 16], [u8; 16]>, // link_id -> dest_hash
     pub active_propagation_links: Vec<[u8; 16]>,
     pub propagation_link: Option<[u8; 16]>,
 
@@ -197,6 +206,8 @@ impl LxmRouter {
             }
         }
 
+        let (direct_link_tx, direct_link_rx) = mpsc::channel();
+
         Self {
             identity,
             propagation_dest_hash,
@@ -206,6 +217,9 @@ impl LxmRouter {
             pending_inbound: VecDeque::new(),
             direct_links: HashMap::new(),
             pending_direct_links: HashMap::new(),
+            pending_direct_link_creations: HashMap::new(),
+            direct_link_tx,
+            direct_link_rx,
             backchannel_links: HashMap::new(),
             link_destinations: HashMap::new(),
             active_propagation_links: Vec::new(),
@@ -279,6 +293,43 @@ impl LxmRouter {
             Err(_) => {
                 log::warn!("ensure_direct_link: failed to create link");
                 false
+            }
+        }
+    }
+
+    fn drain_direct_link_results(&mut self) {
+        while let Ok(result) = self.direct_link_rx.try_recv() {
+            self.pending_direct_link_creations.remove(&result.dest_hash);
+            match result.link_id {
+                Some(link_id) => {
+                    if !self.direct_links.contains_key(&result.dest_hash) {
+                        self.pending_direct_links.insert(result.dest_hash, link_id);
+                    }
+                    for msg in &mut self.outbound {
+                        if msg.destination_hash == result.dest_hash
+                            && msg.method == DeliveryMethod::Direct
+                            && msg.link_id.is_none()
+                            && msg.state == MessageState::Sending
+                        {
+                            msg.link_id = Some(link_id);
+                            if self.direct_links.contains_key(&result.dest_hash) {
+                                msg.state = MessageState::Outbound;
+                                msg.last_attempt = 0.0;
+                            }
+                        }
+                    }
+                }
+                None => {
+                    for msg in &mut self.outbound {
+                        if msg.destination_hash == result.dest_hash
+                            && msg.method == DeliveryMethod::Direct
+                            && msg.state == MessageState::Sending
+                            && msg.link_id.is_none()
+                        {
+                            msg.state = MessageState::Outbound;
+                        }
+                    }
+                }
             }
         }
     }
@@ -479,6 +530,8 @@ impl LxmRouter {
     /// Uses field-level borrows to avoid borrow checker issues:
     /// we iterate `self.outbound` mutably while reading other fields.
     fn process_outbound(&mut self) {
+        self.drain_direct_link_results();
+
         let now = now_timestamp();
         let node = match &self.node {
             Some(n) => n.clone(),
@@ -549,25 +602,29 @@ impl LxmRouter {
                     } else if self
                         .pending_direct_links
                         .contains_key(&msg.destination_hash)
+                        || self
+                            .pending_direct_link_creations
+                            .contains_key(&msg.destination_hash)
                     {
                         // Link is being established, wait for it
-                    } else if let Ok(Some(announced)) =
-                        node.recall_identity(&DestHash(msg.destination_hash))
+                    } else if let Some(public_key) = self.identity_cache.get(&msg.destination_hash)
                     {
-                        let sig_pub: [u8; 32] = announced.public_key[32..].try_into().unwrap();
-                        match node.create_link(msg.destination_hash, sig_pub) {
-                            Ok(link_id) => {
-                                self.pending_direct_links
-                                    .insert(msg.destination_hash, link_id);
-                                msg.link_id = Some(link_id);
-                                msg.state = MessageState::Sending;
-                            }
-                            Err(_) => {
-                                log::warn!("Failed to create direct link");
-                            }
-                        }
+                        let dest_hash = msg.destination_hash;
+                        let sig_pub: [u8; 32] = public_key[32..].try_into().unwrap();
+                        let tx = self.direct_link_tx.clone();
+                        let node = node.clone();
+                        self.pending_direct_link_creations.insert(dest_hash, now);
+                        msg.state = MessageState::Sending;
+                        thread::spawn(move || {
+                            let link_id = node.create_link(dest_hash, sig_pub).ok();
+                            let _ = tx.send(DirectLinkResult { dest_hash, link_id });
+                        });
                     } else if msg.attempts <= MAX_PATHLESS_TRIES + 1 {
-                        let _ = node.request_path(&DestHash(msg.destination_hash));
+                        let node = node.clone();
+                        let dest_hash = msg.destination_hash;
+                        thread::spawn(move || {
+                            let _ = node.request_path(&DestHash(dest_hash));
+                        });
                     }
                 }
                 DeliveryMethod::Propagated => {
@@ -939,16 +996,10 @@ impl Callbacks for LxmfCallbacks {
         let mut router = self.router.lock().unwrap();
 
         if is_initiator {
-            // Promote pending → active if this link was created via ensure_direct_link
-            if let Some((&dest, _)) = router
+            router
                 .pending_direct_links
-                .iter()
-                .find(|(_, &lid)| lid == link_id.0)
-            {
-                let dest = dest; // copy
-                router.pending_direct_links.remove(&dest);
-                router.direct_links.insert(dest, link_id.0);
-            }
+                .retain(|_, lid| *lid != link_id.0);
+            router.direct_links.insert(dest_hash.0, link_id.0);
 
             // We initiated this link. Mark queued direct messages ready; the
             // next jobs() cycle will send them outside the driver callback.
