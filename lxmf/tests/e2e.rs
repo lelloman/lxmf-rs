@@ -12,6 +12,7 @@ use std::{fs, thread};
 use lxmf_core::constants::*;
 use lxmf_core::message;
 use lxmf_rs::router::{LxmDelivery, LxmRouter, LxmfCallbacks, OutboundMessage, RouterConfig};
+use rns_core::msgpack::{self, Value};
 use rns_core::types::{DestHash, IdentityHash, LinkId, PacketHash};
 use rns_crypto::identity::Identity;
 use rns_net::destination::{AnnouncedIdentity, Destination};
@@ -598,12 +599,56 @@ fn test_delivery_announce_received() {
             "Bob's router should store Alice's stamp cost of 8, got {:?}",
             cost
         );
+        assert_eq!(
+            r.compression_cache.get(&alice.delivery_dest_hash),
+            Some(&true),
+            "legacy two-field delivery announces should default to compression-capable"
+        );
     }
 
     alice.shutdown();
     bob.shutdown();
     transport_node.shutdown();
     let _ = fs::remove_dir_all(&transport_dir);
+}
+
+#[test]
+fn test_delivery_announce_records_compression_unsupported() {
+    let dir = temp_dir("compression_unsupported");
+    let identity = Identity::new(&mut rns_crypto::OsRng);
+    let router = Arc::new(Mutex::new(LxmRouter::new(
+        identity,
+        RouterConfig {
+            storagepath: dir.clone(),
+            ..RouterConfig::default()
+        },
+    )));
+    let mut callbacks = LxmfCallbacks::new(router.clone());
+
+    let peer_identity = Identity::new(&mut rns_crypto::OsRng);
+    let dest_hash = [0x42; DESTINATION_LENGTH];
+    let app_data = msgpack::pack(&Value::Array(vec![
+        Value::Nil,
+        Value::Nil,
+        Value::Array(vec![]),
+    ]));
+    callbacks.on_announce(AnnouncedIdentity {
+        dest_hash: DestHash(dest_hash),
+        identity_hash: IdentityHash([0x24; DESTINATION_LENGTH]),
+        public_key: peer_identity.get_public_key().unwrap(),
+        app_data: Some(app_data),
+        hops: 0,
+        received_at: 0.0,
+        receiving_interface: InterfaceId(0),
+    });
+
+    assert_eq!(
+        router.lock().unwrap().compression_cache.get(&dest_hash),
+        Some(&false),
+        "empty supported-functionality list should disable resource compression"
+    );
+
+    let _ = fs::remove_dir_all(dir);
 }
 
 // ============================================================
