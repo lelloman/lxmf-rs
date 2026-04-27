@@ -5,7 +5,7 @@ use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use lxmf_core::constants::*;
-use lxmf_core::message;
+use lxmf_core::{announce, message};
 use rns_core::msgpack::{self, Value};
 use rns_core::types::{DestHash, IdentityHash, LinkId, PacketHash};
 use rns_crypto::identity::Identity;
@@ -174,6 +174,7 @@ pub struct LxmRouter {
     // RPC calls to the driver thread (which would deadlock when called from
     // a driver callback like on_local_delivery).
     pub identity_cache: HashMap<[u8; 16], [u8; 64]>,
+    pub compression_cache: HashMap<[u8; 16], bool>,
 
     // Node reference (set after start)
     node: Option<Arc<RnsNode>>,
@@ -241,6 +242,7 @@ impl LxmRouter {
             propagation_transfer_progress: 0.0,
             propagation_transfer_max_messages: None,
             identity_cache: HashMap::new(),
+            compression_cache: HashMap::new(),
             node: None,
             display_name: None,
             delivery_stamp_cost: None,
@@ -537,6 +539,7 @@ impl LxmRouter {
             Some(n) => n.clone(),
             None => return,
         };
+        let compression_cache = self.compression_cache.clone();
 
         let mut failed_indices = Vec::new();
         let completed_indices: Vec<usize> = Vec::new();
@@ -599,9 +602,19 @@ impl LxmRouter {
                 DeliveryMethod::Direct => {
                     if let Some(&link_id) = self.direct_links.get(&msg.destination_hash) {
                         let retain_node = node.clone();
-                        send_on_link(&node, msg, link_id, move |dest_hash| {
-                            retain_destination_data(&retain_node, dest_hash);
-                        });
+                        let auto_compress = compression_cache
+                            .get(&msg.destination_hash)
+                            .copied()
+                            .unwrap_or(true);
+                        send_on_link(
+                            &node,
+                            msg,
+                            link_id,
+                            move |dest_hash| {
+                                retain_destination_data(&retain_node, dest_hash);
+                            },
+                            auto_compress,
+                        );
                     } else if self
                         .pending_direct_links
                         .contains_key(&msg.destination_hash)
@@ -904,6 +917,7 @@ fn send_on_link(
     msg: &mut OutboundMessage,
     link_id: [u8; 16],
     retain_after_success: impl FnOnce([u8; 16]),
+    auto_compress: bool,
 ) {
     if msg.packed.len() <= LINK_PACKET_MDU {
         msg.representation = Representation::Packet;
@@ -924,7 +938,12 @@ fn send_on_link(
         }
     } else {
         msg.representation = Representation::Resource;
-        match node.send_resource(link_id, msg.packed.clone(), None) {
+        match node.send_resource_with_auto_compress(
+            link_id,
+            msg.packed.clone(),
+            None,
+            auto_compress,
+        ) {
             Ok(()) => {
                 msg.state = MessageState::Sending;
             }
@@ -967,6 +986,13 @@ impl Callbacks for LxmfCallbacks {
 
         // Extract stamp cost from delivery announces
         if let Some(ref app_data) = announced.app_data {
+            if let Some(supports_compression) =
+                announce::compression_support_from_app_data(app_data)
+            {
+                router
+                    .compression_cache
+                    .insert(announced.dest_hash.0, supports_compression);
+            }
             if !app_data.is_empty() {
                 let first = app_data[0];
                 // Check for msgpack array header (v0.5.0+ format)
