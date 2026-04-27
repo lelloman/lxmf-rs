@@ -639,6 +639,26 @@ impl LxmRouter {
                             }
                             msg.state = MessageState::Sending;
                         }
+                    } else if self
+                        .pending_direct_links
+                        .contains_key(&self.propagation_dest_hash)
+                        || self
+                            .pending_direct_link_creations
+                            .contains_key(&self.propagation_dest_hash)
+                    {
+                        // Propagation link is being established.
+                    } else if let Some(public_key) =
+                        self.identity_cache.get(&self.propagation_dest_hash)
+                    {
+                        let dest_hash = self.propagation_dest_hash;
+                        let sig_pub: [u8; 32] = public_key[32..].try_into().unwrap();
+                        let tx = self.direct_link_tx.clone();
+                        let node = node.clone();
+                        self.pending_direct_link_creations.insert(dest_hash, now);
+                        thread::spawn(move || {
+                            let link_id = node.create_link(dest_hash, sig_pub).ok();
+                            let _ = tx.send(DirectLinkResult { dest_hash, link_id });
+                        });
                     } else {
                         let _ = node.request_path(&DestHash(self.propagation_dest_hash));
                     }
@@ -999,12 +1019,20 @@ impl Callbacks for LxmfCallbacks {
             router
                 .pending_direct_links
                 .retain(|_, lid| *lid != link_id.0);
-            router.direct_links.insert(dest_hash.0, link_id.0);
+            let is_propagation_link = dest_hash.0 == router.propagation_dest_hash;
+            if is_propagation_link {
+                router.propagation_link = Some(link_id.0);
+            } else {
+                router.direct_links.insert(dest_hash.0, link_id.0);
+            }
 
             // We initiated this link. Mark queued direct messages ready; the
             // next jobs() cycle will send them outside the driver callback.
             for msg in &mut router.outbound {
-                if msg.link_id == Some(link_id.0) && msg.state == MessageState::Sending {
+                let should_retry_now = (msg.link_id == Some(link_id.0)
+                    && msg.state == MessageState::Sending)
+                    || (msg.method == DeliveryMethod::Propagated && is_propagation_link);
+                if should_retry_now {
                     msg.state = MessageState::Outbound;
                     msg.last_attempt = 0.0;
                 }

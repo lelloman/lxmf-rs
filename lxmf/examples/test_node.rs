@@ -15,8 +15,24 @@
 //!   GET  /api/messages   optional ?clear=true
 //!   GET  /api/announces  optional ?clear=true
 //!   GET  /api/outbound
+//!   GET  /api/state
+//!   GET  /api/stamp_costs
+//!   GET  /api/peers
+//!   GET  /api/storage
+//!   GET  /api/propagation
+//!   GET  /api/links
 //!   POST /api/jobs
+//!   POST /api/runtime/clear
+//!   POST /api/request_path {"dest_hash":"32hex"}
+//!   POST /api/direct_link  {"dest_hash":"32hex"}
+//!   POST /api/propagation/enable
+//!   POST /api/propagation/disable
+//!   POST /api/propagation/announce
+//!   POST /api/propagation/destination {"dest_hash":"32hex"}
+//!   POST /api/sync   {"dest_hash":"32hex"}
+//!   POST /api/unpeer {"dest_hash":"32hex"}
 
+use std::fs;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -29,6 +45,7 @@ use lxmf_core::constants::{
 };
 use lxmf_core::message;
 use lxmf_rs::router::{LxmDelivery, LxmRouter, LxmfCallbacks, OutboundMessage, RouterConfig};
+use rns_core::msgpack;
 use rns_core::types::{DestHash, IdentityHash, LinkId, PacketHash};
 use rns_crypto::identity::Identity;
 use rns_net::destination::AnnouncedIdentity;
@@ -61,6 +78,36 @@ fn now_timestamp() -> f64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs_f64()
+}
+
+fn method_name(method: DeliveryMethod) -> &'static str {
+    match method {
+        DeliveryMethod::Opportunistic => "opportunistic",
+        DeliveryMethod::Direct => "direct",
+        DeliveryMethod::Propagated => "propagated",
+        DeliveryMethod::Paper => "paper",
+    }
+}
+
+fn file_count_and_bytes(path: &Path) -> (u64, u64) {
+    let entries = match fs::read_dir(path) {
+        Ok(entries) => entries,
+        Err(_) => return (0, 0),
+    };
+
+    let mut count = 0u64;
+    let mut bytes = 0u64;
+    for entry in entries.flatten() {
+        let metadata = match entry.metadata() {
+            Ok(metadata) => metadata,
+            Err(_) => continue,
+        };
+        if metadata.is_file() {
+            count += 1;
+            bytes = bytes.saturating_add(metadata.len());
+        }
+    }
+    (count, bytes)
 }
 
 fn load_or_create_identity(path: &Path) -> Identity {
@@ -122,10 +169,20 @@ struct AnnounceRecord {
     received_at: f64,
 }
 
+#[derive(Clone)]
+struct PropagationRecord {
+    transport: String,
+    size: usize,
+    message_count: usize,
+    payload_hex: String,
+    received_at: f64,
+}
+
 #[derive(Default)]
 struct TestState {
     messages: Vec<ReceivedMessage>,
     announces: Vec<AnnounceRecord>,
+    propagation_payloads: Vec<PropagationRecord>,
 }
 
 struct AppCallbacks {
@@ -181,6 +238,7 @@ impl Callbacks for AppCallbacks {
     }
 
     fn on_resource_received(&mut self, link_id: LinkId, data: Vec<u8>, metadata: Option<Vec<u8>>) {
+        let _ = record_propagation_payload(&self.state, "resource", &data);
         self.inner.on_resource_received(link_id, data, metadata);
     }
 
@@ -205,6 +263,7 @@ impl Callbacks for AppCallbacks {
     }
 
     fn on_link_data(&mut self, link_id: LinkId, context: u8, data: Vec<u8>) {
+        let _ = record_propagation_payload(&self.state, "link", &data);
         self.inner.on_link_data(link_id, context, data);
     }
 }
@@ -216,6 +275,8 @@ struct AppContext {
     identity: Identity,
     source_hash: [u8; DESTINATION_LENGTH],
     display_name: String,
+    storage_dir: PathBuf,
+    started_at: f64,
 }
 
 fn message_to_json(message: &ReceivedMessage) -> Value {
@@ -245,18 +306,85 @@ fn announce_to_json(announce: &AnnounceRecord) -> Value {
     })
 }
 
+fn propagation_to_json(record: &PropagationRecord) -> Value {
+    json!({
+        "transport": record.transport,
+        "size": record.size,
+        "message_count": record.message_count,
+        "payload_hex": record.payload_hex,
+        "received_at": record.received_at,
+    })
+}
+
 fn outbound_to_json(message: &OutboundMessage) -> Value {
     json!({
         "destination_hash": hex(&message.destination_hash),
         "source_hash": hex(&message.source_hash),
         "message_hash": hex(&message.message_hash),
-        "method": format!("{:?}", message.method),
+        "method": method_name(message.method),
         "state": format!("{:?}", message.state),
+        "representation": format!("{:?}", message.representation),
         "attempts": message.attempts,
         "last_attempt": message.last_attempt,
         "link_id": message.link_id.map(|id| hex(&id)),
         "packet_hash": message.packet_hash.map(|hash| hex(&hash)),
+        "transient_id": message.transient_id.map(|id| hex(&id)),
+        "has_propagation_packed": message.propagation_packed.is_some(),
     })
+}
+
+fn peer_to_json(peer: &lxmf_rs::peer::LxmPeer) -> Value {
+    json!({
+        "destination_hash": hex(&peer.destination_hash),
+        "state": format!("{:?}", peer.state),
+        "alive": peer.alive,
+        "last_heard": peer.last_heard,
+        "next_sync_attempt": peer.next_sync_attempt,
+        "last_sync_attempt": peer.last_sync_attempt,
+        "sync_backoff": peer.sync_backoff,
+        "peering_cost": peer.peering_cost,
+        "peering_key_value": peer.peering_key_value(),
+        "propagation_transfer_limit": peer.propagation_transfer_limit,
+        "propagation_sync_limit": peer.propagation_sync_limit,
+        "propagation_stamp_cost": peer.propagation_stamp_cost,
+        "propagation_stamp_cost_flexibility": peer.propagation_stamp_cost_flexibility,
+        "link_id": peer.link_id.map(|id| hex(&id)),
+        "handled_ids": peer.handled_ids.len(),
+        "unhandled_ids": peer.unhandled_ids.len(),
+        "offered": peer.offered,
+        "outgoing": peer.outgoing,
+        "incoming": peer.incoming,
+        "rx_bytes": peer.rx_bytes,
+        "tx_bytes": peer.tx_bytes,
+    })
+}
+
+fn propagation_payload_message_count(data: &[u8]) -> Option<usize> {
+    let value = msgpack::unpack_exact(data).ok()?;
+    let outer = value.as_array()?;
+    if outer.len() != 2 {
+        return None;
+    }
+    let messages = outer[1].as_array()?;
+    Some(messages.len())
+}
+
+fn record_propagation_payload(state: &Arc<Mutex<TestState>>, transport: &str, data: &[u8]) -> bool {
+    let message_count = match propagation_payload_message_count(data) {
+        Some(count) => count,
+        None => return false,
+    };
+
+    if let Ok(mut state) = state.lock() {
+        state.propagation_payloads.push(PropagationRecord {
+            transport: transport.to_string(),
+            size: data.len(),
+            message_count,
+            payload_hex: hex(data),
+            received_at: now_timestamp(),
+        });
+    }
+    true
 }
 
 fn write_response(stream: &mut TcpStream, status: u16, body: &str, content_type: &str) {
@@ -369,6 +497,71 @@ fn query_has(query: Option<&str>, key: &str, value: &str) -> bool {
         .any(|(k, v)| k == key && v == value)
 }
 
+fn storage_to_json(ctx: &AppContext) -> Value {
+    let (messagestore, local_deliveries, locally_processed, peers, outbound_stamp_costs) = {
+        let router = ctx.router.lock().unwrap();
+        (
+            router.paths.messagestore.clone(),
+            router.paths.local_deliveries.clone(),
+            router.paths.locally_processed.clone(),
+            router.paths.peers.clone(),
+            router.paths.outbound_stamp_costs.clone(),
+        )
+    };
+    let (messagestore_count, messagestore_bytes) = file_count_and_bytes(&messagestore);
+    let (local_delivery_count, local_delivery_bytes) = file_count_and_bytes(&local_deliveries);
+    let (processed_count, processed_bytes) = file_count_and_bytes(&locally_processed);
+
+    json!({
+        "storage_dir": ctx.storage_dir.display().to_string(),
+        "messagestore": {
+            "path": messagestore.display().to_string(),
+            "files": messagestore_count,
+            "bytes": messagestore_bytes,
+        },
+        "local_deliveries": {
+            "path": local_deliveries.display().to_string(),
+            "files": local_delivery_count,
+            "bytes": local_delivery_bytes,
+        },
+        "locally_processed": {
+            "path": locally_processed.display().to_string(),
+            "files": processed_count,
+            "bytes": processed_bytes,
+        },
+        "peers_path": peers.display().to_string(),
+        "stamp_costs_path": outbound_stamp_costs.display().to_string(),
+    })
+}
+
+fn state_to_json(ctx: &AppContext) -> Value {
+    let state = ctx.state.lock().unwrap();
+    let router = ctx.router.lock().unwrap();
+    json!({
+        "status": "ready",
+        "display_name": ctx.display_name,
+        "uptime": now_timestamp() - ctx.started_at,
+        "identity_hash": hex(ctx.identity.hash()),
+        "delivery_dest_hash": hex(&ctx.source_hash),
+        "propagation_dest_hash": hex(&router.propagation_dest_hash),
+        "control_dest_hash": router.control_dest_hash.map(|hash| hex(&hash)),
+        "propagation_enabled": router.propagation_node,
+        "messages": state.messages.len(),
+        "announces": state.announces.len(),
+        "propagation_payloads": state.propagation_payloads.len(),
+        "outbound": router.outbound.len(),
+        "peers": router.peers.len(),
+        "stamp_costs": router.outbound_stamp_costs.len(),
+        "identity_cache": router.identity_cache.len(),
+        "direct_links": router.direct_links.len(),
+        "pending_direct_links": router.pending_direct_links.len(),
+        "active_propagation_links": router.active_propagation_links.len(),
+        "propagation_link": router.propagation_link.map(|id| hex(&id)),
+        "propagation_transfer_state": format!("{:?}", router.propagation_transfer_state),
+        "propagation_transfer_progress": router.propagation_transfer_progress,
+    })
+}
+
 fn handle_get(path: &str, query: Option<&str>, ctx: &AppContext, stream: &mut TcpStream) {
     match path {
         "/health" => {
@@ -393,10 +586,14 @@ fn handle_get(path: &str, query: Option<&str>, ctx: &AppContext, stream: &mut Tc
                     "display_name": ctx.display_name,
                     "announces": state.announces.len(),
                     "messages": state.messages.len(),
+                    "propagation_payloads": state.propagation_payloads.len(),
                     "outbound": router.outbound.len(),
+                    "propagation_dest_hash": hex(&router.propagation_dest_hash),
+                    "propagation_enabled": router.propagation_node,
                 }),
             );
         }
+        "/api/state" => write_json(stream, 200, state_to_json(ctx)),
         "/api/messages" => {
             let clear = query_has(query, "clear", "true");
             let mut state = ctx.state.lock().unwrap();
@@ -415,11 +612,80 @@ fn handle_get(path: &str, query: Option<&str>, ctx: &AppContext, stream: &mut Tc
             }
             write_json(stream, 200, json!({ "announces": announces }));
         }
+        "/api/propagation" => {
+            let clear = query_has(query, "clear", "true");
+            let mut state = ctx.state.lock().unwrap();
+            let payloads: Vec<Value> = state
+                .propagation_payloads
+                .iter()
+                .map(propagation_to_json)
+                .collect();
+            if clear {
+                state.propagation_payloads.clear();
+            }
+            let router = ctx.router.lock().unwrap();
+            write_json(
+                stream,
+                200,
+                json!({
+                    "enabled": router.propagation_node,
+                    "propagation_dest_hash": hex(&router.propagation_dest_hash),
+                    "control_dest_hash": router.control_dest_hash.map(|hash| hex(&hash)),
+                    "propagation_link": router.propagation_link.map(|id| hex(&id)),
+                    "active_propagation_links": router.active_propagation_links.iter().map(|id| hex(id)).collect::<Vec<_>>(),
+                    "payloads": payloads,
+                }),
+            );
+        }
         "/api/outbound" => {
             let router = ctx.router.lock().unwrap();
             let outbound: Vec<Value> = router.outbound.iter().map(outbound_to_json).collect();
             write_json(stream, 200, json!({ "outbound": outbound }));
         }
+        "/api/stamp_costs" => {
+            let router = ctx.router.lock().unwrap();
+            let costs: Vec<Value> = router
+                .outbound_stamp_costs
+                .iter()
+                .map(|(dest, (timestamp, cost))| {
+                    json!({
+                        "dest_hash": hex(dest),
+                        "timestamp": timestamp,
+                        "cost": cost,
+                    })
+                })
+                .collect();
+            write_json(stream, 200, json!({ "stamp_costs": costs }));
+        }
+        "/api/peers" => {
+            let router = ctx.router.lock().unwrap();
+            let peers: Vec<Value> = router.peers.values().map(peer_to_json).collect();
+            write_json(stream, 200, json!({ "peers": peers }));
+        }
+        "/api/links" => {
+            let router = ctx.router.lock().unwrap();
+            let direct_links: Vec<Value> = router
+                .direct_links
+                .iter()
+                .map(|(dest, link)| json!({ "dest_hash": hex(dest), "link_id": hex(link) }))
+                .collect();
+            let pending_direct_links: Vec<Value> = router
+                .pending_direct_links
+                .iter()
+                .map(|(dest, link)| json!({ "dest_hash": hex(dest), "link_id": hex(link) }))
+                .collect();
+            write_json(
+                stream,
+                200,
+                json!({
+                    "direct_links": direct_links,
+                    "pending_direct_links": pending_direct_links,
+                    "propagation_link": router.propagation_link.map(|id| hex(&id)),
+                    "active_propagation_links": router.active_propagation_links.iter().map(|id| hex(id)).collect::<Vec<_>>(),
+                }),
+            );
+        }
+        "/api/storage" => write_json(stream, 200, storage_to_json(ctx)),
         _ => write_json(stream, 404, json!({ "error": "not found" })),
     }
 }
@@ -448,6 +714,181 @@ fn handle_post(
             let mut router = ctx.router.lock().unwrap();
             router.jobs();
             write_json(stream, 200, json!({ "ran": true }));
+            Ok(())
+        }
+        "/api/runtime/clear" => {
+            let value = request_json(request)?;
+            let clear_messages = value
+                .get("messages")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
+            let clear_announces = value
+                .get("announces")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
+            let clear_propagation = value
+                .get("propagation")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
+            let clear_outbound = value
+                .get("outbound")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
+            let clear_caches = value
+                .get("caches")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+
+            {
+                let mut state = ctx.state.lock().unwrap();
+                if clear_messages {
+                    state.messages.clear();
+                }
+                if clear_announces {
+                    state.announces.clear();
+                }
+                if clear_propagation {
+                    state.propagation_payloads.clear();
+                }
+            }
+            {
+                let mut router = ctx.router.lock().unwrap();
+                if clear_outbound {
+                    router.outbound.clear();
+                }
+                if clear_caches {
+                    router.locally_delivered_transient_ids.clear();
+                    router.locally_processed_transient_ids.clear();
+                }
+            }
+
+            write_json(stream, 200, json!({ "cleared": true }));
+            Ok(())
+        }
+        "/api/request_path" => {
+            let value = request_json(request)?;
+            let dest_hash = value
+                .get("dest_hash")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "dest_hash is required".to_string())
+                .and_then(parse_hex_16)?;
+            let requested = {
+                let router = ctx.router.lock().unwrap();
+                router
+                    .node()
+                    .map(|node| node.request_path(&DestHash(dest_hash)).is_ok())
+                    .unwrap_or(false)
+            };
+            write_json(
+                stream,
+                200,
+                json!({ "requested": requested, "dest_hash": hex(&dest_hash) }),
+            );
+            Ok(())
+        }
+        "/api/direct_link" => {
+            let value = request_json(request)?;
+            let dest_hash = value
+                .get("dest_hash")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "dest_hash is required".to_string())
+                .and_then(parse_hex_16)?;
+            let created_or_pending = {
+                let mut router = ctx.router.lock().unwrap();
+                router.ensure_direct_link(dest_hash)
+            };
+            write_json(
+                stream,
+                200,
+                json!({ "created_or_pending": created_or_pending, "dest_hash": hex(&dest_hash) }),
+            );
+            Ok(())
+        }
+        "/api/propagation/enable" => {
+            let mut router = ctx.router.lock().unwrap();
+            router.enable_propagation();
+            write_json(
+                stream,
+                200,
+                json!({
+                    "enabled": true,
+                    "propagation_dest_hash": hex(&router.propagation_dest_hash),
+                    "control_dest_hash": router.control_dest_hash.map(|hash| hex(&hash)),
+                }),
+            );
+            Ok(())
+        }
+        "/api/propagation/disable" => {
+            let mut router = ctx.router.lock().unwrap();
+            router.disable_propagation();
+            write_json(stream, 200, json!({ "enabled": false }));
+            Ok(())
+        }
+        "/api/propagation/announce" => {
+            let router = ctx.router.lock().unwrap();
+            router.announce_propagation_node();
+            write_json(
+                stream,
+                200,
+                json!({
+                    "announced": true,
+                    "propagation_dest_hash": hex(&router.propagation_dest_hash),
+                }),
+            );
+            Ok(())
+        }
+        "/api/propagation/destination" => {
+            let value = request_json(request)?;
+            let dest_hash = value
+                .get("dest_hash")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "dest_hash is required".to_string())
+                .and_then(parse_hex_16)?;
+            let mut router = ctx.router.lock().unwrap();
+            router.set_propagation_dest_hash(dest_hash);
+            write_json(
+                stream,
+                200,
+                json!({
+                    "propagation_dest_hash": hex(&router.propagation_dest_hash),
+                }),
+            );
+            Ok(())
+        }
+        "/api/sync" => {
+            let value = request_json(request)?;
+            let dest_hash = value
+                .get("dest_hash")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "dest_hash is required".to_string())
+                .and_then(parse_hex_16)?;
+            let result = ctx.router.lock().unwrap().sync_peer(&dest_hash);
+            write_json(
+                stream,
+                200,
+                json!({
+                    "ok": result.is_ok(),
+                    "error": result.err().map(|e| format!("{:?}", e)),
+                }),
+            );
+            Ok(())
+        }
+        "/api/unpeer" => {
+            let value = request_json(request)?;
+            let dest_hash = value
+                .get("dest_hash")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "dest_hash is required".to_string())
+                .and_then(parse_hex_16)?;
+            let result = ctx.router.lock().unwrap().unpeer(&dest_hash);
+            write_json(
+                stream,
+                200,
+                json!({
+                    "ok": result.is_ok(),
+                    "error": result.err().map(|e| format!("{:?}", e)),
+                }),
+            );
             Ok(())
         }
         "/api/send" => {
@@ -490,6 +931,29 @@ fn handle_post(
             .map_err(|e| format!("pack failed: {e:?}"))?;
 
             let message_hash = packed.message_hash;
+            let (propagation_packed, transient_id) = if method == DeliveryMethod::Propagated {
+                let recipient_public_key = {
+                    let router = ctx.router.lock().unwrap();
+                    router.identity_cache.get(&dest_hash).copied()
+                }
+                .ok_or_else(|| {
+                    "recipient identity is not cached; announce the recipient before propagated send"
+                        .to_string()
+                })?;
+                let recipient = Identity::from_public_key(&recipient_public_key);
+                let mut rng = rns_crypto::OsRng;
+                let (propagation_packed, transient_id) =
+                    message::propagation_pack(&packed.packed, now_timestamp(), None, |data| {
+                        recipient
+                            .encrypt(data, &mut rng)
+                            .map_err(|_| message::Error::EncryptError)
+                    })
+                    .map_err(|e| format!("propagation_pack failed: {e:?}"))?;
+                (Some(propagation_packed), Some(transient_id))
+            } else {
+                (None, None)
+            };
+
             let mut router = ctx.router.lock().unwrap();
             router.handle_outbound(OutboundMessage {
                 destination_hash: dest_hash,
@@ -503,9 +967,9 @@ fn handle_post(
                 last_attempt: 0.0,
                 stamp: None,
                 stamp_cost: None,
-                propagation_packed: None,
+                propagation_packed,
                 propagation_stamp: None,
-                transient_id: None,
+                transient_id,
                 delivery_callback: None,
                 failed_callback: None,
                 progress_callback: None,
@@ -521,7 +985,8 @@ fn handle_post(
                     "queued": true,
                     "message_hash": hex(&message_hash),
                     "dest_hash": hex(&dest_hash),
-                    "method": format!("{:?}", method),
+                    "method": method_name(method),
+                    "transient_id": transient_id.map(|id| hex(&id)),
                 }),
             );
             Ok(())
@@ -672,6 +1137,8 @@ fn main() {
         identity,
         source_hash,
         display_name,
+        storage_dir: storage_dir.clone(),
+        started_at: now_timestamp(),
     });
 
     {
