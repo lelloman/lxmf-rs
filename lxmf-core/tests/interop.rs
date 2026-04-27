@@ -1674,6 +1674,61 @@ fn test_delivery_announce_no_cost() {
 }
 
 #[test]
+fn test_delivery_announce_compression_support_defaults() {
+    let legacy = b"LegacyNode";
+    assert_eq!(
+        announce::compression_support_from_app_data(legacy),
+        Some(true)
+    );
+
+    let v050 = pack(&Value::Array(vec![
+        Value::Bin(b"TestNode".to_vec()),
+        Value::UInt(16),
+    ]));
+    assert_eq!(
+        announce::compression_support_from_app_data(&v050),
+        Some(true)
+    );
+
+    assert_eq!(announce::compression_support_from_app_data(&[]), None);
+}
+
+#[test]
+fn test_delivery_announce_compression_support_signalling() {
+    let supported = pack(&Value::Array(vec![
+        Value::Bin(b"TestNode".to_vec()),
+        Value::UInt(16),
+        Value::Array(vec![Value::UInt(
+            lxmf_core::constants::SF_COMPRESSION as u64,
+        )]),
+    ]));
+    assert_eq!(
+        announce::compression_support_from_app_data(&supported),
+        Some(true)
+    );
+
+    let unsupported = pack(&Value::Array(vec![
+        Value::Bin(b"TestNode".to_vec()),
+        Value::UInt(16),
+        Value::Array(vec![Value::UInt(0x42)]),
+    ]));
+    assert_eq!(
+        announce::compression_support_from_app_data(&unsupported),
+        Some(false)
+    );
+
+    let malformed_support_field = pack(&Value::Array(vec![
+        Value::Bin(b"TestNode".to_vec()),
+        Value::UInt(16),
+        Value::UInt(0),
+    ]));
+    assert_eq!(
+        announce::compression_support_from_app_data(&malformed_support_field),
+        Some(true)
+    );
+}
+
+#[test]
 fn test_display_name_empty() {
     let name = announce::display_name_from_app_data(&[]);
     assert_eq!(name, None);

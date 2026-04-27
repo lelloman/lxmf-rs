@@ -3,7 +3,7 @@ use alloc::vec::Vec;
 
 use rns_core::msgpack::{unpack_exact, Value};
 
-use crate::constants::PN_META_NAME;
+use crate::constants::{PN_META_NAME, SF_COMPRESSION};
 
 /// Extract display name from delivery announce app_data.
 ///
@@ -45,6 +45,37 @@ pub fn stamp_cost_from_app_data(app_data: &[u8]) -> Option<u8> {
         arr[1].as_uint().map(|v| v as u8)
     } else {
         None
+    }
+}
+
+/// Extract whether a delivery destination supports compressed resources.
+///
+/// LXMF 0.9.6 adds an optional third delivery announce field containing a list
+/// of supported functionality codes. Legacy announce data and v0.5+ announce
+/// arrays without that field are treated as compression-capable.
+pub fn compression_support_from_app_data(app_data: &[u8]) -> Option<bool> {
+    if app_data.is_empty() {
+        return None;
+    }
+
+    if is_msgpack_array(app_data[0]) {
+        let val = unpack_exact(app_data).ok()?;
+        let arr = val.as_array()?;
+        if arr.len() < 3 {
+            return Some(true);
+        }
+
+        let Some(supported) = arr[2].as_array() else {
+            return Some(true);
+        };
+
+        Some(
+            supported
+                .iter()
+                .any(|item| item.as_uint() == Some(SF_COMPRESSION as u64)),
+        )
+    } else {
+        Some(true)
     }
 }
 
