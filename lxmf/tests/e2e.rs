@@ -651,6 +651,75 @@ fn test_delivery_announce_records_compression_unsupported() {
     let _ = fs::remove_dir_all(dir);
 }
 
+#[test]
+fn test_link_data_delivery_returns_before_user_callback_completes() {
+    let dir = temp_dir("link_data_async");
+    let local_identity = Identity::new(&mut rns_crypto::OsRng);
+    let source_identity = Identity::new(&mut rns_crypto::OsRng);
+    let dest_hash = rns_core::destination::destination_hash(
+        APP_NAME,
+        &["delivery"],
+        Some(local_identity.hash()),
+    );
+    let source_hash = rns_core::destination::destination_hash(
+        APP_NAME,
+        &["delivery"],
+        Some(source_identity.hash()),
+    );
+    let link_id = [0x77; DESTINATION_LENGTH];
+
+    let mut router = LxmRouter::new(
+        local_identity,
+        RouterConfig {
+            storagepath: dir.clone(),
+            ..RouterConfig::default()
+        },
+    );
+    router.delivery_dest_hash = Some(dest_hash);
+    router.link_destinations.insert(link_id, dest_hash);
+    router
+        .identity_cache
+        .insert(source_hash, source_identity.get_public_key().unwrap());
+
+    let (callback_started_tx, callback_started_rx) = mpsc::channel();
+    let (release_callback_tx, release_callback_rx) = mpsc::channel();
+    router.set_delivery_callback(Box::new(move |_delivery: &LxmDelivery| {
+        let _ = callback_started_tx.send(());
+        let _ = release_callback_rx.recv_timeout(DEFAULT_TIMEOUT);
+    }));
+
+    let router = Arc::new(Mutex::new(router));
+    let mut callbacks = LxmfCallbacks::new(router);
+    let packed = pack_test_message(
+        &source_identity,
+        &dest_hash,
+        b"Async",
+        b"callback should not hold driver callback",
+    )
+    .packed;
+
+    let (returned_tx, returned_rx) = mpsc::channel();
+    let handle = thread::spawn(move || {
+        callbacks.on_link_data(LinkId(link_id), 0, packed);
+        let _ = returned_tx.send(());
+    });
+
+    let returned_before_release = returned_rx.recv_timeout(Duration::from_millis(200)).is_ok();
+    assert!(
+        callback_started_rx.recv_timeout(DEFAULT_TIMEOUT).is_ok(),
+        "delivery callback should still run"
+    );
+    let _ = release_callback_tx.send(());
+    handle.join().unwrap();
+
+    assert!(
+        returned_before_release,
+        "on_link_data should return before user delivery callback completes"
+    );
+
+    let _ = fs::remove_dir_all(dir);
+}
+
 // ============================================================
 // Test B: Propagation node announce received
 // ============================================================

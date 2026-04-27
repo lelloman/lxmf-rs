@@ -966,6 +966,33 @@ impl LxmfCallbacks {
     pub fn new(router: Arc<Mutex<LxmRouter>>) -> Self {
         Self { router }
     }
+
+    fn spawn_lxmf_delivery(
+        &self,
+        lxmf_bytes: Vec<u8>,
+        transport_encrypted: bool,
+        transport_encryption: &'static str,
+        method: DeliveryMethod,
+    ) {
+        let router = self.router.clone();
+        thread::spawn(move || {
+            let mut router = router.lock().unwrap();
+            router.lxmf_delivery(
+                &lxmf_bytes,
+                transport_encrypted,
+                transport_encryption,
+                method,
+            );
+        });
+    }
+
+    fn is_delivery_link(&self, link_id: LinkId) -> bool {
+        let router = self.router.lock().unwrap();
+        router
+            .link_destinations
+            .get(&link_id.0)
+            .map_or(false, |dh| router.delivery_dest_hash == Some(*dh))
+    }
 }
 
 impl Callbacks for LxmfCallbacks {
@@ -1018,11 +1045,15 @@ impl Callbacks for LxmfCallbacks {
     }
 
     fn on_local_delivery(&mut self, dest_hash: DestHash, raw: Vec<u8>, _packet_hash: PacketHash) {
-        let mut router = self.router.lock().unwrap();
+        let should_deliver = {
+            let router = self.router.lock().unwrap();
+            router.delivery_dest_hash == Some(dest_hash.0)
+        };
 
-        // Check if this is for our delivery destination
-        if let Some(delivery_hash) = router.delivery_dest_hash {
-            if dest_hash.0 == delivery_hash {
+        if should_deliver {
+            let router = self.router.clone();
+            thread::spawn(move || {
+                let mut router = router.lock().unwrap();
                 // Extract data payload from raw wire packet
                 let packet = match rns_core::packet::RawPacket::unpack(&raw) {
                     Ok(p) => p,
@@ -1049,7 +1080,7 @@ impl Callbacks for LxmfCallbacks {
                     ENCRYPTION_DESCRIPTION_EC,
                     DeliveryMethod::Opportunistic,
                 );
-            }
+            });
         }
     }
 
@@ -1131,17 +1162,9 @@ impl Callbacks for LxmfCallbacks {
     }
 
     fn on_resource_received(&mut self, link_id: LinkId, data: Vec<u8>, _metadata: Option<Vec<u8>>) {
-        let mut router = self.router.lock().unwrap();
-
-        // Check if this link is for delivery
-        let is_delivery_link = router
-            .link_destinations
-            .get(&link_id.0)
-            .map_or(false, |dh| router.delivery_dest_hash == Some(*dh));
-
-        if is_delivery_link {
-            router.lxmf_delivery(
-                &data,
+        if self.is_delivery_link(link_id) {
+            self.spawn_lxmf_delivery(
+                data,
                 true,
                 ENCRYPTION_DESCRIPTION_EC,
                 DeliveryMethod::Direct,
@@ -1216,17 +1239,9 @@ impl Callbacks for LxmfCallbacks {
     }
 
     fn on_link_data(&mut self, link_id: LinkId, _context: u8, data: Vec<u8>) {
-        let mut router = self.router.lock().unwrap();
-
-        // Direct delivery via link packet
-        let is_delivery_link = router
-            .link_destinations
-            .get(&link_id.0)
-            .map_or(false, |dh| router.delivery_dest_hash == Some(*dh));
-
-        if is_delivery_link {
-            router.lxmf_delivery(
-                &data,
+        if self.is_delivery_link(link_id) {
+            self.spawn_lxmf_delivery(
+                data,
                 true,
                 ENCRYPTION_DESCRIPTION_EC,
                 DeliveryMethod::Direct,
