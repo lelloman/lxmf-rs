@@ -280,6 +280,28 @@ fn wait_for_link_established(
     })
 }
 
+fn known_destination_retained(node: &RnsNode, dest_hash: &[u8; 16]) -> bool {
+    node.known_destinations()
+        .unwrap_or_default()
+        .iter()
+        .any(|entry| entry.dest_hash == *dest_hash && entry.retained)
+}
+
+fn wait_for_known_destination_retained(
+    node: &RnsNode,
+    dest_hash: &[u8; 16],
+    timeout: Duration,
+) -> bool {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if known_destination_retained(node, dest_hash) {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    false
+}
+
 // ============================================================
 // RNS node helpers
 // ============================================================
@@ -974,6 +996,15 @@ fn test_direct_delivery_via_link() {
         assert_eq!(title, b"Direct");
         assert_eq!(content, b"LinkMsg");
     }
+
+    assert!(
+        wait_for_known_destination_retained(
+            &peers.alice.node,
+            &peers.bob.delivery_dest_hash,
+            DEFAULT_TIMEOUT
+        ),
+        "successful outbound delivery should retain Bob's announce data"
+    );
 
     peers.shutdown();
 }

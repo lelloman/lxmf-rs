@@ -598,7 +598,10 @@ impl LxmRouter {
                 }
                 DeliveryMethod::Direct => {
                     if let Some(&link_id) = self.direct_links.get(&msg.destination_hash) {
-                        send_on_link(&node, msg, link_id);
+                        let retain_node = node.clone();
+                        send_on_link(&node, msg, link_id, move |dest_hash| {
+                            retain_destination_data(&retain_node, dest_hash);
+                        });
                     } else if self
                         .pending_direct_links
                         .contains_key(&msg.destination_hash)
@@ -883,8 +886,25 @@ impl LxmRouter {
     }
 }
 
+/// Ask the RNS node to retain announce data for a destination that was
+/// actually used for successful LXMF delivery.
+fn retain_destination_data(node: &RnsNode, dest_hash: [u8; 16]) {
+    if let Err(err) = node.retain_known_destination(&DestHash(dest_hash)) {
+        log::warn!("Failed to retain destination announce data: {:?}", err);
+    }
+}
+
+fn retain_destination_data_async(node: Arc<RnsNode>, dest_hash: [u8; 16]) {
+    thread::spawn(move || retain_destination_data(&node, dest_hash));
+}
+
 /// Send a message on an established link (as packet or resource).
-fn send_on_link(node: &RnsNode, msg: &mut OutboundMessage, link_id: [u8; 16]) {
+fn send_on_link(
+    node: &RnsNode,
+    msg: &mut OutboundMessage,
+    link_id: [u8; 16],
+    retain_after_success: impl FnOnce([u8; 16]),
+) {
     if msg.packed.len() <= LINK_PACKET_MDU {
         msg.representation = Representation::Packet;
         match node.send_on_link(link_id, msg.packed.clone(), 0) {
@@ -893,6 +913,7 @@ fn send_on_link(node: &RnsNode, msg: &mut OutboundMessage, link_id: [u8; 16]) {
                 // Since the link is an encrypted, confirmed channel, treat
                 // successful dispatch as delivered.
                 msg.state = MessageState::Delivered;
+                retain_after_success(msg.destination_hash);
                 if let Some(cb) = &msg.delivery_callback {
                     cb(msg);
                 }
@@ -1106,18 +1127,23 @@ impl Callbacks for LxmfCallbacks {
         let mut router = self.router.lock().unwrap();
 
         // Mark outbound messages as delivered
+        let mut retained_dest_hash = None;
         for msg in &mut router.outbound {
             if msg.link_id == Some(link_id.0) && msg.state == MessageState::Sending {
                 if msg.method == DeliveryMethod::Propagated {
                     msg.state = MessageState::Sent;
                 } else {
                     msg.state = MessageState::Delivered;
+                    retained_dest_hash = Some(msg.destination_hash);
                 }
                 if let Some(cb) = &msg.delivery_callback {
                     cb(msg);
                 }
                 break;
             }
+        }
+        if let (Some(node), Some(dest_hash)) = (router.node.clone(), retained_dest_hash) {
+            retain_destination_data_async(node, dest_hash);
         }
     }
 
@@ -1141,14 +1167,19 @@ impl Callbacks for LxmfCallbacks {
         let mut router = self.router.lock().unwrap();
 
         // Check if this proof matches an outbound message
+        let mut retained_dest_hash = None;
         for msg in &mut router.outbound {
             if msg.packet_hash == Some(packet_hash.0) {
                 msg.state = MessageState::Delivered;
+                retained_dest_hash = Some(msg.destination_hash);
                 if let Some(cb) = &msg.delivery_callback {
                     cb(msg);
                 }
                 break;
             }
+        }
+        if let (Some(node), Some(dest_hash)) = (router.node.clone(), retained_dest_hash) {
+            retain_destination_data_async(node, dest_hash);
         }
     }
 
