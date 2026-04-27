@@ -70,6 +70,27 @@ jobs:
       - name: Run rustfmt check
         run: cargo fmt --check
 
+  docker-e2e:
+    name: Docker E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout lxmf-rs
+        uses: actions/checkout@v6
+        with:
+          path: lxmf-rs
+
+      - name: Checkout rns-rs
+        uses: actions/checkout@v6
+        with:
+          repository: lelloman/rns-rs
+          ref: dev
+          path: rns-rs
+
+      - name: Run Docker end-to-end suite
+        run: tests/docker/run-all.sh
+
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
