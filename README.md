@@ -1,6 +1,6 @@
 # lxmf-rs
 
-[![CI](https://github.com/lelloman/lxmf-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/lelloman/lxmf-rs/actions/workflows/ci.yml)
+[![CI](https://github.com/lelloman/lxmf-rs/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/lelloman/lxmf-rs/actions/workflows/ci.yml?query=branch%3Amaster)
 [![crates.io](https://img.shields.io/crates/v/lxmf-rs)](https://crates.io/crates/lxmf-rs)
 [![docs.rs](https://img.shields.io/docsrs/lxmf-rs)](https://docs.rs/lxmf-rs)
 [![License](https://img.shields.io/badge/license-Reticulum-blue)](./LICENSE)
