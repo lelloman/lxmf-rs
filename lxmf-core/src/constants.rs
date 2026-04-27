@@ -89,6 +89,12 @@ pub const PN_META_UTIL_PRESSURE: u8 = 0x05;
 pub const PN_META_CUSTOM: u8 = 0xFF;
 
 // ============================================================
+// Supported Functionality Codes (LXMF.py)
+// ============================================================
+
+pub const SF_COMPRESSION: u8 = 0x00;
+
+// ============================================================
 // Message States (LXMessage.py)
 // ============================================================
 
