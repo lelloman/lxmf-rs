@@ -93,6 +93,27 @@ jobs:
       - name: Run Docker end-to-end suite
         run: tests/docker/run-all.sh
 
+  lxmf-server-e2e:
+    name: LXMF Server E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout lxmf-rs
+        uses: actions/checkout@v6
+        with:
+          path: lxmf-rs
+
+      - name: Checkout rns-rs
+        uses: actions/checkout@v6
+        with:
+          repository: lelloman/rns-rs
+          ref: dev
+          path: rns-rs
+
+      - name: Run lxmf-server Docker scenario
+        run: tests/docker/lxmf-server/run.sh
+
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
