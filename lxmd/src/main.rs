@@ -36,6 +36,7 @@ struct Args {
     timeout: Option<f64>,
     remote: Option<String>,
     identity: Option<String>,
+    ready_file: Option<String>,
     exampleconfig: bool,
 }
 
@@ -84,6 +85,10 @@ fn parse_args() -> Args {
                 i += 1;
                 parsed.identity = args.get(i).cloned();
             }
+            "--ready-file" => {
+                i += 1;
+                parsed.ready_file = args.get(i).cloned();
+            }
             "--exampleconfig" => parsed.exampleconfig = true,
             "--version" => {
                 println!("lxmd {}", VERSION);
@@ -124,6 +129,7 @@ fn print_help() {
     println!("  --timeout SECONDS      Timeout for query operations");
     println!("  -r, --remote HASH      Remote propagation node destination hash");
     println!("  --identity PATH        Path to identity for remote requests");
+    println!("  --ready-file PATH      Write readiness marker after successful startup");
     println!("  --exampleconfig        Print example configuration and exit");
     println!("  --version              Show version and exit");
     println!("  -h, --help             Show this help message");
@@ -490,6 +496,20 @@ fn load_hash_file(path: &Path) -> Vec<[u8; 16]> {
             Some(result)
         })
         .collect()
+}
+
+fn write_ready_file(path: &Path) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| {
+            format!(
+                "failed to create ready-file parent {}: {}",
+                parent.display(),
+                e
+            )
+        })?;
+    }
+    fs::write(path, format!("pid={}\n", process::id()))
+        .map_err(|e| format!("failed to write ready-file {}: {}", path.display(), e))
 }
 
 // ============================================================
@@ -1461,6 +1481,13 @@ fn main() {
         }
     }
 
+    if let Some(path) = args.ready_file.as_deref() {
+        if let Err(e) = write_ready_file(Path::new(path)) {
+            eprintln!("{}", e);
+            process::exit(1);
+        }
+    }
+
     // Setup signal handler for graceful shutdown
     let running = Arc::new(AtomicBool::new(true));
     let r = running.clone();
@@ -1685,3 +1712,26 @@ delivery_transfer_max_accepted_size = 1000
 
 loglevel = 4
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn write_ready_file_creates_parent_and_marker() {
+        let base = env::temp_dir().join(format!(
+            "lxmd-ready-test-{}",
+            time::SystemTime::now()
+                .duration_since(time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let ready = base.join("nested").join("lxmd.ready");
+
+        write_ready_file(&ready).unwrap();
+
+        let content = fs::read_to_string(&ready).unwrap();
+        assert!(content.starts_with("pid="));
+        let _ = fs::remove_dir_all(base);
+    }
+}

@@ -5,9 +5,10 @@ COPY rns-rs ./rns-rs
 COPY lxmf-rs ./lxmf-rs
 
 WORKDIR /build/rns-rs
-RUN cargo build --release -p rns-ctl
+RUN cargo build --release -p rns-ctl -p rns-server
 
 WORKDIR /build/lxmf-rs
+RUN cargo build --release -p lxmd -p lxmf-server
 RUN cargo build --release -p lxmf-rs --example test_node
 
 FROM debian:bookworm-slim
@@ -17,6 +18,9 @@ RUN apt-get update \
   && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /build/rns-rs/target/release/rns-ctl /usr/local/bin/rns-ctl
+COPY --from=builder /build/rns-rs/target/release/rns-server /usr/local/bin/rns-server
+COPY --from=builder /build/lxmf-rs/target/release/lxmd /usr/local/bin/lxmd
+COPY --from=builder /build/lxmf-rs/target/release/lxmf-server /usr/local/bin/lxmf-server
 COPY --from=builder /build/lxmf-rs/target/release/examples/test_node /usr/local/bin/lxmf-test-node
 
 RUN mkdir -p /etc/rns /data/rns /data/lxmf
