@@ -170,6 +170,18 @@ http_status() {
   fi
 }
 
+http_post_status() {
+  local container="$1"
+  local path="$2"
+  local body="${3:-{}}"
+  local header="${4:-}"
+  if [[ -n "$header" ]]; then
+    docker exec -i "$container" curl -s -o /dev/null -w "%{http_code}" -X POST -H "$header" -H "Content-Type: application/json" --data-binary @- "http://127.0.0.1:37529${path}" <<< "$body"
+  else
+    docker exec -i "$container" curl -s -o /dev/null -w "%{http_code}" -X POST -H "Content-Type: application/json" --data-binary @- "http://127.0.0.1:37529${path}" <<< "$body"
+  fi
+}
+
 wait_for_process() {
   local container="$1"
   local name="$2"
@@ -365,7 +377,7 @@ scenario_bad_config_and_missing_process() {
   wait_for_http "$container" "/readyz" 60
 
   [[ "$(http_status "$container" "/api/processes/does-not-exist/logs")" == "404" ]]
-  api_post "$container" "/api/processes/does-not-exist/restart" '{}' | jq -e '.queued == true' >/dev/null
+  [[ "$(http_post_status "$container" "/api/processes/does-not-exist/restart")" == "404" ]]
 
   local invalid_status
   invalid_status="$(docker exec -i "$container" curl -s -o /dev/null -w "%{http_code}" -X POST -H "Content-Type: application/json" --data-binary @- http://127.0.0.1:37529/api/config/validate <<< '{"unexpected":true}')"
