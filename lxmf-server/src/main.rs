@@ -1289,16 +1289,29 @@ fn route_process_request(request: HttpRequest, ctx: HttpContext) -> HttpResponse
             HttpResponse::ok(serde_json::json!({ "name": name, "logs": logs }))
         }
         ("POST", "start") => {
+            if !process_exists(&ctx.state, name) {
+                return HttpResponse::not_found();
+            }
             send_process_command(ctx.control_tx, ProcessControlCommand::Start(name.into()))
         }
         ("POST", "stop") => {
+            if !process_exists(&ctx.state, name) {
+                return HttpResponse::not_found();
+            }
             send_process_command(ctx.control_tx, ProcessControlCommand::Stop(name.into()))
         }
         ("POST", "restart") => {
+            if !process_exists(&ctx.state, name) {
+                return HttpResponse::not_found();
+            }
             send_process_command(ctx.control_tx, ProcessControlCommand::Restart(name.into()))
         }
         _ => HttpResponse::not_found(),
     }
+}
+
+fn process_exists(state: &SharedState, name: &str) -> bool {
+    state.read().unwrap().processes.contains_key(name)
 }
 
 fn send_process_command(
@@ -1600,6 +1613,36 @@ mod tests {
         assert_eq!(req.path, "/api/config/validate");
         assert_eq!(req.query, "x=1");
         assert_eq!(req.body, b"{}");
+    }
+
+    #[test]
+    fn process_command_for_unknown_process_returns_404_without_queueing() {
+        let mut config = ServerConfig::from_args(&Args::parse_from(["start"]));
+        config.http.disable_auth = true;
+        let state = SharedState::default();
+        state
+            .write()
+            .unwrap()
+            .processes
+            .insert("lxmd".into(), ProcessState::new("lxmd", true));
+        let (tx, rx) = mpsc::channel();
+        let ctx = HttpContext {
+            config,
+            state,
+            control_tx: tx,
+        };
+        let request = HttpRequest {
+            method: "POST".into(),
+            path: "/api/processes/does-not-exist/restart".into(),
+            query: String::new(),
+            headers: HashMap::new(),
+            body: Vec::new(),
+        };
+
+        let response = route_request(request, ctx);
+
+        assert_eq!(response.status, 404);
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]
