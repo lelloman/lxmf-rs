@@ -35,7 +35,11 @@ for port in ${LXMF_CLIENT_PORTS}; do
 done
 
 settle_topology_runtime 3
-PORT_A_ANNOUNCES="$(ctl_get "$PORT_A" "/api/announces" | jq -r '.announces | length')"
-assert_ge "$PORT_A_ANNOUNCES" 1 "Announce convergence records peers"
+if poll_count "$PORT_A" "/api/announces" ".announces" 1 60; then
+  pass_test "Announce convergence records peers"
+else
+  PORT_A_ANNOUNCES="$(ctl_get "$PORT_A" "/api/announces" | jq -r '.announces | length')"
+  fail_test "Announce convergence records peers" "expected >= 1, got ${PORT_A_ANNOUNCES}"
+fi
 
 suite_result "$_CURRENT_SUITE"
