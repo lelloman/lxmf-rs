@@ -38,7 +38,7 @@ The corresponding `rns-rs` integration baseline is:
 
 - Repository: `git@github.com:lelloman/rns-rs.git`
 - Branch used for integration work: `dev`
-- Crates.io release commit: `fa1fa627ef98ffc401c6d0eeb9ab0cdc6a5444dd`
+- GitHub release tag commit: `fd2a29258362d5a8371428af52925498bce7cf67`
 
 When updating RNS integration, publish the required `rns-rs` crates, update the
 exact versions in `Cargo.toml`, and record the release commit here.
