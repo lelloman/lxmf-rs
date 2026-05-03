@@ -23,9 +23,25 @@ has been reviewed and ported with the following local commits:
 - `fbb5109` Honor peer resource compression support
 - `a9781a8` Dispatch inbound delivery off callback path
 
-The resource compression support required an `rns-rs` prerequisite:
+The resource compression support required an `rns-rs` prerequisite that is
+included in the crates.io releases listed below.
 
-- `../rns-rs` commit `cb9e222` Expose resource compression control
+## RNS Dependency Baseline
+
+`lxmf-rs` depends on published Rust Reticulum crates from crates.io:
+
+- `rns-crypto` `=0.1.6`
+- `rns-core` `=0.1.11`
+- `rns-net` `=0.5.8`
+
+The corresponding `rns-rs` integration baseline is:
+
+- Repository: `git@github.com:lelloman/rns-rs.git`
+- Branch used for integration work: `dev`
+- Crates.io release commit: `fa1fa627ef98ffc401c6d0eeb9ab0cdc6a5444dd`
+
+When updating RNS integration, publish the required `rns-rs` crates, update the
+exact versions in `Cargo.toml`, and record the release commit here.
 
 When integrating upstream changes, compare this commit against the new LXMF
 upstream commit, update protocol constants, message formats, propagation
