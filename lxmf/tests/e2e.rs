@@ -1070,7 +1070,7 @@ fn test_direct_delivery_via_link() {
             link_id: None,
             packet_hash: None,
         };
-        r.handle_outbound(msg);
+        r.handle_outbound(msg).unwrap();
     }
 
     // Trigger outbound processing outside the router lock to avoid

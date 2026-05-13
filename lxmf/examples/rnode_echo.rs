@@ -285,7 +285,7 @@ fn main() {
                     ) {
                         Ok(packed) => {
                             let mut r = router.lock().unwrap();
-                            r.handle_outbound(OutboundMessage {
+                            let _ = r.handle_outbound(OutboundMessage {
                                 destination_hash: source_hash,
                                 source_hash: src_hash,
                                 packed: packed.packed,

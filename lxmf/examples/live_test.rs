@@ -372,7 +372,7 @@ fn main() {
                 link_id: None,
                 packet_hash: None,
             };
-            r.handle_outbound(msg);
+            let _ = r.handle_outbound(msg);
         }
         println!("[SEND] big message queued for direct link delivery");
 
