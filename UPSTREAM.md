@@ -8,10 +8,10 @@ The current upstream reference baseline is:
 - Repository: `git@github.com:markqvist/LXMF.git`
 - Local checkout used: `~/LXMF`
 - Branch: `master`
-- Commit: `25b7fcf7de1ded6f052ecfd2e33c4e5d6d554c81`
-- Describe: `0.9.7`
-- Commit date: `2026-05-06 17:20:03 +0200`
-- Subject: `Updated versions`
+- Commit: `83fbe804974e32a5e506565cfd274d6abf32740f`
+- Describe: `0.9.7-1-g83fbe80`
+- Commit date: `2026-05-06 18:45:41 +0200`
+- Subject: `Strip null bytes from display names by default`
 
 The previous baseline was `269ce43afc6552e934c212887c2450718311396a`
 (`0.9.4-1-g269ce43`). The upstream range
@@ -43,10 +43,9 @@ The corresponding `rns-rs` integration baseline is:
 When updating RNS integration, publish the required `rns-rs` crates, update the
 exact versions in `Cargo.toml`, and record the release commit here.
 
-The upstream commit `25b7fcf7de1ded6f052ecfd2e33c4e5d6d554c81` updates the
-Python LXMF package version to `0.9.7` and the Python `rns` package requirement
-to `>=1.2.4`; it does not change LXMF protocol or router behavior in this Rust
-workspace.
+The upstream commit `83fbe804974e32a5e506565cfd274d6abf32740f` is ported by
+normalising v0.5+ delivery announce display names the same way as Python LXMF:
+remove NUL bytes and trim surrounding whitespace after UTF-8 decoding.
 
 When integrating upstream changes, compare this commit against the new LXMF
 upstream commit, update protocol constants, message formats, propagation

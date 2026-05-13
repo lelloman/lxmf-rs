@@ -1674,6 +1674,23 @@ fn test_delivery_announce_no_cost() {
 }
 
 #[test]
+fn test_delivery_announce_display_name_strips_nulls_and_trims_v050() {
+    let data = pack(&Value::Array(vec![
+        Value::Bin(b"\0 Test\0 Node \0".to_vec()),
+        Value::UInt(16),
+    ]));
+
+    let name = announce::display_name_from_app_data(&data);
+    assert_eq!(name.as_deref(), Some("Test Node"));
+}
+
+#[test]
+fn test_delivery_announce_display_name_keeps_legacy_bytes() {
+    let name = announce::display_name_from_app_data(b"\0 LegacyNode \0");
+    assert_eq!(name.as_deref(), Some("\0 LegacyNode \0"));
+}
+
+#[test]
 fn test_delivery_announce_compression_support_defaults() {
     let legacy = b"LegacyNode";
     assert_eq!(
