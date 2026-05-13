@@ -8,10 +8,10 @@ The current upstream reference baseline is:
 - Repository: `git@github.com:markqvist/LXMF.git`
 - Local checkout used: `~/LXMF`
 - Branch: `master`
-- Commit: `a8505eade9f3b0ded493a6035eb5ee433538c6ee`
-- Describe: `0.9.7-1-ga8505ea`
-- Commit date: `2026-05-10 14:12:51 +0200`
-- Subject: `Added outbound processing trigger for pn node announces`
+- Commit: `0cb62ddc3640be13225475034cd77220eb6f4539`
+- Describe: `0.9.8-1-g0cb62dd`
+- Commit date: `2026-05-10 17:16:38 +0200`
+- Subject: `Use stamp generation worker context manager on Python 3.14+`
 
 The previous baseline was `269ce43afc6552e934c212887c2450718311396a`
 (`0.9.4-1-g269ce43`). The upstream range
@@ -43,9 +43,10 @@ The corresponding `rns-rs` integration baseline is:
 When updating RNS integration, publish the required `rns-rs` crates, update the
 exact versions in `Cargo.toml`, and record the release commit here.
 
-The upstream commit `a8505eade9f3b0ded493a6035eb5ee433538c6ee` is ported by
-waking queued propagated outbound messages when a valid announce arrives from
-the configured outbound propagation node.
+The upstream commit `0cb62ddc3640be13225475034cd77220eb6f4539` changes Python
+LXMF multiprocessing worker cleanup for Python 3.14+. Rust stamp generation uses
+rayon threads instead of Python worker processes, so no direct production port is
+needed; the equivalent cancellation invariant is covered by local stamper tests.
 
 When integrating upstream changes, compare this commit against the new LXMF
 upstream commit, update protocol constants, message formats, propagation
