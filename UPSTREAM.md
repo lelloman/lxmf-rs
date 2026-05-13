@@ -8,23 +8,31 @@ The current upstream reference baseline is:
 - Repository: `git@github.com:markqvist/LXMF.git`
 - Local checkout used: `~/LXMF`
 - Branch: `master`
-- Commit: `0cb62ddc3640be13225475034cd77220eb6f4539`
-- Describe: `0.9.8-1-g0cb62dd`
-- Commit date: `2026-05-10 17:16:38 +0200`
-- Subject: `Use stamp generation worker context manager on Python 3.14+`
+- Commit: `7b0e7028321180a03713c5e71a34cb0d8ef99d13`
+- Describe: `0.9.8`
+- Commit date: `2026-05-10 17:20:26 +0200`
+- Subject: `Updated versions`
 
-The previous baseline was `269ce43afc6552e934c212887c2450718311396a`
-(`0.9.4-1-g269ce43`). The upstream range
-`269ce43afc6552e934c212887c2450718311396a..8499729024a4cddfceb47ca07188bb5b1d11d179`
+The previous baseline was `8499729024a4cddfceb47ca07188bb5b1d11d179`
+(`0.9.6`). The upstream range
+`8499729024a4cddfceb47ca07188bb5b1d11d179..7b0e7028321180a03713c5e71a34cb0d8ef99d13`
 has been reviewed and ported with the following local commits:
 
-- `76eabb2` Port LXMF compression announce signalling
-- `968836c` Retain delivery destination data
-- `fbb5109` Honor peer resource compression support
-- `a9781a8` Dispatch inbound delivery off callback path
+- `343ef15` Track LXMF upstream 727830c
+- `4fd6824` Track LXMF upstream 4ecbdb3
+- `0496309` Track LXMF upstream 9d413c0
+- `b427451` Track LXMF upstream ad616fc
+- `54dbb15` Track LXMF upstream f9967db
+- `9e5e2ad` Port LXMF propagated send precondition
+- `fb38fa3` Track LXMF upstream 25b7fcf
+- `b9df9a9` Port LXMF display name normalization
+- `a38330a` Track LXMF upstream 2c4dfdd
+- `261f2cb` Track LXMF upstream 6a00d82
+- `6fd4e57` Port LXMF propagation announce wakeup
+- `3cce4fd` Cover LXMF stamper cancellation lifecycle
 
-The resource compression support required an `rns-rs` prerequisite that is
-included in the crates.io releases listed below.
+The final upstream commit `7b0e7028321180a03713c5e71a34cb0d8ef99d13` only
+raises the Python `rns` package requirement from `>=1.2.4` to `>=1.2.5`.
 
 ## RNS Dependency Baseline
 
@@ -43,10 +51,9 @@ The corresponding `rns-rs` integration baseline is:
 When updating RNS integration, publish the required `rns-rs` crates, update the
 exact versions in `Cargo.toml`, and record the release commit here.
 
-The upstream commit `0cb62ddc3640be13225475034cd77220eb6f4539` changes Python
-LXMF multiprocessing worker cleanup for Python 3.14+. Rust stamp generation uses
-rayon threads instead of Python worker processes, so no direct production port is
-needed; the equivalent cancellation invariant is covered by local stamper tests.
+The Python LXMF `0.9.8` package requires `rns>=1.2.5`. The Rust dependency
+baseline above is unchanged in this port series and should be re-evaluated when
+the corresponding `rns-rs` releases are available.
 
 When integrating upstream changes, compare this commit against the new LXMF
 upstream commit, update protocol constants, message formats, propagation
