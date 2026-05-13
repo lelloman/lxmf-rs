@@ -351,7 +351,7 @@ fn main() {
                             link_id: None,
                             packet_hash: None,
                         };
-                        r.handle_outbound(msg);
+                        let _ = r.handle_outbound(msg);
                     }
                     println!("[SEND] Echo queued for direct link delivery");
                 }

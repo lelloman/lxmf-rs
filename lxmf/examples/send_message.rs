@@ -266,7 +266,7 @@ fn main() {
         println!("[QUEUE] message queued for {}", hex(&target_dest));
 
         let mut r = router.lock().unwrap();
-        r.handle_outbound(OutboundMessage {
+        let _ = r.handle_outbound(OutboundMessage {
             destination_hash: target_dest,
             source_hash: src_hash,
             packed: packed.packed,
