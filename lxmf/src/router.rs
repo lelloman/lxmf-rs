@@ -67,6 +67,24 @@ pub struct OutboundMessage {
     pub packet_hash: Option<[u8; 32]>,
 }
 
+/// Errors returned while accepting an outbound message into the router queue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutboundError {
+    MissingOutboundPropagationNode,
+}
+
+impl core::fmt::Display for OutboundError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::MissingOutboundPropagationNode => f.write_str(
+                "attempt to send propagated message with no outbound propagation node configured",
+            ),
+        }
+    }
+}
+
+impl std::error::Error for OutboundError {}
+
 /// Configuration for the LXM Router.
 pub struct RouterConfig {
     pub storagepath: PathBuf,
@@ -123,6 +141,7 @@ pub struct LxmRouter {
 
     // Destinations
     pub propagation_dest_hash: [u8; 16],
+    pub outbound_propagation_node: Option<[u8; 16]>,
     pub delivery_dest_hash: Option<[u8; 16]>,
     pub control_dest_hash: Option<[u8; 16]>,
 
@@ -212,6 +231,7 @@ impl LxmRouter {
         Self {
             identity,
             propagation_dest_hash,
+            outbound_propagation_node: None,
             delivery_dest_hash: None,
             control_dest_hash: None,
             outbound: Vec::new(),
@@ -492,16 +512,25 @@ impl LxmRouter {
     }
 
     /// Handle an outbound message for delivery.
-    pub fn handle_outbound(&mut self, msg: OutboundMessage) {
+    pub fn handle_outbound(&mut self, mut msg: OutboundMessage) -> Result<(), OutboundError> {
+        if msg.method == DeliveryMethod::Propagated && self.outbound_propagation_node.is_none() {
+            msg.state = MessageState::Failed;
+            if let Some(cb) = &msg.failed_callback {
+                cb(&msg);
+            }
+            return Err(OutboundError::MissingOutboundPropagationNode);
+        }
+
         self.outbound.push(msg);
+        Ok(())
     }
 
-    /// Update the propagation destination hash at runtime.
+    /// Update the outbound propagation node destination hash at runtime.
     ///
     /// Used by the alternative relay fallback to re-target propagated delivery
     /// at a different propagation node.
     pub fn set_propagation_dest_hash(&mut self, dest_hash: [u8; 16]) {
-        self.propagation_dest_hash = dest_hash;
+        self.outbound_propagation_node = Some(dest_hash);
     }
 
     /// Run periodic jobs. Called every PROCESSING_INTERVAL seconds.
@@ -644,6 +673,12 @@ impl LxmRouter {
                     }
                 }
                 DeliveryMethod::Propagated => {
+                    let Some(propagation_dest_hash) = self.outbound_propagation_node else {
+                        msg.state = MessageState::Failed;
+                        failed_indices.push(idx);
+                        continue;
+                    };
+
                     if let Some(link_id) = self.propagation_link {
                         if let Some(ref prop_packed) = msg.propagation_packed {
                             if prop_packed.len() <= LINK_PACKET_MDU {
@@ -657,16 +692,15 @@ impl LxmRouter {
                         }
                     } else if self
                         .pending_direct_links
-                        .contains_key(&self.propagation_dest_hash)
+                        .contains_key(&propagation_dest_hash)
                         || self
                             .pending_direct_link_creations
-                            .contains_key(&self.propagation_dest_hash)
+                            .contains_key(&propagation_dest_hash)
                     {
                         // Propagation link is being established.
-                    } else if let Some(public_key) =
-                        self.identity_cache.get(&self.propagation_dest_hash)
+                    } else if let Some(public_key) = self.identity_cache.get(&propagation_dest_hash)
                     {
-                        let dest_hash = self.propagation_dest_hash;
+                        let dest_hash = propagation_dest_hash;
                         let sig_pub: [u8; 32] = public_key[32..].try_into().unwrap();
                         let tx = self.direct_link_tx.clone();
                         let node = node.clone();
@@ -676,7 +710,7 @@ impl LxmRouter {
                             let _ = tx.send(DirectLinkResult { dest_hash, link_id });
                         });
                     } else {
-                        let _ = node.request_path(&DestHash(self.propagation_dest_hash));
+                        let _ = node.request_path(&DestHash(propagation_dest_hash));
                     }
                 }
                 DeliveryMethod::Paper => {
@@ -1097,7 +1131,7 @@ impl Callbacks for LxmfCallbacks {
             router
                 .pending_direct_links
                 .retain(|_, lid| *lid != link_id.0);
-            let is_propagation_link = dest_hash.0 == router.propagation_dest_hash;
+            let is_propagation_link = router.outbound_propagation_node == Some(dest_hash.0);
             if is_propagation_link {
                 router.propagation_link = Some(link_id.0);
             } else {

@@ -8,10 +8,10 @@ The current upstream reference baseline is:
 - Repository: `git@github.com:markqvist/LXMF.git`
 - Local checkout used: `~/LXMF`
 - Branch: `master`
-- Commit: `f9967db3ee89e348f69f2bb39ba292549f230531`
-- Describe: `0.9.6-5-gf9967db`
-- Commit date: `2026-05-02 18:54:07 +0200`
-- Subject: `Updated readme`
+- Commit: `189f5239a05d004733744dfdc95b41c318cf8548`
+- Describe: `0.9.6-6-g189f523`
+- Commit date: `2026-05-06 17:19:16 +0200`
+- Subject: `Raise explicit IOError for the sloppy vibe-coders who apparently can't figure out that you need to set an outbound propagation node before trying to send a propagated message`
 
 The previous baseline was `269ce43afc6552e934c212887c2450718311396a`
 (`0.9.4-1-g269ce43`). The upstream range
@@ -43,9 +43,9 @@ The corresponding `rns-rs` integration baseline is:
 When updating RNS integration, publish the required `rns-rs` crates, update the
 exact versions in `Cargo.toml`, and record the release commit here.
 
-The upstream commit `f9967db3ee89e348f69f2bb39ba292549f230531` only updates
-the Python LXMF README; it does not change LXMF protocol or router behavior in
-this Rust workspace.
+The upstream commit `189f5239a05d004733744dfdc95b41c318cf8548` is ported by
+tracking an explicit outbound propagation node target and rejecting propagated
+outbound messages when that target is not configured.
 
 When integrating upstream changes, compare this commit against the new LXMF
 upstream commit, update protocol constants, message formats, propagation
