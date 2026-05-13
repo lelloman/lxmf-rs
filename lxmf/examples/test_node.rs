@@ -850,7 +850,8 @@ fn handle_post(
                 stream,
                 200,
                 json!({
-                    "propagation_dest_hash": hex(&router.propagation_dest_hash),
+                    "propagation_dest_hash": hex(&dest_hash),
+                    "outbound_propagation_node": hex(&dest_hash),
                 }),
             );
             Ok(())
@@ -955,27 +956,29 @@ fn handle_post(
             };
 
             let mut router = ctx.router.lock().unwrap();
-            router.handle_outbound(OutboundMessage {
-                destination_hash: dest_hash,
-                source_hash: ctx.source_hash,
-                packed: packed.packed,
-                message_hash,
-                method,
-                state: MessageState::Outbound,
-                representation: Representation::Unknown,
-                attempts: 0,
-                last_attempt: 0.0,
-                stamp: None,
-                stamp_cost: None,
-                propagation_packed,
-                propagation_stamp: None,
-                transient_id,
-                delivery_callback: None,
-                failed_callback: None,
-                progress_callback: None,
-                link_id: None,
-                packet_hash: None,
-            });
+            router
+                .handle_outbound(OutboundMessage {
+                    destination_hash: dest_hash,
+                    source_hash: ctx.source_hash,
+                    packed: packed.packed,
+                    message_hash,
+                    method,
+                    state: MessageState::Outbound,
+                    representation: Representation::Unknown,
+                    attempts: 0,
+                    last_attempt: 0.0,
+                    stamp: None,
+                    stamp_cost: None,
+                    propagation_packed,
+                    propagation_stamp: None,
+                    transient_id,
+                    delivery_callback: None,
+                    failed_callback: None,
+                    progress_callback: None,
+                    link_id: None,
+                    packet_hash: None,
+                })
+                .map_err(|e| e.to_string())?;
             router.jobs();
 
             write_json(
