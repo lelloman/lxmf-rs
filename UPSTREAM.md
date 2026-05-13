@@ -8,9 +8,9 @@ The current upstream reference baseline is:
 - Repository: `git@github.com:markqvist/LXMF.git`
 - Local checkout used: `~/LXMF`
 - Branch: `master`
-- Commit: `4ecbdb334ed06cc7bedd34c7141844c1ad5f829c`
-- Describe: `0.9.6-2-g4ecbdb3`
-- Commit date: `2026-05-02 18:46:24 +0200`
+- Commit: `9d413c075992a8364ac4a13a831ccc9e1579f822`
+- Describe: `0.9.6-3-g9d413c0`
+- Commit date: `2026-05-02 18:51:56 +0200`
 - Subject: `Updated readme`
 
 The previous baseline was `269ce43afc6552e934c212887c2450718311396a`
@@ -43,7 +43,7 @@ The corresponding `rns-rs` integration baseline is:
 When updating RNS integration, publish the required `rns-rs` crates, update the
 exact versions in `Cargo.toml`, and record the release commit here.
 
-The upstream commit `4ecbdb334ed06cc7bedd34c7141844c1ad5f829c` only updates
+The upstream commit `9d413c075992a8364ac4a13a831ccc9e1579f822` only updates
 the Python LXMF README; it does not change LXMF protocol or router behavior in
 this Rust workspace.
 
