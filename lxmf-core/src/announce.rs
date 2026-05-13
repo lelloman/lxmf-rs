@@ -21,7 +21,9 @@ pub fn display_name_from_app_data(app_data: &[u8]) -> Option<String> {
             return None;
         }
         let dn = arr[0].as_bin()?;
-        core::str::from_utf8(dn).ok().map(|s| String::from(s))
+        core::str::from_utf8(dn)
+            .ok()
+            .map(|s| s.replace('\0', "").trim().into())
     } else {
         // Legacy format: raw UTF-8 string
         core::str::from_utf8(app_data).ok().map(|s| String::from(s))
