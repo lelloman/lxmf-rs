@@ -1032,6 +1032,7 @@ impl LxmfCallbacks {
 impl Callbacks for LxmfCallbacks {
     fn on_announce(&mut self, announced: AnnouncedIdentity) {
         let mut router = self.router.lock().unwrap();
+        let mut trigger_outbound = false;
 
         // Check if this is our own delivery announce
         if let Some(delivery_hash) = router.delivery_dest_hash {
@@ -1045,24 +1046,38 @@ impl Callbacks for LxmfCallbacks {
             .identity_cache
             .insert(announced.dest_hash.0, announced.public_key);
 
-        // Extract stamp cost from delivery announces
+        // Propagation node announces can make queued propagated messages
+        // immediately actionable when they are from our configured outbound PN.
         if let Some(ref app_data) = announced.app_data {
-            if let Some(supports_compression) =
-                announce::compression_support_from_app_data(app_data)
-            {
-                router
-                    .compression_cache
-                    .insert(announced.dest_hash.0, supports_compression);
-            }
-            if !app_data.is_empty() {
-                let first = app_data[0];
-                // Check for msgpack array header (v0.5.0+ format)
-                if (0x90..=0x9F).contains(&first) || first == 0xDC {
-                    if let Ok(val) = msgpack::unpack_exact(app_data) {
-                        if let Some(arr) = val.as_array() {
-                            if arr.len() >= 2 {
-                                if let Some(cost) = arr[1].as_uint() {
-                                    router.update_stamp_cost(announced.dest_hash.0, cost as u8);
+            if announce::pn_announce_data_is_valid(app_data) {
+                if router.outbound_propagation_node == Some(announced.dest_hash.0) {
+                    for msg in &mut router.outbound {
+                        if msg.method == DeliveryMethod::Propagated
+                            && msg.state == MessageState::Outbound
+                        {
+                            msg.last_attempt = 0.0;
+                            trigger_outbound = true;
+                        }
+                    }
+                }
+            } else {
+                if let Some(supports_compression) =
+                    announce::compression_support_from_app_data(app_data)
+                {
+                    router
+                        .compression_cache
+                        .insert(announced.dest_hash.0, supports_compression);
+                }
+                if !app_data.is_empty() {
+                    let first = app_data[0];
+                    // Check for msgpack array header (v0.5.0+ format)
+                    if (0x90..=0x9F).contains(&first) || first == 0xDC {
+                        if let Ok(val) = msgpack::unpack_exact(app_data) {
+                            if let Some(arr) = val.as_array() {
+                                if arr.len() >= 2 {
+                                    if let Some(cost) = arr[1].as_uint() {
+                                        router.update_stamp_cost(announced.dest_hash.0, cost as u8);
+                                    }
                                 }
                             }
                         }
@@ -1071,7 +1086,15 @@ impl Callbacks for LxmfCallbacks {
             }
         }
 
-        // Propagation announce handling is done in handlers module
+        drop(router);
+
+        if trigger_outbound {
+            let router = self.router.clone();
+            thread::spawn(move || {
+                let mut router = router.lock().unwrap();
+                router.process_outbound();
+            });
+        }
     }
 
     fn on_path_updated(&mut self, _dest_hash: DestHash, _hops: u8) {

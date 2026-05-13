@@ -8,10 +8,10 @@ The current upstream reference baseline is:
 - Repository: `git@github.com:markqvist/LXMF.git`
 - Local checkout used: `~/LXMF`
 - Branch: `master`
-- Commit: `6a00d82b281cb013979400b37df2b459e9c3b866`
-- Describe: `0.9.7`
-- Commit date: `2026-05-07 20:23:56 +0200`
-- Subject: `Updated versions`
+- Commit: `a8505eade9f3b0ded493a6035eb5ee433538c6ee`
+- Describe: `0.9.7-1-ga8505ea`
+- Commit date: `2026-05-10 14:12:51 +0200`
+- Subject: `Added outbound processing trigger for pn node announces`
 
 The previous baseline was `269ce43afc6552e934c212887c2450718311396a`
 (`0.9.4-1-g269ce43`). The upstream range
@@ -43,9 +43,9 @@ The corresponding `rns-rs` integration baseline is:
 When updating RNS integration, publish the required `rns-rs` crates, update the
 exact versions in `Cargo.toml`, and record the release commit here.
 
-The upstream commit `6a00d82b281cb013979400b37df2b459e9c3b866` only adjusts
-the Python `rns` package requirement from `>=1.2.3` to `>=1.2.4`; it does not
-change LXMF protocol or router behavior in this Rust workspace.
+The upstream commit `a8505eade9f3b0ded493a6035eb5ee433538c6ee` is ported by
+waking queued propagated outbound messages when a valid announce arrives from
+the configured outbound propagation node.
 
 When integrating upstream changes, compare this commit against the new LXMF
 upstream commit, update protocol constants, message formats, propagation

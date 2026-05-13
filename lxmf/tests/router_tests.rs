@@ -1,11 +1,16 @@
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use lxmf_core::constants::{DeliveryMethod, MessageState, Representation, DESTINATION_LENGTH};
-use lxmf_rs::router::{LxmRouter, OutboundError, OutboundMessage, RouterConfig};
+use lxmf_rs::router::{LxmRouter, LxmfCallbacks, OutboundError, OutboundMessage, RouterConfig};
+use rns_core::msgpack::{pack, Value};
+use rns_core::types::{DestHash, IdentityHash};
 use rns_crypto::identity::Identity;
+use rns_net::destination::AnnouncedIdentity;
+use rns_net::driver::Callbacks;
+use rns_net::InterfaceId;
 
 static NEXT_TEMP_ID: AtomicU16 = AtomicU16::new(1);
 
@@ -55,6 +60,32 @@ fn outbound(method: DeliveryMethod) -> OutboundMessage {
     }
 }
 
+fn pn_announce(dest_hash: [u8; DESTINATION_LENGTH], valid: bool) -> AnnouncedIdentity {
+    let app_data = if valid {
+        pack(&Value::Array(vec![
+            Value::Bin(b"TestPN".to_vec()),
+            Value::UInt(1_700_000_000),
+            Value::Bool(true),
+            Value::UInt(256),
+            Value::UInt(10_240),
+            Value::Array(vec![Value::UInt(16), Value::UInt(3), Value::UInt(18)]),
+            Value::Map(vec![]),
+        ]))
+    } else {
+        b"not-pn-announce-data".to_vec()
+    };
+
+    AnnouncedIdentity {
+        dest_hash: DestHash(dest_hash),
+        identity_hash: IdentityHash([0x12; 16]),
+        public_key: [0x34; 64],
+        app_data: Some(app_data),
+        hops: 1,
+        received_at: 1_700_000_000.0,
+        receiving_interface: InterfaceId(1),
+    }
+}
+
 #[test]
 fn propagated_outbound_requires_configured_propagation_node() {
     let (mut router, dir) = test_router("propagated_requires_node");
@@ -87,5 +118,46 @@ fn propagated_outbound_queues_after_configuring_propagation_node() {
     assert_eq!(router.outbound_propagation_node, Some(target));
     assert_ne!(router.propagation_dest_hash, target);
     assert_eq!(router.outbound.len(), 1);
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn propagation_node_announce_wakes_matching_propagated_outbound() {
+    let (mut router, dir) = test_router("pn_announce_wakes");
+    let target = [0x42; DESTINATION_LENGTH];
+    router.set_propagation_dest_hash(target);
+
+    let mut msg = outbound(DeliveryMethod::Propagated);
+    msg.last_attempt = 123_456.0;
+    router.handle_outbound(msg).unwrap();
+
+    let router = Arc::new(Mutex::new(router));
+    let mut callbacks = LxmfCallbacks::new(router.clone());
+    callbacks.on_announce(pn_announce(target, true));
+
+    let router_guard = router.lock().unwrap();
+    assert_eq!(router_guard.outbound[0].last_attempt, 0.0);
+    drop(router_guard);
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn propagation_node_announce_ignores_unrelated_or_invalid_announces() {
+    let (mut router, dir) = test_router("pn_announce_ignores");
+    let target = [0x42; DESTINATION_LENGTH];
+    router.set_propagation_dest_hash(target);
+
+    let mut msg = outbound(DeliveryMethod::Propagated);
+    msg.last_attempt = 123_456.0;
+    router.handle_outbound(msg).unwrap();
+
+    let router = Arc::new(Mutex::new(router));
+    let mut callbacks = LxmfCallbacks::new(router.clone());
+    callbacks.on_announce(pn_announce([0x43; DESTINATION_LENGTH], true));
+    callbacks.on_announce(pn_announce(target, false));
+
+    let router_guard = router.lock().unwrap();
+    assert_eq!(router_guard.outbound[0].last_attempt, 123_456.0);
+    drop(router_guard);
     let _ = fs::remove_dir_all(dir);
 }
