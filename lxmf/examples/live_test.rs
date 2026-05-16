@@ -295,6 +295,8 @@ fn main() {
             hops: 0,
             received_at: 0.0,
             receiving_interface: rns_core::transport::types::InterfaceId(0),
+            rssi: None,
+            snr: None,
         };
 
         // 1) Small opportunistic message

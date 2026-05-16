@@ -38,22 +38,21 @@ raises the Python `rns` package requirement from `>=1.2.4` to `>=1.2.5`.
 
 `lxmf-rs` depends on published Rust Reticulum crates from crates.io:
 
-- `rns-crypto` `=0.1.6`
-- `rns-core` `=0.1.11`
-- `rns-net` `=0.5.8`
+- `rns-crypto` `=0.1.7`
+- `rns-core` `=0.1.12`
+- `rns-net` `=0.5.9`
 
 The corresponding `rns-rs` integration baseline is:
 
 - Repository: `git@github.com:lelloman/rns-rs.git`
 - Branch used for integration work: `dev`
-- GitHub release tag commit: `fd2a29258362d5a8371428af52925498bce7cf67`
+- GitHub release tag commit: `869a4bc2354329bf4ea480b1c27efcbef605a722`
 
 When updating RNS integration, publish the required `rns-rs` crates, update the
 exact versions in `Cargo.toml`, and record the release commit here.
 
 The Python LXMF `0.9.8` package requires `rns>=1.2.5`. The Rust dependency
-baseline above is unchanged in this port series and should be re-evaluated when
-the corresponding `rns-rs` releases are available.
+baseline above uses the corresponding latest published `rns-rs` crates.
 
 When integrating upstream changes, compare this commit against the new LXMF
 upstream commit, update protocol constants, message formats, propagation

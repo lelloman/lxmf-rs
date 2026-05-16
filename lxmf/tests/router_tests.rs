@@ -83,6 +83,8 @@ fn pn_announce(dest_hash: [u8; DESTINATION_LENGTH], valid: bool) -> AnnouncedIde
         hops: 1,
         received_at: 1_700_000_000.0,
         receiving_interface: InterfaceId(1),
+        rssi: None,
+        snr: None,
     }
 }
 

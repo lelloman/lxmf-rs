@@ -640,6 +640,8 @@ fn test_delivery_announce_records_compression_unsupported() {
         hops: 0,
         received_at: 0.0,
         receiving_interface: InterfaceId(0),
+        rssi: None,
+        snr: None,
     });
 
     assert_eq!(
