@@ -10,9 +10,9 @@ repository = "https://github.com/lelloman/lxmf-rs"
 authors = ["lxmf-rs contributors"]
 
 [workspace.dependencies]
-rns-crypto = { version = "=0.1.6", default-features = false }
-rns-core = { version = "=0.1.11", default-features = false }
-rns-net = "=0.5.8"
+rns-crypto = { version = "=0.1.7", default-features = false }
+rns-core = { version = "=0.1.12", default-features = false }
+rns-net = "=0.5.9"
 lxmf-core = { version = "0.1.5", path = "lxmf-core" }
 lxmf-rs = { version = "0.1.5", path = "lxmf" }
 log = "0.4"
