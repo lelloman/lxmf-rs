@@ -153,7 +153,7 @@ last_client_port() {
 clear_all_lxmf() {
   local port
   for port in ${LXMF_CLIENT_PORTS}; do
-    ctl_post "$port" "/api/runtime/clear" '{"caches":true}' >/dev/null
+    ctl_post "$port" "/api/runtime/clear" '{"announces":false,"caches":true}' >/dev/null
   done
 }
 
