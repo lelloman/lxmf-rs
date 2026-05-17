@@ -73,7 +73,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           repository: lelloman/rns-rs
-          ref: fd2a29258362d5a8371428af52925498bce7cf67
+          ref: 869a4bc2354329bf4ea480b1c27efcbef605a722
           path: rns-rs
 
       - name: Run Docker end-to-end suite
@@ -94,7 +94,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           repository: lelloman/rns-rs
-          ref: fd2a29258362d5a8371428af52925498bce7cf67
+          ref: 869a4bc2354329bf4ea480b1c27efcbef605a722
           path: rns-rs
 
       - name: Run lxmf-server Docker scenario
