@@ -21,8 +21,12 @@ done
 settle_topology_runtime 5
 
 PORT_A="$(client_port_by_index 0)"
-ANNOUNCE_COUNT="$(ctl_get "$PORT_A" "/api/announces" | jq -r '.announces | length')"
-assert_ge "$ANNOUNCE_COUNT" 4 "Hub-adjacent client observes multiple peer announces"
+if poll_count "$PORT_A" "/api/announces" ".announces" 4 90; then
+  pass_test "Hub-adjacent client observes multiple peer announces"
+else
+  ANNOUNCE_COUNT="$(ctl_get "$PORT_A" "/api/announces" | jq -r '.announces | length')"
+  fail_test "Hub-adjacent client observes multiple peer announces" "expected >= 4, got ${ANNOUNCE_COUNT}"
+fi
 
 DEST_A="$(node_dest_hash "$PORT_A")"
 
