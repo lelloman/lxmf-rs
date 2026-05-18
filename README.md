@@ -13,7 +13,7 @@ LXMF is a messaging protocol built on [Reticulum](https://reticulum.network), de
 
 This implementation is built on top of [rns-rs](https://github.com/lelloman/rns-rs), the Rust implementation of Reticulum, providing a robust foundation for delay-tolerant networking. LXMF-rs is particularly well-suited for embedded systems, Android applications, and any scenario where Rust's performance and `no_std` support are advantageous.
 
-The project is organized as a Cargo workspace with three crates: `lxmf-core` (lightweight, `no_std` compatible), `lxmf` (full-featured message router), and `lxmd` (propagation daemon with configurable logging). All 135 tests pass, and the implementation is ready for crates.io publication.
+The project is organized as a Cargo workspace with four crates: `lxmf-core` (lightweight, `no_std` compatible), `lxmf` (full-featured message router), `lxmd` (propagation daemon with configurable logging), and `lxmf-server` (daemon supervisor and HTTP control server). All 135 tests pass, and the implementation is ready for crates.io publication.
 
 ## Workspace Crates
 
@@ -22,6 +22,7 @@ The project is organized as a Cargo workspace with three crates: `lxmf-core` (li
 | **lxmf-core** | Core message format, constants, and stamp validation | Yes |
 | **lxmf** | Full message router with delivery engine | No |
 | **lxmd** | Propagation daemon with configurable logging | No |
+| **lxmf-server** | Supervises `lxmd` and exposes an HTTP control server | No |
 
 ## Quick Start
 
@@ -182,6 +183,20 @@ RUST_LOG=info cargo run --example send_message -- <host:port> listen
 
 # Run an HTTP-controlled LXMF test endpoint
 RUST_LOG=info cargo run --example test_node -- <host:port> 0.0.0.0:8080 /tmp/lxmf-test-node
+```
+
+## Daemons
+
+Run the LXMF propagation daemon directly:
+
+```bash
+cargo run -p lxmd -- --propagation-node
+```
+
+Run the supervisor and embedded control server:
+
+```bash
+cargo run -p lxmf-server -- start
 ```
 
 ## Project Status
