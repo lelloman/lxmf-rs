@@ -160,6 +160,7 @@ This is useful when you want to implement your own memory management.
 
 - **[Design Document](./design.md)** - Comprehensive protocol reference
 - **[lxmd README](./lxmd/README.md)** - Propagation daemon documentation
+- **[lxmf-server Operator Runbook](./docs/lxmf-server-operator-runbook.md)** - VPS and service deployment guide
 - **[Reticulum](https://reticulum.network)** - Underlying network layer
 - **[rns-rs](https://github.com/lelloman/rns-rs)** - Rust Reticulum implementation
 
