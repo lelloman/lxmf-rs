@@ -344,6 +344,37 @@ The existing RNS daily VPS report should continue to run against `rns-server`
 and `rns-ctl`. Add LXMF-specific reporting separately once the overlay service
 has been running long enough to know which drift and health signals matter.
 
+### RNS Daily VPS Report DB Handoff
+
+Keep the daily report SQLite database on `vps-eu` as the canonical handoff copy
+so the report can be run from more than one workstation. This is the report
+database used by `scripts/vps_daily_report.py` in `rns-rs`; do not replace the
+live RNS node runtime database at `/var/lib/rns-node/stats.db`.
+
+Before running the daily report, download the latest handoff copy:
+
+```bash
+cd ../rns-rs
+scp root@vps-eu:/root/vps_daily_reports.db data/vps_daily_reports.db
+```
+
+Then collect the daily snapshots locally:
+
+```bash
+python3 scripts/vps_daily_report.py --host vps-eu --ssh-target root@vps-eu --stdout-summary
+python3 scripts/vps_daily_report.py --host vps-us --ssh-target root@vps-us --stdout-summary
+```
+
+After both captures complete, upload the updated database back to `vps-eu`:
+
+```bash
+scp data/vps_daily_reports.db root@vps-eu:/root/vps_daily_reports.db
+```
+
+If the handoff database is missing on `vps-eu`, start from the local
+`data/vps_daily_reports.db`, run both captures, and upload it immediately after
+the report. Only one workstation should run the handoff procedure at a time.
+
 ## Troubleshooting
 
 If `lxmf-server` starts but `lxmd` is not ready:
