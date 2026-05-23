@@ -1,6 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::env;
 use std::fs;
+use std::fs::Metadata;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -1224,6 +1225,7 @@ fn route_request(request: HttpRequest, ctx: HttpContext) -> HttpResponse {
             processes.sort_by(|a, b| a.name.cmp(&b.name));
             HttpResponse::ok(serde_json::json!({ "processes": processes }))
         }
+        ("GET", "/api/diagnostics") => HttpResponse::ok(serde_json::json!(diagnostics(&ctx))),
         ("GET", "/api/config") => {
             let state = ctx.state.read().unwrap();
             HttpResponse::ok(serde_json::json!({ "config": state.config }))
@@ -1321,6 +1323,302 @@ fn send_process_command(
     match tx.send(command) {
         Ok(()) => HttpResponse::ok(serde_json::json!({"queued": true})),
         Err(_) => HttpResponse::internal_error("supervisor control channel is closed"),
+    }
+}
+
+fn diagnostics(ctx: &HttpContext) -> DiagnosticsSnapshot {
+    let state = ctx.state.read().unwrap();
+    let mut processes: Vec<_> = state.processes.values().cloned().collect();
+    processes.sort_by(|a, b| a.name.cmp(&b.name));
+    let lxmd_process = state.processes.get("lxmd").cloned();
+    let recent_logs = lxmd_process
+        .as_ref()
+        .map(|p| p.logs.iter().cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
+    drop(state);
+
+    let lxmd = LxmdDiagnostics::from_config(&ctx.config, &recent_logs);
+    let mut checks = Vec::new();
+    let lxmd_ready = lxmd_process
+        .as_ref()
+        .map(|p| p.status == "running" && p.ready)
+        .unwrap_or(false);
+    checks.push(DiagnosticCheck::new(
+        "lxmd_process_ready",
+        lxmd_ready,
+        if lxmd_ready {
+            "lxmd is running and its ready marker is present".into()
+        } else {
+            "lxmd is missing, stopped, or not ready".into()
+        },
+    ));
+
+    let rns_error_free = lxmd.recent_logs.rns_shared_instance_errors == 0;
+    checks.push(DiagnosticCheck::new(
+        "recent_rns_shared_instance_errors",
+        rns_error_free,
+        if rns_error_free {
+            "no recent shared-instance connection errors in buffered lxmd logs".into()
+        } else {
+            format!(
+                "{} recent shared-instance connection error(s); last: {}",
+                lxmd.recent_logs.rns_shared_instance_errors,
+                lxmd.recent_logs
+                    .last_rns_shared_instance_error
+                    .as_deref()
+                    .unwrap_or("unknown")
+            )
+        },
+    ));
+
+    checks.push(DiagnosticCheck::new(
+        "lxmf_messagestore_accessible",
+        lxmd.storage.messagestore.exists,
+        format!(
+            "{} files, {} bytes in {}",
+            lxmd.storage.messagestore.file_count,
+            lxmd.storage.messagestore.total_bytes,
+            lxmd.storage.messagestore.path
+        ),
+    ));
+
+    checks.push(DiagnosticCheck::new(
+        "lxmf_peer_store_has_entries",
+        lxmd.storage.peers.bytes > 1,
+        format!(
+            "{} bytes in {}",
+            lxmd.storage.peers.bytes, lxmd.storage.peers.path
+        ),
+    ));
+
+    let healthy = checks.iter().all(|c| c.ok);
+    let status = if healthy {
+        "healthy"
+    } else if lxmd_ready {
+        "degraded"
+    } else {
+        "unhealthy"
+    };
+
+    DiagnosticsSnapshot {
+        status: status.into(),
+        generated_at_ms: now_ms(),
+        checks,
+        processes,
+        lxmd,
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct DiagnosticsSnapshot {
+    status: String,
+    generated_at_ms: u128,
+    checks: Vec<DiagnosticCheck>,
+    processes: Vec<ProcessState>,
+    lxmd: LxmdDiagnostics,
+}
+
+#[derive(Debug, Serialize)]
+struct DiagnosticCheck {
+    name: String,
+    ok: bool,
+    detail: String,
+}
+
+impl DiagnosticCheck {
+    fn new(name: &str, ok: bool, detail: String) -> Self {
+        Self {
+            name: name.into(),
+            ok,
+            detail,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct LxmdDiagnostics {
+    config_dir: String,
+    rns_config_dir: String,
+    ready_file: FileSnapshot,
+    config_file: FileSnapshot,
+    identity_file: FileSnapshot,
+    storage: LxmfStorageDiagnostics,
+    recent_logs: LxmdLogSignals,
+}
+
+impl LxmdDiagnostics {
+    fn from_config(config: &ServerConfig, logs: &[LogLine]) -> Self {
+        let config_dir = config.lxmd.config_dir.clone();
+        let storage_root = config_dir.join("storage").join("lxmf");
+        Self {
+            config_dir: display_path(&config_dir),
+            rns_config_dir: display_path(&config.lxmd.rns_config_dir),
+            ready_file: FileSnapshot::from_path(&config.lxmd.ready_file),
+            config_file: FileSnapshot::from_path(&config_dir.join("config")),
+            identity_file: FileSnapshot::from_path(&config_dir.join("identity")),
+            storage: LxmfStorageDiagnostics {
+                base: DirectorySnapshot::from_path(&storage_root),
+                messagestore: DirectorySnapshot::from_path(&storage_root.join("messagestore")),
+                peers: FileSnapshot::from_path(&storage_root.join("peers")),
+                local_deliveries: FileSnapshot::from_path(&storage_root.join("local_deliveries")),
+                locally_processed: FileSnapshot::from_path(&storage_root.join("locally_processed")),
+                outbound_stamp_costs: FileSnapshot::from_path(
+                    &storage_root.join("outbound_stamp_costs"),
+                ),
+                node_stats: FileSnapshot::from_path(&storage_root.join("node_stats")),
+            },
+            recent_logs: LxmdLogSignals::from_logs(logs),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct LxmfStorageDiagnostics {
+    base: DirectorySnapshot,
+    messagestore: DirectorySnapshot,
+    peers: FileSnapshot,
+    local_deliveries: FileSnapshot,
+    locally_processed: FileSnapshot,
+    outbound_stamp_costs: FileSnapshot,
+    node_stats: FileSnapshot,
+}
+
+#[derive(Debug, Serialize)]
+struct DirectorySnapshot {
+    path: String,
+    exists: bool,
+    file_count: u64,
+    total_bytes: u64,
+    newest_mtime_ms: Option<u128>,
+}
+
+impl DirectorySnapshot {
+    fn from_path(path: &Path) -> Self {
+        let mut snapshot = Self {
+            path: display_path(path),
+            exists: path.is_dir(),
+            file_count: 0,
+            total_bytes: 0,
+            newest_mtime_ms: None,
+        };
+        let Ok(entries) = fs::read_dir(path) else {
+            return snapshot;
+        };
+        for entry in entries.flatten() {
+            let Ok(metadata) = entry.metadata() else {
+                continue;
+            };
+            if !metadata.is_file() {
+                continue;
+            }
+            snapshot.file_count += 1;
+            snapshot.total_bytes = snapshot.total_bytes.saturating_add(metadata.len());
+            if let Some(ms) = modified_ms(&metadata) {
+                snapshot.newest_mtime_ms = Some(snapshot.newest_mtime_ms.unwrap_or(0).max(ms));
+            }
+        }
+        snapshot
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct FileSnapshot {
+    path: String,
+    exists: bool,
+    bytes: u64,
+    modified_ms: Option<u128>,
+}
+
+impl FileSnapshot {
+    fn from_path(path: &Path) -> Self {
+        let metadata = path.metadata().ok();
+        Self {
+            path: display_path(path),
+            exists: metadata.as_ref().map(|m| m.is_file()).unwrap_or(false),
+            bytes: metadata.as_ref().map(|m| m.len()).unwrap_or(0),
+            modified_ms: metadata.as_ref().and_then(modified_ms),
+        }
+    }
+}
+
+fn modified_ms(metadata: &Metadata) -> Option<u128> {
+    metadata
+        .modified()
+        .ok()?
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_millis())
+}
+
+#[derive(Debug, Serialize)]
+struct LxmdLogSignals {
+    buffered_lines: usize,
+    rns_shared_instance_connected: bool,
+    rns_shared_instance_errors: usize,
+    delivery_events: usize,
+    inbound_message_events: usize,
+    propagation_events: usize,
+    peer_events: usize,
+    error_events: usize,
+    warning_events: usize,
+    last_rns_shared_instance_error: Option<String>,
+    last_delivery_event: Option<String>,
+    last_propagation_event: Option<String>,
+    last_error_event: Option<String>,
+}
+
+impl LxmdLogSignals {
+    fn from_logs(logs: &[LogLine]) -> Self {
+        let mut signals = Self {
+            buffered_lines: logs.len(),
+            rns_shared_instance_connected: false,
+            rns_shared_instance_errors: 0,
+            delivery_events: 0,
+            inbound_message_events: 0,
+            propagation_events: 0,
+            peer_events: 0,
+            error_events: 0,
+            warning_events: 0,
+            last_rns_shared_instance_error: None,
+            last_delivery_event: None,
+            last_propagation_event: None,
+            last_error_event: None,
+        };
+        for log in logs {
+            let lower = log.line.to_lowercase();
+            let formatted = format!("{} {}", log.stream, log.line);
+            if lower.contains("shared instance") && lower.contains("connected") {
+                signals.rns_shared_instance_connected = true;
+            }
+            if lower.contains("shared instance")
+                && (lower.contains("failed") || lower.contains("refused"))
+            {
+                signals.rns_shared_instance_errors += 1;
+                signals.last_rns_shared_instance_error = Some(formatted.clone());
+            }
+            if lower.contains("deliver") {
+                signals.delivery_events += 1;
+                signals.last_delivery_event = Some(formatted.clone());
+            }
+            if lower.contains("inbound") || lower.contains("received") {
+                signals.inbound_message_events += 1;
+            }
+            if lower.contains("propagation") {
+                signals.propagation_events += 1;
+                signals.last_propagation_event = Some(formatted.clone());
+            }
+            if lower.contains("peer") {
+                signals.peer_events += 1;
+            }
+            if lower.contains("error") || lower.contains("failed") {
+                signals.error_events += 1;
+                signals.last_error_event = Some(formatted.clone());
+            }
+            if lower.contains("warn") {
+                signals.warning_events += 1;
+            }
+        }
+        signals
     }
 }
 
@@ -1643,6 +1941,66 @@ mod tests {
 
         assert_eq!(response.status, 404);
         assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn diagnostics_endpoint_reports_lxmd_storage_and_logs() {
+        let dir = temp_dir("lxmf-server-diagnostics");
+        let args = Args::parse_from(["start", "--config", dir.to_str().unwrap()]);
+        let mut config = ServerConfig::from_args(&args);
+        config.http.disable_auth = true;
+        config.ensure_runtime_bootstrap().unwrap();
+
+        let storage_root = config.lxmd.config_dir.join("storage").join("lxmf");
+        fs::create_dir_all(storage_root.join("messagestore")).unwrap();
+        fs::write(
+            storage_root.join("messagestore").join("message-1"),
+            b"hello",
+        )
+        .unwrap();
+        fs::write(storage_root.join("peers"), [0x91, 0x80]).unwrap();
+        fs::write(&config.lxmd.ready_file, b"ready").unwrap();
+
+        let state = SharedState::default();
+        let mut process = ProcessState::new("lxmd", false);
+        process.status = "running".into();
+        process.ready = true;
+        process.logs.push_back(LogLine {
+            ts_ms: 1,
+            stream: "stderr".into(),
+            line: "[Local shared instance] Connected to shared instance via Unix socket".into(),
+        });
+        state
+            .write()
+            .unwrap()
+            .processes
+            .insert("lxmd".into(), process);
+        let (tx, _rx) = mpsc::channel();
+        let ctx = HttpContext {
+            config,
+            state,
+            control_tx: tx,
+        };
+        let request = HttpRequest {
+            method: "GET".into(),
+            path: "/api/diagnostics".into(),
+            query: String::new(),
+            headers: HashMap::new(),
+            body: Vec::new(),
+        };
+
+        let response = route_request(request, ctx);
+        let body: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
+
+        assert_eq!(response.status, 200);
+        assert_eq!(body["status"], "healthy");
+        assert_eq!(body["lxmd"]["storage"]["messagestore"]["file_count"], 1);
+        assert_eq!(body["lxmd"]["storage"]["peers"]["bytes"], 2);
+        assert_eq!(
+            body["lxmd"]["recent_logs"]["rns_shared_instance_connected"],
+            true
+        );
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
