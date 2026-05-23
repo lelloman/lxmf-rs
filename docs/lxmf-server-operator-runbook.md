@@ -253,6 +253,7 @@ Key endpoints:
 - `GET /api/info`
 - `GET /api/processes`
 - `GET /api/processes/:name/logs`
+- `GET /api/diagnostics`
 - `GET /api/config`
 - `GET /api/config/schema`
 - `POST /api/config/validate`
@@ -327,22 +328,78 @@ If static peering is needed, write explicit `lxmd` propagation config in the
 Use the LXMF control API first:
 
 - `/readyz`
-  Returns `200` only when all managed processes are running and ready.
+  Returns `200` only when all managed processes are running and ready. This is
+  process readiness only; it is not delivery proof.
 - `/api/processes`
   Shows managed process status, readiness, PID, restart count, and recent logs.
 - `/api/processes/lxmd/logs?tail=100`
   Shows recent buffered `lxmd` logs.
+- `/api/diagnostics`
+  Shows an operator summary with process readiness, LXMF storage counters,
+  recent `lxmd` log-derived signals, and explicit pass/fail checks for the
+  local overlay. Treat `degraded` as actionable until the failing checks are
+  understood.
 
-Shell-level checks:
+Health endpoints are unauthenticated. Calls under `/api/` require the bearer
+token from `lxmf-server.json` unless auth is explicitly disabled. A local check
+on a VPS looks like this:
+
+```bash
+token=$(jq -r '.http.auth_token' /var/lib/lxmf-server/lxmf-server.json)
+curl -sf -H "Authorization: Bearer $token" \
+  http://127.0.0.1:37529/api/diagnostics | jq
+```
+
+From the workspace, collect both VPSes with the LXMF report script:
+
+```bash
+scripts/lxmf_vps_report.py
+scripts/lxmf_vps_report.py --json > /tmp/lxmf-vps-report.json
+```
+
+The script SSHes to each host, reads the local API token, queries `/healthz`,
+`/readyz`, `/api/processes`, and `/api/diagnostics`, then falls back to
+shell-level probes. It also runs `lxmd --status` and `lxmd --peers` against the
+local RNS shared instance so propagation control reachability is visible even
+when the HTTP supervisor endpoint is older than this runbook.
+
+Shell-level checks remain useful when the HTTP API is unavailable:
 
 ```bash
 journalctl -u lxmf-server --since '1 hour ago' --no-pager
 tail -n 200 /var/lib/lxmf-server/logs/lxmd.log
+find /var/lib/lxmf-server/lxmd/storage/lxmf -maxdepth 2 -type f -ls
+ss -xap | grep '@rns/default'
 ```
 
-The existing RNS daily VPS report should continue to run against `rns-server`
-and `rns-ctl`. Add LXMF-specific reporting separately once the overlay service
-has been running long enough to know which drift and health signals matter.
+### Delivery Evidence
+
+Do not use RNS transport health alone as LXMF delivery evidence. The RNS daily
+report proves the Reticulum node is healthy; it does not prove LXMF delivery or
+propagation peering.
+
+For "we are delivering messages" to be true on the VPS experiment, collect all
+of these signals or explain why a missing signal is expected for the test:
+
+1. `/readyz` returns `200` on both hosts.
+2. `/api/diagnostics` is `healthy`, or every failing check is explained.
+3. `lxmd --status` returns successfully on each host and shows the propagation
+   message store and client counters.
+4. `lxmd --peers` returns successfully and shows the expected remote
+   propagation peer(s), or the experiment explicitly does not require peering.
+5. The sender observes an outbound state transition for the test message, and
+   the receiver observes the message content or an inbound callback/log entry.
+6. If propagation delivery is being tested, the propagation node message store
+   count or client propagation counters change during the test window.
+
+Negative signals that mean delivery is not demonstrated:
+
+- `lxmd --status` or `lxmd --peers` times out.
+- The `peers` storage file is empty or only contains an empty msgpack object.
+- The message store is empty after a test that should have used propagation.
+- Recent logs contain shared-instance connection failures.
+- `ss -xap` shows no live `lxmd` connection to `@rns/default` while the service
+  is expected to be online.
 
 ### RNS Daily VPS Report DB Handoff
 
@@ -389,9 +446,18 @@ Common cases:
 
 - `lxmd` cannot connect to RNS
   Verify `rns-server` is active and `share_instance = Yes` is set on the RNS
-  node config.
+  node config. Check `ss -xap | grep '@rns/default'`; a healthy LXMF process
+  should have a live connection to the shared instance. If `lxmd` started before
+  the shared instance was available and did not reconnect, restart
+  `lxmf-server`.
 - `/readyz` returns `503`
   Inspect `/api/processes`; `lxmd` may still be starting or restarting.
+- `/api/diagnostics` returns `degraded`
+  Read the failing checks first. Common causes are empty peer state, missing
+  message-store directories, or recent shared-instance connection errors.
+- `lxmd --status` or `lxmd --peers` times out
+  The propagation control destination is not reachable. Confirm `lxmd` is
+  connected to RNS, wait for path discovery, and inspect recent announce logs.
 - API returns `401`
   Provide `Authorization: Bearer <token>` or verify `http.auth_token`.
 - Port conflict on `37529`
