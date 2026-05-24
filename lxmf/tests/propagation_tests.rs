@@ -63,6 +63,51 @@ fn test_store_message_basic() {
 }
 
 #[test]
+fn test_store_message_leaves_no_atomic_temp_file() {
+    let dir = temp_dir("store_atomic_cleanup");
+    let mut store = PropagationStore::new(dir.clone(), 1024);
+
+    let dest = [0xAB; 16];
+    let lxm_data = make_lxm_data(&dest, b"atomic write payload");
+
+    let tid = store.store_message(&lxm_data, None, 0, None).unwrap();
+    let entry = store.entries.get(&tid).unwrap();
+
+    assert!(entry.filepath.exists());
+    assert_eq!(fs::read(&entry.filepath).unwrap(), lxm_data);
+
+    let temp_files: Vec<_> = fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with(".tmp."))
+        .collect();
+    assert!(temp_files.is_empty());
+
+    cleanup(&dir);
+}
+
+#[test]
+fn test_scan_messagestore_ignores_atomic_temp_files() {
+    let dir = temp_dir("scan_atomic_tmp");
+    let dest = [0xAC; 16];
+    let lxm_data = make_lxm_data(&dest, b"temporary write residue");
+    let transient_id = sha256(&lxm_data);
+    let hex_id = transient_id
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let tmp_filename = format!(".tmp.{}.1.{}_12345_16", std::process::id(), hex_id);
+    fs::write(dir.join(tmp_filename), &lxm_data).unwrap();
+
+    let mut store = PropagationStore::new(dir.clone(), 1024);
+    store.scan_messagestore();
+
+    assert_eq!(store.message_count(), 0);
+
+    cleanup(&dir);
+}
+
+#[test]
 fn test_store_message_no_stamp() {
     let dir = temp_dir("store_no_stamp");
     let mut store = PropagationStore::new(dir.clone(), 1024);
