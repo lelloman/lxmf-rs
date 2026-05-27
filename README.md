@@ -202,7 +202,7 @@ cargo run -p lxmf-server -- start
 
 ## Project Status
 
-- **Version**: 0.1.6
+- **Version**: 0.1.7
 - **Tests**: 158 passing
 - **Compatibility**: Wire-compatible with Python LXMF v0.9.4
 - **Repository**: [https://github.com/lelloman/lxmf-rs](https://github.com/lelloman/lxmf-rs)
