@@ -7,16 +7,19 @@ The current upstream reference baseline is:
 - Project: LXMF
 - Repository: `git@github.com:markqvist/LXMF.git`
 - Local checkout used: `~/LXMF`
-- Branch: `master`
-- Commit: `7b0e7028321180a03713c5e71a34cb0d8ef99d13`
-- Describe: `0.9.8`
-- Commit date: `2026-05-10 17:20:26 +0200`
-- Subject: `Updated versions`
+- Branch: `origin/master`
+- Commit: `b53a3ce37dc8b385dd04005f6dfca314ed8c9ed5`
+- Describe: `0.9.8-9-gb53a3ce`
+- Commit date: `2026-05-24 23:16:15 +0200`
+- Subject: `Clarified FIELD_THREAD`
 
 The previous baseline was `8499729024a4cddfceb47ca07188bb5b1d11d179`
 (`0.9.6`). The upstream range
-`8499729024a4cddfceb47ca07188bb5b1d11d179..7b0e7028321180a03713c5e71a34cb0d8ef99d13`
-has been reviewed and ported with the following local commits:
+`8499729024a4cddfceb47ca07188bb5b1d11d179..b53a3ce37dc8b385dd04005f6dfca314ed8c9ed5`
+contains 22 commits and has been reviewed. Applicable behavior has been ported,
+and non-applicable Python packaging, Makefile, and upstream README changes have
+been explicitly closed out. The first `0.9.6..0.9.8` segment was reviewed and
+ported with the following local commits:
 
 - `343ef15` Track LXMF upstream 727830c
 - `4fd6824` Track LXMF upstream 4ecbdb3
@@ -31,8 +34,25 @@ has been reviewed and ported with the following local commits:
 - `6fd4e57` Port LXMF propagation announce wakeup
 - `3cce4fd` Cover LXMF stamper cancellation lifecycle
 
-The final upstream commit `7b0e7028321180a03713c5e71a34cb0d8ef99d13` only
-raises the Python `rns` package requirement from `>=1.2.4` to `>=1.2.5`.
+Additional upstream commits after `7b0e7028321180a03713c5e71a34cb0d8ef99d13`
+were reviewed as follows:
+
+- `29c7917` and `b415a13`: Python Makefile release/upload tooling; no Rust
+  port action.
+- `7f0e262`, `d6ec051`, and `1bef747`: ported by Rust commit
+  `91d2cbeaea3a3c712d0eba5639adb9688e17603c` as atomic propagation-store
+  writes.
+- `84613f8` and `dffbf4d`: Python version and RNS dependency metadata; kept as
+  dependency-parity context, no direct Rust code change.
+- `764758d`: ported by adding reply, reaction, comment, and continuation field
+  constants plus dict indices to `lxmf-core/src/constants.rs`.
+- `b53a3ce`: ported as the `FIELD_THREAD` documentation clarification in
+  `lxmf-core/src/constants.rs`.
+
+The constants port is covered by
+`test_message_field_constants_match_upstream` and
+`test_interaction_field_dict_indices_match_upstream` in
+`lxmf-core/tests/interop.rs`.
 
 ## RNS Dependency Baseline
 
@@ -51,8 +71,10 @@ The corresponding `rns-rs` integration baseline is:
 When updating RNS integration, publish the required `rns-rs` crates, update the
 exact versions in `Cargo.toml`, and record the release commit here.
 
-The Python LXMF `0.9.8` package requires `rns>=1.2.5`. The Rust dependency
-baseline above uses the corresponding latest published `rns-rs` crates.
+The current upstream Python LXMF post-`0.9.8` head requires `rns>=1.3.0`. The
+Rust dependency baseline above uses the corresponding latest published `rns-rs`
+crates; treat Python RNS dependency bumps as dependency-parity review input,
+not as direct Cargo version edits.
 
 When integrating upstream changes, compare this commit against the new LXMF
 upstream commit, update protocol constants, message formats, propagation

@@ -23,6 +23,7 @@ pub const FIELD_ICON_APPEARANCE: u8 = 0x04;
 pub const FIELD_FILE_ATTACHMENTS: u8 = 0x05;
 pub const FIELD_IMAGE: u8 = 0x06;
 pub const FIELD_AUDIO: u8 = 0x07;
+/// Bytes containing the full thread ID hash.
 pub const FIELD_THREAD: u8 = 0x08;
 pub const FIELD_COMMANDS: u8 = 0x09;
 pub const FIELD_RESULTS: u8 = 0x0A;
@@ -31,6 +32,11 @@ pub const FIELD_TICKET: u8 = 0x0C;
 pub const FIELD_EVENT: u8 = 0x0D;
 pub const FIELD_RNR_REFS: u8 = 0x0E;
 pub const FIELD_RENDERER: u8 = 0x0F;
+pub const FIELD_REPLY_TO: u8 = 0x30;
+pub const FIELD_REPLY_QUOTE: u8 = 0x31;
+pub const FIELD_REACTION: u8 = 0x40;
+pub const FIELD_COMMENT: u8 = 0x41;
+pub const FIELD_CONTINUATION: u8 = 0x42;
 
 pub const FIELD_CUSTOM_TYPE: u8 = 0xFB;
 pub const FIELD_CUSTOM_DATA: u8 = 0xFC;
@@ -75,6 +81,15 @@ pub const RENDERER_PLAIN: u8 = 0x00;
 pub const RENDERER_MICRON: u8 = 0x01;
 pub const RENDERER_MARKDOWN: u8 = 0x02;
 pub const RENDERER_BBCODE: u8 = 0x03;
+
+// ============================================================
+// Reply, Reaction, Comment and Continuation Dict Indices (LXMF.py)
+// ============================================================
+
+pub const REACTION_TO: u8 = 0x00;
+pub const REACTION_CONTENT: u8 = 0x01;
+pub const COMMENT_FOR: u8 = 0x00;
+pub const CONTINUATION_OF: u8 = 0x00;
 
 // ============================================================
 // Propagation Node Metadata Fields (LXMF.py)

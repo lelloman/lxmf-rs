@@ -501,6 +501,47 @@ fn test_content_size_limits() {
 }
 
 #[test]
+fn test_message_field_constants_match_upstream() {
+    use lxmf_core::constants::*;
+
+    assert_eq!(FIELD_EMBEDDED_LXMS, 0x01);
+    assert_eq!(FIELD_TELEMETRY, 0x02);
+    assert_eq!(FIELD_TELEMETRY_STREAM, 0x03);
+    assert_eq!(FIELD_ICON_APPEARANCE, 0x04);
+    assert_eq!(FIELD_FILE_ATTACHMENTS, 0x05);
+    assert_eq!(FIELD_IMAGE, 0x06);
+    assert_eq!(FIELD_AUDIO, 0x07);
+    assert_eq!(FIELD_THREAD, 0x08);
+    assert_eq!(FIELD_COMMANDS, 0x09);
+    assert_eq!(FIELD_RESULTS, 0x0A);
+    assert_eq!(FIELD_GROUP, 0x0B);
+    assert_eq!(FIELD_TICKET, 0x0C);
+    assert_eq!(FIELD_EVENT, 0x0D);
+    assert_eq!(FIELD_RNR_REFS, 0x0E);
+    assert_eq!(FIELD_RENDERER, 0x0F);
+    assert_eq!(FIELD_REPLY_TO, 0x30);
+    assert_eq!(FIELD_REPLY_QUOTE, 0x31);
+    assert_eq!(FIELD_REACTION, 0x40);
+    assert_eq!(FIELD_COMMENT, 0x41);
+    assert_eq!(FIELD_CONTINUATION, 0x42);
+    assert_eq!(FIELD_CUSTOM_TYPE, 0xFB);
+    assert_eq!(FIELD_CUSTOM_DATA, 0xFC);
+    assert_eq!(FIELD_CUSTOM_META, 0xFD);
+    assert_eq!(FIELD_NON_SPECIFIC, 0xFE);
+    assert_eq!(FIELD_DEBUG, 0xFF);
+}
+
+#[test]
+fn test_interaction_field_dict_indices_match_upstream() {
+    use lxmf_core::constants::*;
+
+    assert_eq!(REACTION_TO, 0x00);
+    assert_eq!(REACTION_CONTENT, 0x01);
+    assert_eq!(COMMENT_FOR, 0x00);
+    assert_eq!(CONTINUATION_OF, 0x00);
+}
+
+#[test]
 fn test_time_constants() {
     use lxmf_core::constants::*;
     assert_eq!(TICKET_EXPIRY, 21 * 24 * 60 * 60);
