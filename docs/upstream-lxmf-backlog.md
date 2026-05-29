@@ -6,32 +6,35 @@ closed out.
 
 ## Current State
 
-- Last checked: 2026-05-26
+- Last checked: 2026-05-29
 - Upstream checkout: `/home/lelloman/LXMF`
 - Upstream remote: `git@github.com:markqvist/LXMF.git`
 - Upstream branch: `origin/master`
-- Current upstream head: `b53a3ce37dc8b385dd04005f6dfca314ed8c9ed5`
+- Current upstream head: `5be161cb1e50e99925f20852324dc3c82a3c0cd1`
 - Last reviewed Rust-port upstream point:
-  `b53a3ce37dc8b385dd04005f6dfca314ed8c9ed5`
+  `5be161cb1e50e99925f20852324dc3c82a3c0cd1`
 - Rust branch at latest review: `dev`
 - Rust head at latest review:
-  `b90f6d05bd2812139a616327f363735294127ac4`
+  `4a6dc6f954b5d58d45fe89860d22cda815980cda`
 
-The local upstream worktree branch `master` may be behind `origin/master`; use
-`origin/master` as the source of truth for this tracker.
+The local upstream worktree branch `master` was fast-forwarded to
+`origin/master` during the 2026-05-29 review pass.
 
 ## Open Upstream Commits
 
 None. The upstream range
 `8499729024a4cddfceb47ca07188bb5b1d11d179..b53a3ce37dc8b385dd04005f6dfca314ed8c9ed5`
-contains 22 commits; every commit in that range is now either ported, covered by
-tests, or explicitly closed as non-applicable to the Rust port.
+contains 22 commits; the follow-up range
+`b53a3ce37dc8b385dd04005f6dfca314ed8c9ed5..5be161cb1e50e99925f20852324dc3c82a3c0cd1`
+contains 8 commits. Every commit in the combined 30-commit range is now either
+ported, covered by tests, or explicitly closed as non-applicable to the Rust
+port.
 
 ## Recently Reviewed And Closed
 
 These upstream commits are not open backlog items because they were already
 ported, tracked as no-op metadata, or judged Python/tooling-specific in the
-2026-05-24 review pass.
+2026-05-24 and 2026-05-29 review passes.
 
 | Upstream commit(s) | Status |
 | --- | --- |
@@ -43,9 +46,15 @@ ported, tracked as no-op metadata, or judged Python/tooling-specific in the
 | `a8505ea` | Already ported in propagation-node announce outbound wakeup; covered by `propagation_node_announce_wakes_matching_propagated_outbound`. |
 | `0cb62dd` | Python 3.14 multiprocessing-specific stamper lifecycle; not applicable to Rust Rayon implementation, with Rust cancellation coverage in place. |
 | `29c7917`, `b415a13` | Python Makefile/release tooling; no Rust-port action. |
-| `7f0e262`, `d6ec051`, `1bef747` | Ported by Rust commit `91d2cbeaea3a3c712d0eba5639adb9688e17603c` as atomic propagation-store writes. |
+| `7f0e262`, `d6ec051`, `1bef747` | Ported by Rust commit `97db2b2a4a12e89a89fe64986878b533a8516170` as atomic propagation-store writes. |
 | `764758d` | Ported in this pass by adding reply/reaction/comment/continuation field constants and dict indices to `lxmf-core/src/constants.rs`; covered by `test_message_field_constants_match_upstream` and `test_interaction_field_dict_indices_match_upstream`. |
 | `b53a3ce` | Ported in this pass as the `FIELD_THREAD` doc comment in `lxmf-core/src/constants.rs`; covered by `test_message_field_constants_match_upstream` for the unchanged field value. |
+| `55620bf` | Python `lxmd.py` config-path typo fix; no matching Rust typo in `lxmd/src/main.rs`. |
+| `599406e` | Ported by Rust commit `8b98355f7bad2eab36567b87b8367ba009f0a8b1` as delivery announce compression support signalling; covered by `delivery_announce_data_signals_compression_support`. |
+| `2ac2b10` | Ported by Rust commit `4a6dc6f954b5d58d45fe89860d22cda815980cda` as inbound blackholed-source dropping; covered by `blackholed_source_is_dropped_before_delivery_callback`. |
+| `575fb7d`, `5be161c` | Python `LXMessage.write_to_directory` write-race fixes. Rust propagation-store atomic writes are already ported and covered; no direct Rust message-container persistence API exists. |
+| `312e0a8`, `044f3d2` | Python LXMF/RNS dependency metadata; no direct Cargo change, retained as dependency-parity context. |
+| `bf924c7` | Python comment/format cleanup with no protocol constant value changes; no Rust-port action. |
 
 ## Refresh Procedure
 
@@ -54,7 +63,7 @@ From the upstream checkout:
 ```bash
 cd ~/LXMF
 git fetch origin --prune
-git log --oneline --reverse b53a3ce37dc8b385dd04005f6dfca314ed8c9ed5..origin/master
+git log --oneline --reverse 5be161cb1e50e99925f20852324dc3c82a3c0cd1..origin/master
 ```
 
 For each new commit:
