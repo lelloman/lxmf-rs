@@ -486,7 +486,12 @@ impl LxmRouter {
             Some(cost) => Value::UInt(cost as u64),
             None => Value::Nil,
         };
-        msgpack::pack(&Value::Array(vec![display_name_val, stamp_cost_val]))
+        let supported_functionality = Value::Array(vec![Value::UInt(SF_COMPRESSION as u64)]);
+        msgpack::pack(&Value::Array(vec![
+            display_name_val,
+            stamp_cost_val,
+            supported_functionality,
+        ]))
     }
 
     /// Build propagation node announce data.
@@ -1323,4 +1328,53 @@ pub fn now_timestamp() -> f64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs_f64()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static NEXT_TEST_DIR: AtomicUsize = AtomicUsize::new(1);
+
+    fn test_storage_dir(name: &str) -> PathBuf {
+        let id = NEXT_TEST_DIR.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!(
+            "lxmf_router_unit_{}_{}_{}",
+            name,
+            std::process::id(),
+            id
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn delivery_announce_data_signals_compression_support() {
+        let dir = test_storage_dir("delivery_compression_signal");
+        let identity = Identity::new(&mut rns_crypto::OsRng);
+        let mut router = LxmRouter::new(
+            identity,
+            RouterConfig {
+                storagepath: dir.clone(),
+                ..RouterConfig::default()
+            },
+        );
+        router.display_name = Some("Test Node".to_string());
+        router.delivery_stamp_cost = Some(16);
+
+        let app_data = router.build_delivery_announce_data();
+        let unpacked = msgpack::unpack_exact(&app_data).unwrap();
+        let fields = unpacked.as_array().unwrap();
+
+        assert_eq!(fields.len(), 3);
+        assert_eq!(fields[0].as_bin(), Some(&b"Test Node"[..]));
+        assert_eq!(fields[1].as_uint(), Some(16));
+        let supported = fields[2].as_array().unwrap();
+        assert_eq!(supported.len(), 1);
+        assert_eq!(supported[0].as_uint(), Some(SF_COMPRESSION as u64));
+
+        fs::remove_dir_all(dir).unwrap();
+    }
 }
