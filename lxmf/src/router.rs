@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
@@ -12,6 +12,7 @@ use rns_crypto::identity::Identity;
 
 use rns_net::destination::{AnnouncedIdentity, Destination};
 use rns_net::driver::Callbacks;
+use rns_net::event::{QueryRequest, QueryResponse};
 use rns_net::node::RnsNode;
 
 use crate::peer::LxmPeer;
@@ -193,7 +194,9 @@ pub struct LxmRouter {
     // RPC calls to the driver thread (which would deadlock when called from
     // a driver callback like on_local_delivery).
     pub identity_cache: HashMap<[u8; 16], [u8; 64]>,
+    pub identity_hash_cache: HashMap<[u8; 16], [u8; 16]>,
     pub compression_cache: HashMap<[u8; 16], bool>,
+    pub blackholed_identities: HashSet<[u8; 16]>,
 
     // Node reference (set after start)
     node: Option<Arc<RnsNode>>,
@@ -262,7 +265,9 @@ impl LxmRouter {
             propagation_transfer_progress: 0.0,
             propagation_transfer_max_messages: None,
             identity_cache: HashMap::new(),
+            identity_hash_cache: HashMap::new(),
             compression_cache: HashMap::new(),
+            blackholed_identities: HashSet::new(),
             node: None,
             display_name: None,
             delivery_stamp_cost: None,
@@ -279,6 +284,38 @@ impl LxmRouter {
     /// Get a reference to the RNS node.
     pub fn node(&self) -> Option<&RnsNode> {
         self.node.as_deref()
+    }
+
+    /// Replace the cached transport-level blackhole list.
+    pub fn set_blackholed_identities<I>(&mut self, identities: I)
+    where
+        I: IntoIterator<Item = [u8; 16]>,
+    {
+        self.blackholed_identities = identities.into_iter().collect();
+    }
+
+    /// Refresh the cached transport-level blackhole list from the RNS node.
+    pub fn refresh_blackholed_identities(&mut self) -> bool {
+        let Some(node) = &self.node else {
+            return false;
+        };
+
+        match node.query(QueryRequest::GetBlackholed) {
+            Ok(QueryResponse::Blackholed(entries)) => {
+                self.blackholed_identities = entries
+                    .into_iter()
+                    .map(|entry| entry.identity_hash)
+                    .collect();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn source_identity_is_blackholed(&self, source_hash: &[u8; 16]) -> bool {
+        self.identity_hash_cache
+            .get(source_hash)
+            .is_some_and(|identity_hash| self.blackholed_identities.contains(identity_hash))
     }
 
     /// Ensure a direct link exists to the given destination.
@@ -793,7 +830,15 @@ impl LxmRouter {
             }
         };
 
-        // Check if source is ignored
+        // Check if source is blackholed or ignored.
+        if self.source_identity_is_blackholed(&result.source_hash) {
+            log::debug!(
+                "Dropping LXM from blackholed source {:02x?}",
+                &result.source_hash[..4]
+            );
+            return;
+        }
+
         if self.ignored_list.contains(&result.source_hash) {
             return;
         }
@@ -1016,6 +1061,7 @@ impl LxmfCallbacks {
         let router = self.router.clone();
         thread::spawn(move || {
             let mut router = router.lock().unwrap();
+            router.refresh_blackholed_identities();
             router.lxmf_delivery(
                 &lxmf_bytes,
                 transport_encrypted,
@@ -1050,6 +1096,9 @@ impl Callbacks for LxmfCallbacks {
         router
             .identity_cache
             .insert(announced.dest_hash.0, announced.public_key);
+        router
+            .identity_hash_cache
+            .insert(announced.dest_hash.0, announced.identity_hash.0);
 
         // Propagation node announces can make queued propagated messages
         // immediately actionable when they are from our configured outbound PN.
@@ -1136,6 +1185,7 @@ impl Callbacks for LxmfCallbacks {
                 let mut lxmf_bytes = Vec::with_capacity(DESTINATION_LENGTH + plaintext.len());
                 lxmf_bytes.extend_from_slice(&dest_hash.0);
                 lxmf_bytes.extend_from_slice(&plaintext);
+                router.refresh_blackholed_identities();
                 router.lxmf_delivery(
                     &lxmf_bytes,
                     true,

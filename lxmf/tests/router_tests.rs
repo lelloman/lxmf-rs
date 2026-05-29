@@ -3,7 +3,11 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::{Arc, Mutex};
 
-use lxmf_core::constants::{DeliveryMethod, MessageState, Representation, DESTINATION_LENGTH};
+use lxmf_core::constants::{
+    DeliveryMethod, MessageState, Representation, APP_NAME, DESTINATION_LENGTH,
+    ENCRYPTION_DESCRIPTION_UNENCRYPTED,
+};
+use lxmf_core::message;
 use lxmf_rs::router::{LxmRouter, LxmfCallbacks, OutboundError, OutboundMessage, RouterConfig};
 use rns_core::msgpack::{pack, Value};
 use rns_core::types::{DestHash, IdentityHash};
@@ -58,6 +62,35 @@ fn outbound(method: DeliveryMethod) -> OutboundMessage {
         link_id: None,
         packet_hash: None,
     }
+}
+
+fn pack_delivery_message(
+    source_identity: &Identity,
+    destination_hash: &[u8; DESTINATION_LENGTH],
+) -> (message::PackResult, [u8; DESTINATION_LENGTH]) {
+    let source_hash = rns_core::destination::destination_hash(
+        APP_NAME,
+        &["delivery"],
+        Some(source_identity.hash()),
+    );
+    let signing_identity = Identity::from_private_key(&source_identity.get_private_key().unwrap());
+    let packed = message::pack(
+        destination_hash,
+        &source_hash,
+        1_700_000_000.0,
+        b"Test",
+        b"Message",
+        vec![],
+        None,
+        |data| {
+            signing_identity
+                .sign(data)
+                .map_err(|_| message::Error::SignError)
+        },
+    )
+    .unwrap();
+
+    (packed, source_hash)
 }
 
 fn pn_announce(dest_hash: [u8; DESTINATION_LENGTH], valid: bool) -> AnnouncedIdentity {
@@ -120,6 +153,40 @@ fn propagated_outbound_queues_after_configuring_propagation_node() {
     assert_eq!(router.outbound_propagation_node, Some(target));
     assert_ne!(router.propagation_dest_hash, target);
     assert_eq!(router.outbound.len(), 1);
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn blackholed_source_is_dropped_before_delivery_callback() {
+    let (mut router, dir) = test_router("blackholed_source");
+    let destination_hash = [0x51; DESTINATION_LENGTH];
+    let source_identity = Identity::new(&mut rns_crypto::OsRng);
+    let (packed, source_hash) = pack_delivery_message(&source_identity, &destination_hash);
+
+    router.delivery_dest_hash = Some(destination_hash);
+    router
+        .identity_cache
+        .insert(source_hash, source_identity.get_public_key().unwrap());
+    router
+        .identity_hash_cache
+        .insert(source_hash, *source_identity.hash());
+    router.set_blackholed_identities(vec![*source_identity.hash()]);
+
+    let delivered = Arc::new(AtomicBool::new(false));
+    let delivered_cb = delivered.clone();
+    router.set_delivery_callback(Box::new(move |_| {
+        delivered_cb.store(true, Ordering::SeqCst);
+    }));
+
+    router.lxmf_delivery(
+        &packed.packed,
+        false,
+        ENCRYPTION_DESCRIPTION_UNENCRYPTED,
+        DeliveryMethod::Opportunistic,
+    );
+
+    assert!(!delivered.load(Ordering::SeqCst));
+    assert!(router.locally_delivered_transient_ids.is_empty());
     let _ = fs::remove_dir_all(dir);
 }
 
