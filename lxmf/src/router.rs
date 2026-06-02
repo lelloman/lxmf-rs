@@ -18,7 +18,8 @@ use rns_net::node::RnsNode;
 use crate::handlers::{
     decide_propagation_action, parse_propagation_announce, PropagationAnnounceResult,
 };
-use crate::peer::LxmPeer;
+use crate::peer::{LxmPeer, OfferEntry, SyncAction};
+use crate::propagation::{PropagationEntry, PropagationStore};
 use crate::storage::{self, StoragePaths};
 
 /// Callback function types for the router.
@@ -28,6 +29,77 @@ pub type ProgressCallback = Box<dyn Fn(&[u8; 32], f64) + Send>;
 struct DirectLinkResult {
     dest_hash: [u8; 16],
     link_id: Option<[u8; 16]>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PeerSyncTransportError {
+    SendFailed,
+}
+
+pub trait PeerSyncTransport {
+    fn send_peer_offer(
+        &self,
+        link_id: [u8; 16],
+        offer: &[u8],
+    ) -> Result<(), PeerSyncTransportError>;
+    fn identify_peer_link(
+        &self,
+        link_id: [u8; 16],
+        identity_prv_key: [u8; 64],
+    ) -> Result<(), PeerSyncTransportError>;
+    fn send_peer_resource(
+        &self,
+        link_id: [u8; 16],
+        data: Vec<u8>,
+    ) -> Result<(), PeerSyncTransportError>;
+    fn teardown_peer_link(&self, link_id: [u8; 16]) -> Result<(), PeerSyncTransportError>;
+}
+
+impl PeerSyncTransport for RnsNode {
+    fn send_peer_offer(
+        &self,
+        link_id: [u8; 16],
+        offer: &[u8],
+    ) -> Result<(), PeerSyncTransportError> {
+        self.send_request(link_id, OFFER_REQUEST_PATH, offer)
+            .map_err(|_| PeerSyncTransportError::SendFailed)
+    }
+
+    fn identify_peer_link(
+        &self,
+        link_id: [u8; 16],
+        identity_prv_key: [u8; 64],
+    ) -> Result<(), PeerSyncTransportError> {
+        self.identify_on_link(link_id, identity_prv_key)
+            .map_err(|_| PeerSyncTransportError::SendFailed)
+    }
+
+    fn send_peer_resource(
+        &self,
+        link_id: [u8; 16],
+        data: Vec<u8>,
+    ) -> Result<(), PeerSyncTransportError> {
+        self.send_resource(link_id, data, None)
+            .map_err(|_| PeerSyncTransportError::SendFailed)
+    }
+
+    fn teardown_peer_link(&self, link_id: [u8; 16]) -> Result<(), PeerSyncTransportError> {
+        self.teardown_link(link_id)
+            .map_err(|_| PeerSyncTransportError::SendFailed)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PeerOfferResponseResult {
+    OfferSent,
+    TransferStarted(usize),
+    RetriedAfterIdentify,
+    Unpeered,
+    Teardown,
+    MissingPeer,
+    MissingLink,
+    EmptyOffer,
+    TransportError,
 }
 
 /// Information about a delivered message passed to the delivery callback.
@@ -186,6 +258,9 @@ pub struct LxmRouter {
 
     // Peers
     pub peers: HashMap<[u8; 16], LxmPeer>,
+    pub propagation_store: PropagationStore,
+    peer_sync_response_links: HashMap<[u8; 16], [u8; 16]>,
+    peer_sync_transfer_sizes: HashMap<[u8; 16], usize>,
 
     // Propagation transfer state (client-side)
     pub propagation_transfer_state: PropagationTransferState,
@@ -222,6 +297,9 @@ impl LxmRouter {
         let locally_delivered_transient_ids = storage::load_transient_ids(&paths.local_deliveries);
         let locally_processed_transient_ids = storage::load_transient_ids(&paths.locally_processed);
         let outbound_stamp_costs = storage::load_stamp_costs(&paths.outbound_stamp_costs);
+        let mut propagation_store =
+            PropagationStore::new(paths.messagestore.clone(), config.propagation_limit);
+        propagation_store.scan_messagestore();
 
         // Load peers from storage
         let mut peers = HashMap::new();
@@ -264,6 +342,9 @@ impl LxmRouter {
             prioritised_list: Vec::new(),
             control_allowed_list: Vec::new(),
             peers,
+            propagation_store,
+            peer_sync_response_links: HashMap::new(),
+            peer_sync_transfer_sizes: HashMap::new(),
             propagation_transfer_state: PropagationTransferState::Idle,
             propagation_transfer_progress: 0.0,
             propagation_transfer_max_messages: None,
@@ -614,8 +695,18 @@ impl LxmRouter {
             self.clean_transient_id_caches();
         }
 
+        // Peer propagation sync (every 6 cycles = 24s)
+        if self.processing_count % JOB_PEERSYNC_INTERVAL == 0 {
+            if let Some(node) = self.node.clone() {
+                self.ensure_peer_sync_links(node.as_ref());
+                self.process_peer_syncs_with_transport(node.as_ref());
+            }
+        }
+
         // Message store cleanup and peer save (every 120 cycles = 8 min)
         if self.processing_count % JOB_STORE_INTERVAL == 0 {
+            self.propagation_store
+                .clean_messagestore(&self.prioritised_list);
             self.save_peers();
         }
     }
@@ -942,6 +1033,244 @@ impl LxmRouter {
         None
     }
 
+    fn process_peer_distribution_queue(&mut self) {
+        let queued = self.propagation_store.flush_distribution_queue();
+        if queued.is_empty() {
+            return;
+        }
+
+        let peer_hashes: Vec<[u8; 16]> = self.peers.keys().copied().collect();
+        for (transient_id, from_peer) in queued {
+            for peer_hash in &peer_hashes {
+                if Some(*peer_hash) == from_peer {
+                    self.propagation_store
+                        .add_handled_peer(&transient_id, *peer_hash);
+                    continue;
+                }
+
+                if let Some(peer) = self.peers.get_mut(peer_hash) {
+                    peer.queue_unhandled_message(transient_id);
+                    self.propagation_store
+                        .add_unhandled_peer(&transient_id, *peer_hash);
+                }
+            }
+        }
+    }
+
+    fn peer_sync_offer_entries(&self, transient_ids: &[[u8; 32]]) -> Vec<OfferEntry> {
+        let now = now_timestamp();
+        transient_ids
+            .iter()
+            .filter_map(|id| {
+                self.propagation_store
+                    .entries
+                    .get(id)
+                    .map(|entry| OfferEntry {
+                        transient_id: *id,
+                        weight: peer_offer_weight(entry, now, &self.prioritised_list),
+                        size: entry.size,
+                        stamp_value: entry.stamp_value,
+                    })
+            })
+            .collect()
+    }
+
+    fn mark_store_handled_for_peer(&mut self, peer_hash: [u8; 16]) {
+        let Some(peer) = self.peers.get(&peer_hash) else {
+            return;
+        };
+        let handled = peer.handled_ids.clone();
+        for transient_id in handled {
+            self.propagation_store
+                .add_handled_peer(&transient_id, peer_hash);
+        }
+    }
+
+    fn build_peer_sync_resource_payload(&self, wants: &[[u8; 32]]) -> Option<Vec<u8>> {
+        let mut messages = Vec::new();
+        for transient_id in wants {
+            let entry = self.propagation_store.entries.get(transient_id)?;
+            let data = std::fs::read(&entry.filepath).ok()?;
+            messages.push(Value::Bin(data));
+        }
+
+        let payload = Value::Array(vec![Value::Float(now_timestamp()), Value::Array(messages)]);
+        Some(msgpack::pack(&payload))
+    }
+
+    pub fn send_peer_sync_offer_with_transport<T: PeerSyncTransport + ?Sized>(
+        &mut self,
+        peer_hash: [u8; 16],
+        transport: &T,
+    ) -> PeerOfferResponseResult {
+        let (link_id, unhandled_ids) = match self.peers.get_mut(&peer_hash) {
+            Some(peer) => {
+                peer.process_queues();
+                match peer.link_id {
+                    Some(link_id) => (link_id, peer.unhandled_ids.clone()),
+                    None => return PeerOfferResponseResult::MissingLink,
+                }
+            }
+            None => return PeerOfferResponseResult::MissingPeer,
+        };
+
+        let available_messages = self.peer_sync_offer_entries(&unhandled_ids);
+        let offer = match self
+            .peers
+            .get_mut(&peer_hash)
+            .and_then(|peer| peer.build_offer(&available_messages))
+        {
+            Some(offer) => offer,
+            None => return PeerOfferResponseResult::EmptyOffer,
+        };
+
+        if transport.send_peer_offer(link_id, &offer).is_err() {
+            return PeerOfferResponseResult::TransportError;
+        }
+
+        self.peer_sync_response_links.insert(link_id, peer_hash);
+        PeerOfferResponseResult::OfferSent
+    }
+
+    pub fn handle_peer_offer_response_with_transport<T: PeerSyncTransport + ?Sized>(
+        &mut self,
+        link_id: [u8; 16],
+        response_data: &[u8],
+        transport: &T,
+    ) -> PeerOfferResponseResult {
+        let peer_hash = match self.peer_sync_response_links.remove(&link_id).or_else(|| {
+            self.peers
+                .iter()
+                .find_map(|(hash, peer)| (peer.link_id == Some(link_id)).then_some(*hash))
+        }) {
+            Some(peer_hash) => peer_hash,
+            None => return PeerOfferResponseResult::MissingPeer,
+        };
+
+        let action = match self.peers.get_mut(&peer_hash) {
+            Some(peer) => peer.handle_offer_response(response_data),
+            None => return PeerOfferResponseResult::MissingPeer,
+        };
+
+        match action {
+            SyncAction::TransferMessages(wants) => {
+                let payload = match self.build_peer_sync_resource_payload(&wants) {
+                    Some(payload) => payload,
+                    None => return PeerOfferResponseResult::TransportError,
+                };
+                let payload_size = payload.len();
+                if transport.send_peer_resource(link_id, payload).is_err() {
+                    if let Some(peer) = self.peers.get_mut(&peer_hash) {
+                        peer.handle_resource_failed();
+                    }
+                    return PeerOfferResponseResult::TransportError;
+                }
+                self.peer_sync_transfer_sizes.insert(link_id, payload_size);
+                PeerOfferResponseResult::TransferStarted(wants.len())
+            }
+            SyncAction::IdentifyAndRetry => {
+                let identity_prv_key = match self.identity.get_private_key() {
+                    Some(key) => key,
+                    None => return PeerOfferResponseResult::TransportError,
+                };
+                if transport
+                    .identify_peer_link(link_id, identity_prv_key)
+                    .is_err()
+                {
+                    return PeerOfferResponseResult::TransportError;
+                }
+                if let Some(peer) = self.peers.get_mut(&peer_hash) {
+                    peer.state = PeerState::LinkReady;
+                }
+                let retry = self.send_peer_sync_offer_with_transport(peer_hash, transport);
+                if retry == PeerOfferResponseResult::TransportError {
+                    retry
+                } else {
+                    PeerOfferResponseResult::RetriedAfterIdentify
+                }
+            }
+            SyncAction::Unpeer => {
+                self.peers.remove(&peer_hash);
+                self.save_peers();
+                let _ = transport.teardown_peer_link(link_id);
+                PeerOfferResponseResult::Unpeered
+            }
+            SyncAction::TeardownLink => {
+                self.mark_store_handled_for_peer(peer_hash);
+                let _ = transport.teardown_peer_link(link_id);
+                PeerOfferResponseResult::Teardown
+            }
+        }
+    }
+
+    fn ensure_peer_sync_links(&mut self, node: &RnsNode) {
+        let now = now_timestamp();
+        let peer_hashes: Vec<[u8; 16]> = self.peers.keys().copied().collect();
+        for peer_hash in peer_hashes {
+            let should_establish = match self.peers.get_mut(&peer_hash) {
+                Some(peer) => {
+                    peer.process_queues();
+                    let (checks_ok, _) = peer.sync_checks();
+                    peer.state == PeerState::Idle
+                        && checks_ok
+                        && !peer.unhandled_ids.is_empty()
+                        && peer.next_sync_attempt <= now
+                }
+                None => false,
+            };
+
+            if !should_establish {
+                continue;
+            }
+
+            if let Some(peer) = self.peers.get_mut(&peer_hash) {
+                if peer.link_id.is_some() {
+                    peer.state = PeerState::LinkReady;
+                    continue;
+                }
+            }
+
+            if let Some(public_key) = self.identity_cache.get(&peer_hash) {
+                let sig_pub: [u8; 32] = public_key[32..].try_into().unwrap();
+                match node.create_link(peer_hash, sig_pub) {
+                    Ok(link_id) => {
+                        if let Some(peer) = self.peers.get_mut(&peer_hash) {
+                            peer.handle_link_established(link_id, 0.0);
+                        }
+                    }
+                    Err(_) => {
+                        if let Some(peer) = self.peers.get_mut(&peer_hash) {
+                            peer.apply_backoff();
+                        }
+                    }
+                }
+            } else {
+                let _ = node.request_path(&DestHash(peer_hash));
+            }
+        }
+    }
+
+    fn process_peer_syncs_with_transport<T: PeerSyncTransport + ?Sized>(&mut self, transport: &T) {
+        self.process_peer_distribution_queue();
+
+        let now = now_timestamp();
+        let peer_hashes: Vec<[u8; 16]> = self.peers.keys().copied().collect();
+        for peer_hash in peer_hashes {
+            let should_sync = match self.peers.get(&peer_hash) {
+                Some(peer) => {
+                    peer.state == PeerState::LinkReady
+                        && !peer.unhandled_ids.is_empty()
+                        && peer.next_sync_attempt <= now
+                }
+                None => false,
+            };
+
+            if should_sync {
+                let _ = self.send_peer_sync_offer_with_transport(peer_hash, transport);
+            }
+        }
+    }
+
     /// Trigger sync with a specific peer by resetting its next sync attempt to now.
     pub fn sync_peer(&mut self, dest_hash: &[u8; 16]) -> Result<(), PeerError> {
         let peer = self.peers.get_mut(dest_hash).ok_or(PeerError::NotFound)?;
@@ -1007,6 +1336,18 @@ impl LxmRouter {
 
 /// Ask the RNS node to retain announce data for a destination that was
 /// actually used for successful LXMF delivery.
+fn peer_offer_weight(entry: &PropagationEntry, now: f64, prioritised_list: &[[u8; 16]]) -> f64 {
+    let age_days = (now - entry.received) / 60.0 / 60.0 / 24.0 / 4.0;
+    let age_weight = if age_days > 1.0 { age_days } else { 1.0 };
+    let priority_weight = if prioritised_list.contains(&entry.destination_hash) {
+        0.1
+    } else {
+        1.0
+    };
+
+    priority_weight * age_weight * entry.size as f64
+}
+
 fn retain_destination_data(node: &RnsNode, dest_hash: [u8; 16]) {
     if let Err(err) = node.retain_known_destination(&DestHash(dest_hash)) {
         log::warn!("Failed to retain destination announce data: {:?}", err);
@@ -1331,6 +1672,8 @@ impl Callbacks for LxmfCallbacks {
             let is_propagation_link = router.outbound_propagation_node == Some(dest_hash.0);
             if is_propagation_link {
                 router.propagation_link = Some(link_id.0);
+            } else if let Some(peer) = router.peers.get_mut(&dest_hash.0) {
+                peer.handle_link_established(link_id.0, _rtt);
             } else {
                 router.direct_links.insert(dest_hash.0, link_id.0);
             }
@@ -1373,6 +1716,14 @@ impl Callbacks for LxmfCallbacks {
             router.propagation_link = None;
         }
 
+        router.peer_sync_response_links.remove(&link_id.0);
+        router.peer_sync_transfer_sizes.remove(&link_id.0);
+        for peer in router.peers.values_mut() {
+            if peer.link_id == Some(link_id.0) {
+                peer.handle_link_closed();
+            }
+        }
+
         // Reset any outbound messages waiting on this link
         for msg in &mut router.outbound {
             if msg.link_id == Some(link_id.0) && msg.state == MessageState::Sending {
@@ -1406,6 +1757,35 @@ impl Callbacks for LxmfCallbacks {
     fn on_resource_completed(&mut self, link_id: LinkId) {
         let mut router = self.router.lock().unwrap();
 
+        let peer_hash = router
+            .peers
+            .iter()
+            .find_map(|(hash, peer)| (peer.link_id == Some(link_id.0)).then_some(*hash));
+        if let Some(peer_hash) = peer_hash {
+            let transfer_size = router
+                .peer_sync_transfer_sizes
+                .remove(&link_id.0)
+                .unwrap_or_default();
+            let mut should_continue = false;
+            if let Some(peer) = router.peers.get_mut(&peer_hash) {
+                peer.handle_resource_completed(transfer_size);
+                should_continue = peer.should_continue_sync();
+                if should_continue {
+                    peer.state = PeerState::LinkReady;
+                    peer.next_sync_attempt = 0.0;
+                }
+            }
+            router.mark_store_handled_for_peer(peer_hash);
+            if let Some(node) = router.node.clone() {
+                if should_continue {
+                    let _ = router.send_peer_sync_offer_with_transport(peer_hash, node.as_ref());
+                } else {
+                    let _ = node.teardown_link(link_id.0);
+                }
+            }
+            return;
+        }
+
         // Mark outbound messages as delivered
         let mut retained_dest_hash = None;
         for msg in &mut router.outbound {
@@ -1430,6 +1810,16 @@ impl Callbacks for LxmfCallbacks {
     fn on_resource_failed(&mut self, link_id: LinkId, _error: String) {
         let mut router = self.router.lock().unwrap();
 
+        router.peer_sync_transfer_sizes.remove(&link_id.0);
+        if let Some(peer) = router
+            .peers
+            .values_mut()
+            .find(|peer| peer.link_id == Some(link_id.0))
+        {
+            peer.handle_resource_failed();
+            return;
+        }
+
         for msg in &mut router.outbound {
             if msg.link_id == Some(link_id.0) && msg.state == MessageState::Sending {
                 msg.state = MessageState::Outbound;
@@ -1439,8 +1829,12 @@ impl Callbacks for LxmfCallbacks {
         }
     }
 
-    fn on_response(&mut self, _link_id: LinkId, _request_id: [u8; 16], _data: Vec<u8>) {
-        // Response handling for propagation requests is done in peer module
+    fn on_response(&mut self, link_id: LinkId, _request_id: [u8; 16], data: Vec<u8>) {
+        let mut router = self.router.lock().unwrap();
+        let Some(node) = router.node.clone() else {
+            return;
+        };
+        let _ = router.handle_peer_offer_response_with_transport(link_id.0, &data, node.as_ref());
     }
 
     fn on_proof(&mut self, _dest_hash: DestHash, packet_hash: PacketHash, _rtt: f64) {
