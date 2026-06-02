@@ -8,17 +8,17 @@ The current upstream reference baseline is:
 - Repository: `git@github.com:markqvist/LXMF.git`
 - Local checkout used: `~/LXMF`
 - Branch: `origin/master`
-- Commit: `5be161cb1e50e99925f20852324dc3c82a3c0cd1`
-- Describe: `0.9.8-17-g5be161c`
-- Commit date: `2026-05-28T08:44:22-04:00`
-- Subject: `Prevent message write race among different processes touching the same message`
+- Commit: `fab12ad9bf9f997797034950f289fe41a79dcf5a`
+- Describe: `1.0.1-1-gfab12ad`
+- Commit date: `2026-06-01T14:26:47+02:00`
+- Subject: `Updated build scripts`
 
-The previous baseline was `8499729024a4cddfceb47ca07188bb5b1d11d179`
+The previous major review baseline was `8499729024a4cddfceb47ca07188bb5b1d11d179`
 (`0.9.6`). The upstream range
-`8499729024a4cddfceb47ca07188bb5b1d11d179..5be161cb1e50e99925f20852324dc3c82a3c0cd1`
-contains 30 commits and has been reviewed. Applicable behavior has been ported,
-and non-applicable Python packaging, Makefile, and upstream README changes have
-been explicitly closed out. The first `0.9.6..0.9.8` segment was reviewed and
+`8499729024a4cddfceb47ca07188bb5b1d11d179..fab12ad9bf9f997797034950f289fe41a79dcf5a`
+contains 35 commits and has been reviewed. Applicable behavior has been ported,
+and non-applicable Python packaging, Makefile, build-script, and upstream README
+changes have been explicitly closed out. The first `0.9.6..0.9.8` segment was reviewed and
 ported with the following local commits:
 
 - `1a6b87c` Track LXMF upstream 727830c
@@ -64,6 +64,13 @@ were reviewed as follows:
   no direct Rust `LXMessage.write_to_directory` persistence API at this point.
 - `312e0a8`, `044f3d2`, and `bf924c7`: Python version/dependency metadata and
   comment cleanup; no direct Rust-port action.
+- `11b2480`, `c877efa`, and `a29c4a0`: Python package/version metadata only; no
+  direct Rust crate version change.
+- `2086413`: ported in this pass by identifying propagation sync retry links
+  with the router identity after `ERROR_NO_IDENTITY`, then retrying the offer.
+  Covered by `peer_sync_no_identity_identifies_with_router_identity_and_retries_offer`
+  in `lxmf/tests/router_tests.rs`.
+- `fab12ad`: Python build-script upload metadata; no Rust-port action.
 
 The constants port is covered by
 `test_message_field_constants_match_upstream` and
@@ -71,8 +78,9 @@ The constants port is covered by
 `lxmf-core/tests/interop.rs`.
 
 The post-`b53a3ce` behavior ports are covered by
-`delivery_announce_data_signals_compression_support` in `lxmf/src/router.rs`
-and `blackholed_source_is_dropped_before_delivery_callback` in
+`delivery_announce_data_signals_compression_support` in `lxmf/src/router.rs`,
+`blackholed_source_is_dropped_before_delivery_callback`, and
+`peer_sync_no_identity_identifies_with_router_identity_and_retries_offer` in
 `lxmf/tests/router_tests.rs`.
 
 ## RNS Dependency Baseline
@@ -92,7 +100,7 @@ The corresponding `rns-rs` integration baseline is:
 When updating RNS integration, publish the required `rns-rs` crates, update the
 exact versions in `Cargo.toml`, and record the release commit here.
 
-The current upstream Python LXMF post-`0.9.8` head requires `rns>=1.3.2`. The
+The current upstream Python LXMF post-`1.0.1` head requires `rns>=1.3.2`. The
 Rust dependency baseline above uses the corresponding latest published `rns-rs`
 crates; treat Python RNS dependency bumps as dependency-parity review input,
 not as direct Cargo version edits.

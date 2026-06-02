@@ -1,5 +1,5 @@
 // LXMF Protocol Constants
-// Ported from Python LXMF v0.9.4
+// Tracked against the Python LXMF upstream baseline in UPSTREAM.md
 
 // ============================================================
 // Application
