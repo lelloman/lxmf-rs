@@ -9,7 +9,7 @@ A Rust implementation of LXMF (LoRa eXtended Messaging Format) for delay-toleran
 
 ## Overview
 
-LXMF is a messaging protocol built on [Reticulum](https://reticulum.network), designed for reliable communication over extremely constrained networks. It enables store-and-forward messaging, automatic retries, and proof-of-work stamping for spam prevention. This is a Rust port of the Python LXMF v0.9.4 implementation, maintaining full wire compatibility with the Python version.
+LXMF is a messaging protocol built on [Reticulum](https://reticulum.network), designed for reliable communication over extremely constrained networks. It enables store-and-forward messaging, automatic retries, and proof-of-work stamping for spam prevention. This is a Rust port of Python LXMF, tracked against the upstream baseline recorded in [UPSTREAM.md](./UPSTREAM.md), maintaining full wire compatibility with the Python version.
 
 This implementation is built on top of [rns-rs](https://github.com/lelloman/rns-rs), the Rust implementation of Reticulum, providing a robust foundation for delay-tolerant networking. LXMF-rs is particularly well-suited for embedded systems, Android applications, and any scenario where Rust's performance and `no_std` support are advantageous.
 
@@ -204,7 +204,7 @@ cargo run -p lxmf-server -- start
 
 - **Version**: 0.1.7
 - **Tests**: 158 passing
-- **Compatibility**: Wire-compatible with Python LXMF v0.9.4
+- **Compatibility**: Wire-compatible with the tracked Python LXMF upstream baseline in [UPSTREAM.md](./UPSTREAM.md)
 - **Repository**: [https://github.com/lelloman/lxmf-rs](https://github.com/lelloman/lxmf-rs)
 
 ## Contributing

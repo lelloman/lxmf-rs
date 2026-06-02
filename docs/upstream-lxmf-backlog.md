@@ -6,19 +6,19 @@ closed out.
 
 ## Current State
 
-- Last checked: 2026-05-29
+- Last checked: 2026-06-02
 - Upstream checkout: `/home/lelloman/LXMF`
 - Upstream remote: `git@github.com:markqvist/LXMF.git`
 - Upstream branch: `origin/master`
-- Current upstream head: `5be161cb1e50e99925f20852324dc3c82a3c0cd1`
+- Current upstream head: `fab12ad9bf9f997797034950f289fe41a79dcf5a`
 - Last reviewed Rust-port upstream point:
-  `5be161cb1e50e99925f20852324dc3c82a3c0cd1`
+  `fab12ad9bf9f997797034950f289fe41a79dcf5a`
 - Rust branch at latest review: `dev`
 - Rust head at latest review:
   `4a6dc6f954b5d58d45fe89860d22cda815980cda`
 
-The local upstream worktree branch `master` was fast-forwarded to
-`origin/master` during the 2026-05-29 review pass.
+The local upstream worktree branch `master` was checked at `origin/master`
+during the 2026-06-02 review pass.
 
 ## Open Upstream Commits
 
@@ -26,7 +26,9 @@ None. The upstream range
 `8499729024a4cddfceb47ca07188bb5b1d11d179..b53a3ce37dc8b385dd04005f6dfca314ed8c9ed5`
 contains 22 commits; the follow-up range
 `b53a3ce37dc8b385dd04005f6dfca314ed8c9ed5..5be161cb1e50e99925f20852324dc3c82a3c0cd1`
-contains 8 commits. Every commit in the combined 30-commit range is now either
+contains 8 commits; the final range
+`5be161cb1e50e99925f20852324dc3c82a3c0cd1..fab12ad9bf9f997797034950f289fe41a79dcf5a`
+contains 5 commits. Every commit in the combined 35-commit range is now either
 ported, covered by tests, or explicitly closed as non-applicable to the Rust
 port.
 
@@ -55,6 +57,9 @@ ported, tracked as no-op metadata, or judged Python/tooling-specific in the
 | `575fb7d`, `5be161c` | Python `LXMessage.write_to_directory` write-race fixes. Rust propagation-store atomic writes are already ported and covered; no direct Rust message-container persistence API exists. |
 | `312e0a8`, `044f3d2` | Python LXMF/RNS dependency metadata; no direct Cargo change, retained as dependency-parity context. |
 | `bf924c7` | Python comment/format cleanup with no protocol constant value changes; no Rust-port action. |
+| `11b2480`, `c877efa`, `a29c4a0` | Python package/version metadata only; no Rust crate version change. |
+| `2086413` | Ported in this pass: propagation sync retry after `ERROR_NO_IDENTITY` identifies with the router identity and retries the offer; covered by `peer_sync_no_identity_identifies_with_router_identity_and_retries_offer`. |
+| `fab12ad` | Python Makefile/setup.py build-script upload metadata; no Rust-port action. |
 
 ## Refresh Procedure
 
@@ -63,7 +68,7 @@ From the upstream checkout:
 ```bash
 cd ~/LXMF
 git fetch origin --prune
-git log --oneline --reverse 5be161cb1e50e99925f20852324dc3c82a3c0cd1..origin/master
+git log --oneline --reverse fab12ad9bf9f997797034950f289fe41a79dcf5a..origin/master
 ```
 
 For each new commit:
