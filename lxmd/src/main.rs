@@ -1475,6 +1475,7 @@ fn main() {
                 &config,
                 lxmf_rs::router::now_timestamp(),
             );
+            router_guard.announce_control_destination();
             if config.pn_announce_at_start {
                 router_guard.announce_propagation_node();
             }
