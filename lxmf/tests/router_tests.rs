@@ -94,14 +94,45 @@ fn pack_delivery_message(
 }
 
 fn pn_announce(dest_hash: [u8; DESTINATION_LENGTH], valid: bool) -> AnnouncedIdentity {
+    pn_announce_full(dest_hash, valid, true, 1, 1_700_000_000, 18)
+}
+
+fn pn_announce_with(
+    dest_hash: [u8; DESTINATION_LENGTH],
+    valid: bool,
+    propagation_enabled: bool,
+    hops: u8,
+) -> AnnouncedIdentity {
+    pn_announce_full(
+        dest_hash,
+        valid,
+        propagation_enabled,
+        hops,
+        1_700_000_000,
+        18,
+    )
+}
+
+fn pn_announce_full(
+    dest_hash: [u8; DESTINATION_LENGTH],
+    valid: bool,
+    propagation_enabled: bool,
+    hops: u8,
+    node_timebase: u64,
+    peering_cost: u8,
+) -> AnnouncedIdentity {
     let app_data = if valid {
         pack(&Value::Array(vec![
             Value::Bin(b"TestPN".to_vec()),
-            Value::UInt(1_700_000_000),
-            Value::Bool(true),
+            Value::UInt(node_timebase),
+            Value::Bool(propagation_enabled),
             Value::UInt(256),
             Value::UInt(10_240),
-            Value::Array(vec![Value::UInt(16), Value::UInt(3), Value::UInt(18)]),
+            Value::Array(vec![
+                Value::UInt(16),
+                Value::UInt(3),
+                Value::UInt(peering_cost as u64),
+            ]),
             Value::Map(vec![]),
         ]))
     } else {
@@ -113,7 +144,7 @@ fn pn_announce(dest_hash: [u8; DESTINATION_LENGTH], valid: bool) -> AnnouncedIde
         identity_hash: IdentityHash([0x12; 16]),
         public_key: [0x34; 64],
         app_data: Some(app_data),
-        hops: 1,
+        hops,
         received_at: 1_700_000_000.0,
         receiving_interface: InterfaceId(1),
         rssi: None,
@@ -227,6 +258,192 @@ fn propagation_node_announce_ignores_unrelated_or_invalid_announces() {
 
     let router_guard = router.lock().unwrap();
     assert_eq!(router_guard.outbound[0].last_attempt, 123_456.0);
+    drop(router_guard);
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn propagation_node_announce_does_not_autopeer_when_not_propagation_node() {
+    let (router, dir) = test_router("pn_announce_not_pn");
+    let peer_hash = [0x46; DESTINATION_LENGTH];
+
+    let router = Arc::new(Mutex::new(router));
+    let mut callbacks = LxmfCallbacks::new(router.clone());
+    callbacks.on_announce(pn_announce(peer_hash, true));
+
+    let router_guard = router.lock().unwrap();
+    assert!(!router_guard.peers.contains_key(&peer_hash));
+    drop(router_guard);
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn propagation_node_announce_records_autopeer() {
+    let (mut router, dir) = test_router("pn_announce_records_peer");
+    let peer_hash = [0x43; DESTINATION_LENGTH];
+    router.enable_propagation();
+
+    let router = Arc::new(Mutex::new(router));
+    let mut callbacks = LxmfCallbacks::new(router.clone());
+    callbacks.on_announce(pn_announce(peer_hash, true));
+
+    let router_guard = router.lock().unwrap();
+    let peer = router_guard
+        .peers
+        .get(&peer_hash)
+        .expect("propagation announce should create peer");
+    assert!(peer.alive);
+    assert_eq!(peer.propagation_transfer_limit, Some(256.0));
+    assert_eq!(peer.propagation_sync_limit, Some(10_240));
+    assert_eq!(peer.propagation_stamp_cost, Some(16));
+    assert_eq!(peer.propagation_stamp_cost_flexibility, Some(3));
+    assert_eq!(peer.peering_cost, Some(18));
+    drop(router_guard);
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn propagation_node_announce_unpeers_existing_autopeer_out_of_range() {
+    let (mut router, dir) = test_router("pn_announce_unpeers_out_of_range");
+    let peer_hash = [0x44; DESTINATION_LENGTH];
+    router.enable_propagation();
+    router
+        .peers
+        .insert(peer_hash, lxmf_rs::peer::LxmPeer::new(peer_hash));
+
+    let router = Arc::new(Mutex::new(router));
+    let mut callbacks = LxmfCallbacks::new(router.clone());
+    callbacks.on_announce(pn_announce_with(peer_hash, true, true, 5));
+
+    let router_guard = router.lock().unwrap();
+    assert!(!router_guard.peers.contains_key(&peer_hash));
+    drop(router_guard);
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn propagation_node_announce_unpeers_existing_autopeer_when_disabled() {
+    let (mut router, dir) = test_router("pn_announce_unpeers_disabled");
+    let peer_hash = [0x45; DESTINATION_LENGTH];
+    router.enable_propagation();
+    router
+        .peers
+        .insert(peer_hash, lxmf_rs::peer::LxmPeer::new(peer_hash));
+
+    let router = Arc::new(Mutex::new(router));
+    let mut callbacks = LxmfCallbacks::new(router.clone());
+    callbacks.on_announce(pn_announce_with(peer_hash, true, false, 1));
+
+    let router_guard = router.lock().unwrap();
+    assert!(!router_guard.peers.contains_key(&peer_hash));
+    drop(router_guard);
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn propagation_node_announce_ignores_peer_above_max_peering_cost() {
+    let (mut router, dir) = test_router("pn_announce_high_cost");
+    let peer_hash = [0x47; DESTINATION_LENGTH];
+    router.config.max_peering_cost = 10;
+    router.enable_propagation();
+
+    let router = Arc::new(Mutex::new(router));
+    let mut callbacks = LxmfCallbacks::new(router.clone());
+    callbacks.on_announce(pn_announce_full(
+        peer_hash,
+        true,
+        true,
+        1,
+        1_700_000_000,
+        18,
+    ));
+
+    let router_guard = router.lock().unwrap();
+    assert!(!router_guard.peers.contains_key(&peer_hash));
+    drop(router_guard);
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn propagation_node_announce_unpeers_existing_peer_above_max_peering_cost() {
+    let (mut router, dir) = test_router("pn_announce_high_cost_existing");
+    let peer_hash = [0x48; DESTINATION_LENGTH];
+    router.config.max_peering_cost = 10;
+    router.enable_propagation();
+    router
+        .peers
+        .insert(peer_hash, lxmf_rs::peer::LxmPeer::new(peer_hash));
+
+    let router = Arc::new(Mutex::new(router));
+    let mut callbacks = LxmfCallbacks::new(router.clone());
+    callbacks.on_announce(pn_announce_full(
+        peer_hash,
+        true,
+        true,
+        1,
+        1_700_000_000,
+        18,
+    ));
+
+    let router_guard = router.lock().unwrap();
+    assert!(!router_guard.peers.contains_key(&peer_hash));
+    drop(router_guard);
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn propagation_node_announce_ignores_new_peer_when_max_peers_reached() {
+    let (mut router, dir) = test_router("pn_announce_max_peers");
+    let peer_hash = [0x49; DESTINATION_LENGTH];
+    router.config.max_peers = 0;
+    router.enable_propagation();
+
+    let router = Arc::new(Mutex::new(router));
+    let mut callbacks = LxmfCallbacks::new(router.clone());
+    callbacks.on_announce(pn_announce(peer_hash, true));
+
+    let router_guard = router.lock().unwrap();
+    assert!(!router_guard.peers.contains_key(&peer_hash));
+    drop(router_guard);
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn propagation_node_announce_ignores_stale_peer_update_and_unpeer() {
+    let (mut router, dir) = test_router("pn_announce_stale_peer");
+    let peer_hash = [0x4A; DESTINATION_LENGTH];
+    router.enable_propagation();
+    let mut peer = lxmf_rs::peer::LxmPeer::new(peer_hash);
+    peer.peering_timebase = 2_000_000_000.0;
+    peer.peering_cost = Some(7);
+    router.peers.insert(peer_hash, peer);
+
+    let router = Arc::new(Mutex::new(router));
+    let mut callbacks = LxmfCallbacks::new(router.clone());
+    callbacks.on_announce(pn_announce_full(
+        peer_hash,
+        true,
+        true,
+        1,
+        1_700_000_000,
+        18,
+    ));
+    callbacks.on_announce(pn_announce_full(
+        peer_hash,
+        true,
+        false,
+        1,
+        1_700_000_000,
+        18,
+    ));
+
+    let router_guard = router.lock().unwrap();
+    let peer = router_guard
+        .peers
+        .get(&peer_hash)
+        .expect("stale announce should not remove peer");
+    assert_eq!(peer.peering_timebase, 2_000_000_000.0);
+    assert_eq!(peer.peering_cost, Some(7));
     drop(router_guard);
     let _ = fs::remove_dir_all(dir);
 }

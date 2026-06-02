@@ -15,6 +15,9 @@ use rns_net::driver::Callbacks;
 use rns_net::event::{QueryRequest, QueryResponse};
 use rns_net::node::RnsNode;
 
+use crate::handlers::{
+    decide_propagation_action, parse_propagation_announce, PropagationAnnounceResult,
+};
 use crate::peer::LxmPeer;
 use crate::storage::{self, StoragePaths};
 
@@ -448,6 +451,12 @@ impl LxmRouter {
             let control_hash =
                 compute_dest_hash(APP_NAME, &["propagation", "control"], self.identity.hash());
             self.control_dest_hash = Some(control_hash);
+            let _ = node.register_link_destination(
+                control_hash,
+                sig_prv[32..].try_into().unwrap(),
+                sig_pub[32..].try_into().unwrap(),
+                1, // AcceptAll
+            );
             let _ = node.register_destination(control_hash, 1);
         }
     }
@@ -472,6 +481,7 @@ impl LxmRouter {
 
             // Deregister control destination
             if let Some(control_hash) = self.control_dest_hash.take() {
+                let _ = node.deregister_link_destination(control_hash);
                 let _ = node.deregister_destination(control_hash);
             }
 
@@ -510,6 +520,18 @@ impl LxmRouter {
                 IdentityHash(*self.identity.hash()),
             );
             let _ = node.announce(&dest, &self.identity, Some(&app_data));
+        }
+    }
+
+    /// Announce the propagation control destination.
+    pub fn announce_control_destination(&self) {
+        if let Some(node) = &self.node {
+            let dest = Destination::single_in(
+                APP_NAME,
+                &["propagation", "control"],
+                IdentityHash(*self.identity.hash()),
+            );
+            let _ = node.announce(&dest, &self.identity, None);
         }
     }
 
@@ -1104,6 +1126,103 @@ impl Callbacks for LxmfCallbacks {
         // immediately actionable when they are from our configured outbound PN.
         if let Some(ref app_data) = announced.app_data {
             if announce::pn_announce_data_is_valid(app_data) {
+                if router.propagation_node && announced.dest_hash.0 != router.propagation_dest_hash
+                {
+                    if let Some(info) =
+                        parse_propagation_announce(announced.dest_hash.0, Some(app_data))
+                    {
+                        let is_static_peer =
+                            router.config.static_peers.contains(&announced.dest_hash.0);
+                        let is_existing_peer = router.peers.contains_key(&announced.dest_hash.0);
+                        let last_heard = router
+                            .peers
+                            .get(&announced.dest_hash.0)
+                            .map(|peer| peer.last_heard)
+                            .unwrap_or(0.0);
+
+                        match decide_propagation_action(
+                            &info,
+                            false,
+                            is_static_peer,
+                            is_existing_peer,
+                            last_heard,
+                            router.config.autopeer,
+                            Some(announced.hops),
+                            router.config.autopeer_maxdepth,
+                        ) {
+                            PropagationAnnounceResult::Peer(info) => {
+                                let announced_timebase = info.node_timebase as f64;
+                                let sync_strategy = router.config.sync_strategy;
+
+                                if info.peering_cost > router.config.max_peering_cost {
+                                    if router
+                                        .peers
+                                        .get(&info.destination_hash)
+                                        .map_or(false, |peer| {
+                                            announced_timebase >= peer.peering_timebase
+                                        })
+                                    {
+                                        router.peers.remove(&info.destination_hash);
+                                        router.save_peers();
+                                    }
+                                } else if let Some(peer) =
+                                    router.peers.get_mut(&info.destination_hash)
+                                {
+                                    if announced_timebase > peer.peering_timebase {
+                                        peer.alive = true;
+                                        peer.last_heard = now_timestamp();
+                                        peer.sync_strategy = sync_strategy;
+                                        peer.peering_timebase = announced_timebase;
+                                        peer.next_sync_attempt = 0.0;
+                                        peer.sync_backoff = 0.0;
+                                        peer.propagation_transfer_limit =
+                                            Some(info.propagation_transfer_limit as f64);
+                                        peer.propagation_sync_limit =
+                                            Some(info.propagation_sync_limit);
+                                        peer.propagation_stamp_cost =
+                                            Some(info.propagation_stamp_cost);
+                                        peer.propagation_stamp_cost_flexibility =
+                                            Some(info.propagation_stamp_cost_flexibility);
+                                        peer.peering_cost = Some(info.peering_cost);
+                                        peer.metadata = Some(info.metadata);
+                                        router.save_peers();
+                                    }
+                                } else if router.peers.len() < router.config.max_peers {
+                                    let mut peer = LxmPeer::new(info.destination_hash);
+                                    peer.alive = true;
+                                    peer.last_heard = now_timestamp();
+                                    peer.sync_strategy = sync_strategy;
+                                    peer.peering_timebase = announced_timebase;
+                                    peer.next_sync_attempt = 0.0;
+                                    peer.sync_backoff = 0.0;
+                                    peer.propagation_transfer_limit =
+                                        Some(info.propagation_transfer_limit as f64);
+                                    peer.propagation_sync_limit = Some(info.propagation_sync_limit);
+                                    peer.propagation_stamp_cost = Some(info.propagation_stamp_cost);
+                                    peer.propagation_stamp_cost_flexibility =
+                                        Some(info.propagation_stamp_cost_flexibility);
+                                    peer.peering_cost = Some(info.peering_cost);
+                                    peer.metadata = Some(info.metadata);
+                                    router.peers.insert(info.destination_hash, peer);
+                                    router.save_peers();
+                                }
+                            }
+                            PropagationAnnounceResult::Unpeer {
+                                destination_hash,
+                                node_timebase,
+                            } => {
+                                if router.peers.get(&destination_hash).map_or(false, |peer| {
+                                    node_timebase as f64 >= peer.peering_timebase
+                                }) {
+                                    router.peers.remove(&destination_hash);
+                                    router.save_peers();
+                                }
+                            }
+                            PropagationAnnounceResult::Ignore => {}
+                        }
+                    }
+                }
+
                 if router.outbound_propagation_node == Some(announced.dest_hash.0) {
                     for msg in &mut router.outbound {
                         if msg.method == DeliveryMethod::Propagated
