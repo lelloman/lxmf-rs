@@ -5,6 +5,7 @@ resolver = "2"
 [workspace.package]
 version = "0.1.7"
 edition = "2021"
+rust-version = "1.88"
 license-file = "LICENSE"
 repository = "https://github.com/lelloman/lxmf-rs"
 authors = ["lxmf-rs contributors"]
