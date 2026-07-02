@@ -11,15 +11,15 @@ A Rust implementation of LXMF (LoRa eXtended Messaging Format) for delay-toleran
 
 LXMF is a messaging protocol built on [Reticulum](https://reticulum.network), designed for reliable communication over extremely constrained networks. It enables store-and-forward messaging, automatic retries, and proof-of-work stamping for spam prevention. This is a Rust port of Python LXMF, tracked against the upstream baseline recorded in [UPSTREAM.md](./UPSTREAM.md), maintaining full wire compatibility with the Python version.
 
-This implementation is built on top of [rns-rs](https://github.com/lelloman/rns-rs), the Rust implementation of Reticulum, providing a robust foundation for delay-tolerant networking. LXMF-rs is particularly well-suited for embedded systems, Android applications, and any scenario where Rust's performance and `no_std` support are advantageous.
+This implementation is built on top of [rns-rs](https://github.com/lelloman/rns-rs), the Rust implementation of Reticulum, providing a robust foundation for delay-tolerant networking. LXMF-rs is particularly well-suited for Android applications and constrained networking scenarios where Rust's performance and memory safety are useful.
 
-The project is organized as a Cargo workspace with four crates: `lxmf-core` (lightweight, `no_std` compatible), `lxmf` (full-featured message router), `lxmd` (propagation daemon with configurable logging), and `lxmf-server` (daemon supervisor and HTTP control server). All 158 tests pass, and the implementation is ready for crates.io publication.
+The project is organized as a Cargo workspace with four crates: `lxmf-core` (lightweight core types and wire formats), `lxmf` (full-featured message router), `lxmd` (propagation daemon with configurable logging), and `lxmf-server` (daemon supervisor and HTTP control server). All 158 tests pass, and the implementation is ready for crates.io publication.
 
 ## Workspace Crates
 
-| Crate | Description | no_std |
-|-------|-------------|--------|
-| **lxmf-core** | Core message format, constants, and stamp validation | Yes |
+| Crate | Description | no_std status |
+|-------|-------------|---------------|
+| **lxmf-core** | Core message format, constants, and stamp validation | Blocked pending upstream `rns-*` no_std fixes |
 | **lxmf** | Full message router with delivery engine | No |
 | **lxmd** | Propagation daemon with configurable logging | No |
 | **lxmf-server** | Supervises `lxmd` and exposes an HTTP control server | No |
@@ -77,55 +77,9 @@ fn main() {
 }
 ```
 
-## Embedded / no_std Usage
+## Embedded Status
 
-The `lxmf-core` crate supports `no_std` environments for embedded systems. To use without the standard library:
-
-```toml
-[dependencies]
-# Core only - no std, no alloc
-lxmf-core = { version = "0.1", default-features = false }
-
-# Or with alloc support (requires defining a global allocator)
-lxmf-core = { version = "0.1", default-features = false, features = ["alloc"] }
-```
-
-### With `alloc` (requires global allocator)
-
-```rust
-#[global_allocator]
-static ALLOCATOR: cortex_m_rt::Heap = cortex_m_rt::Heap::empty();
-
-use lxmf_core::{constants::*, message, stamp};
-
-fn pack_message() {
-    // Pack/unpack messages
-    let packed = message::pack(
-        &dest_hash,
-        &src_hash,
-        timestamp,
-        b"Hello",
-        b"World",
-        alloc::vec::[],  // Use alloc::vec![] with feature
-        None,
-        |data| Ok([0u8; 64]), // Your signing implementation
-    ).unwrap();
-
-    // Validate stamps
-    let workblock = stamp::stamp_workblock(&message_hash, 3000);
-    let is_valid = stamp::stamp_valid(&stamp, 16, &workblock);
-}
-```
-
-### Core-only (no alloc)
-
-Without the `alloc` feature, you get:
-- All constants from `constants` module
-- Message enums (`MessageState`, `DeliveryMethod`, etc.)
-- Stamp validation functions that take slices
-- Hash and field parsing utilities
-
-This is useful when you want to implement your own memory management.
+`lxmf-core` keeps the core LXMF wire-format code separated from router and daemon code, but `no_std` builds are not currently supported. The current upstream `rns-core` and `rns-crypto` crates fail under `cargo check -p lxmf-core --no-default-features`, so embedded `no_std` support is blocked until those dependencies compile cleanly without `std`.
 
 ## Key Features
 
@@ -143,7 +97,7 @@ This is useful when you want to implement your own memory management.
 - **Message Prioritization**: Weighted culling and priority destination support
 
 ### Platform
-- **no_std Support**: `lxmf-core` works in embedded environments
+- **Embedded Status**: `lxmf-core` keeps core LXMF wire-format code separate; no_std builds are blocked pending upstream `rns-*` fixes
 - **Swappable Logger**: Use `env_logger`, Android logcat, or your own logger
 - **Cross-Platform**: Linux, Android, Windows, macOS support
 

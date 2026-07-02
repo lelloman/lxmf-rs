@@ -1,6 +1,6 @@
 [package]
 name = "lxmf-core"
-description = "Core LXMF message format, constants, and stamp validation (no_std)"
+description = "Core LXMF message format, constants, and stamp validation"
 version.workspace = true
 edition.workspace = true
 license-file.workspace = true
