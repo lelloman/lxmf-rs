@@ -1,5 +1,5 @@
 use lxmf_core::constants::*;
-use lxmf_rs::peer::{LxmPeer, SyncAction, SyncPostponeReason};
+use lxmf_rs::peer::{LxmPeer, OfferEntry, SyncAction, SyncPostponeReason};
 use rns_core::msgpack::{pack, unpack_exact, Value};
 
 // Simple base64 decoder
@@ -201,6 +201,102 @@ fn test_peer_offer_format() {
     for (tid, expected) in tids.iter().zip(expected_tids.iter()) {
         assert_eq!(tid.as_bin().unwrap(), &expected[..]);
     }
+}
+
+fn offer_ids(peer: &mut LxmPeer, entries: &[OfferEntry]) -> Vec<[u8; 32]> {
+    let packed = peer.build_offer(entries).expect("offer should be built");
+    let value = unpack_exact(&packed).expect("offer should be valid msgpack");
+    value.as_array().unwrap()[1]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| {
+            value
+                .as_bin()
+                .unwrap()
+                .try_into()
+                .expect("transient IDs are 32 bytes")
+        })
+        .collect()
+}
+
+fn offer_peer(target: u8, flexibility: u8) -> LxmPeer {
+    let mut peer = LxmPeer::new([0xA5; 16]);
+    peer.peering_key = Some((vec![0x5A; 32], 18));
+    peer.propagation_stamp_cost = Some(target);
+    peer.propagation_stamp_cost_flexibility = Some(flexibility);
+    peer.propagation_transfer_limit = Some(256.0);
+    peer.propagation_sync_limit = Some(10_240);
+    peer
+}
+
+#[test]
+fn peer_offer_enforces_target_minus_flexibility_stamp_floor() {
+    let mut peer = offer_peer(16, 3);
+    let entries = [
+        OfferEntry {
+            transient_id: [0x0C; 32],
+            weight: 1.0,
+            size: 128,
+            stamp_value: 12,
+        },
+        OfferEntry {
+            transient_id: [0x0D; 32],
+            weight: 2.0,
+            size: 128,
+            stamp_value: 13,
+        },
+        OfferEntry {
+            transient_id: [0x10; 32],
+            weight: 3.0,
+            size: 128,
+            stamp_value: 16,
+        },
+    ];
+
+    assert_eq!(offer_ids(&mut peer, &entries), vec![[0x0D; 32], [0x10; 32]]);
+}
+
+#[test]
+fn peer_offer_stamp_floor_saturates_at_zero() {
+    let mut peer = offer_peer(2, 3);
+    let entries = [
+        OfferEntry {
+            transient_id: [0x00; 32],
+            weight: 1.0,
+            size: 128,
+            stamp_value: 0,
+        },
+        OfferEntry {
+            transient_id: [0x01; 32],
+            weight: 2.0,
+            size: 128,
+            stamp_value: 1,
+        },
+    ];
+
+    assert_eq!(offer_ids(&mut peer, &entries), vec![[0x00; 32], [0x01; 32]]);
+}
+
+#[test]
+fn peer_offer_without_flexibility_requires_full_target_cost() {
+    let mut peer = offer_peer(9, 0);
+    let entries = [
+        OfferEntry {
+            transient_id: [0x08; 32],
+            weight: 1.0,
+            size: 128,
+            stamp_value: 8,
+        },
+        OfferEntry {
+            transient_id: [0x09; 32],
+            weight: 2.0,
+            size: 128,
+            stamp_value: 9,
+        },
+    ];
+
+    assert_eq!(offer_ids(&mut peer, &entries), vec![[0x09; 32]]);
 }
 
 #[test]
