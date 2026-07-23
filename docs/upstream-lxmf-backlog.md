@@ -6,31 +6,38 @@ closed out.
 
 ## Current State
 
-- Last checked: 2026-06-02
+- Last checked: 2026-07-23
 - Upstream checkout: `/home/lelloman/LXMF`
 - Upstream remote: `git@github.com:markqvist/LXMF.git`
 - Upstream branch: `origin/master`
-- Current upstream head: `fab12ad9bf9f997797034950f289fe41a79dcf5a`
+- Current upstream head: `795fdaa2b0777c13033787d933d1afc94a2377cb`
 - Last reviewed Rust-port upstream point:
   `fab12ad9bf9f997797034950f289fe41a79dcf5a`
 - Rust branch at latest review: `dev`
 - Rust head at latest review:
   `4a6dc6f954b5d58d45fe89860d22cda815980cda`
 
-The local upstream worktree branch `master` was checked at `origin/master`
-during the 2026-06-02 review pass.
+The local upstream worktree branch `master` remains at the last reviewed
+baseline. The remote `origin/master` was checked at `795fdaa` during the
+2026-07-23 review pass.
 
 ## Open Upstream Commits
 
-None. The upstream range
-`8499729024a4cddfceb47ca07188bb5b1d11d179..b53a3ce37dc8b385dd04005f6dfca314ed8c9ed5`
-contains 22 commits; the follow-up range
-`b53a3ce37dc8b385dd04005f6dfca314ed8c9ed5..5be161cb1e50e99925f20852324dc3c82a3c0cd1`
-contains 8 commits; the final range
-`5be161cb1e50e99925f20852324dc3c82a3c0cd1..fab12ad9bf9f997797034950f289fe41a79dcf5a`
-contains 5 commits. Every commit in the combined 35-commit range is now either
-ported, covered by tests, or explicitly closed as non-applicable to the Rust
-port.
+The following commits after `fab12ad` remain to be ported or explicitly closed:
+
+| Upstream commit | Subject |
+| --- | --- |
+| `8395793` | Ensure atomic writes |
+| `548be10` | Added transient ID processing locks |
+| `4a93697` | Fixed PN peer offer preparation minimum stamp cost |
+| `982c9fc` | Early sync completion for empty filtered offers |
+| `ca02fa5` | Added `lxmd` configuration and peer-name sanitization |
+| `241b29c` | Added bounded/sequential inbound PN sync processing |
+| `3e2cd36` | Updated version |
+| `5769d46` | Improved resource logging and safer delivery limit |
+| `d909619` | Added inbound resource tracking and cancellation |
+| `7bb4bcf` | Updated stamp-cost logging |
+| `795fdaa` | Updated versions |
 
 ## Recently Reviewed And Closed
 
@@ -60,6 +67,7 @@ ported, tracked as no-op metadata, or judged Python/tooling-specific in the
 | `11b2480`, `c877efa`, `a29c4a0` | Python package/version metadata only; no Rust crate version change. |
 | `2086413` | Ported in this pass: propagation sync retry after `ERROR_NO_IDENTITY` identifies with the router identity and retries the offer; covered by `peer_sync_no_identity_identifies_with_router_identity_and_retries_offer`. |
 | `fab12ad` | Python Makefile/setup.py build-script upload metadata; no Rust-port action. |
+| `fb0fd24` | Python LXMF version and Python RNS minimum dependency metadata. Rust has an independent crate version line; retain the RNS 1.3.8 floor as compatibility context for later resource API ports. |
 
 ## Refresh Procedure
 
