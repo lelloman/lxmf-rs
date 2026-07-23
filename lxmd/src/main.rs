@@ -13,6 +13,8 @@ use rns_core::types::{DestHash, LinkId, PacketHash};
 use rns_crypto::identity::Identity;
 use rns_net::driver::Callbacks;
 use rns_net::{Event, RnsNode};
+use unicode_general_category::{get_general_category, GeneralCategory};
+use unicode_normalization::UnicodeNormalization;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -145,6 +147,7 @@ pub struct LxmdConfig {
     pub display_name: String,
     pub announce_at_start: bool,
     pub announce_interval: Option<u64>,
+    pub peer_stamp_cost: u8,
     pub delivery_transfer_max_accepted_size: f64,
     pub on_inbound: Option<String>,
 
@@ -155,6 +158,9 @@ pub struct LxmdConfig {
     pub pn_announce_at_start: bool,
     pub autopeer: bool,
     pub autopeer_maxdepth: Option<u8>,
+    pub sequential_pn_stamp_validation: bool,
+    pub static_peers_bypass_sequential: bool,
+    pub max_inbound_syncs: usize,
     pub pn_announce_interval: Option<u64>,
     pub message_storage_limit: f64,
     pub propagation_transfer_max_accepted_size: f64,
@@ -180,6 +186,7 @@ impl Default for LxmdConfig {
             display_name: "Anonymous Peer".to_string(),
             announce_at_start: false,
             announce_interval: None,
+            peer_stamp_cost: 12,
             delivery_transfer_max_accepted_size: 1000.0,
             on_inbound: None,
 
@@ -189,6 +196,9 @@ impl Default for LxmdConfig {
             pn_announce_at_start: false,
             autopeer: true,
             autopeer_maxdepth: None,
+            sequential_pn_stamp_validation: true,
+            static_peers_bypass_sequential: true,
+            max_inbound_syncs: MAX_INBOUND_SYNCS,
             pn_announce_interval: None,
             message_storage_limit: 500.0,
             propagation_transfer_max_accepted_size: 256.0,
@@ -271,6 +281,11 @@ fn apply_config(ini: &HashMap<String, HashMap<String, String>>, config: &mut Lxm
                 config.announce_interval = Some(mins * 60);
             }
         }
+        if let Some(v) = lxmf.get("stamp_cost") {
+            if let Ok(cost) = v.parse::<u8>() {
+                config.peer_stamp_cost = cost.max(1);
+            }
+        }
         if let Some(v) = lxmf.get("delivery_transfer_max_accepted_size") {
             if let Ok(kb) = v.parse::<f64>() {
                 config.delivery_transfer_max_accepted_size = kb.max(0.38);
@@ -300,6 +315,17 @@ fn apply_config(ini: &HashMap<String, HashMap<String, String>>, config: &mut Lxm
         if let Some(v) = prop.get("autopeer_maxdepth") {
             if let Ok(n) = v.parse() {
                 config.autopeer_maxdepth = Some(n);
+            }
+        }
+        if let Some(v) = prop.get("sequential_pn_stamp_validation") {
+            config.sequential_pn_stamp_validation = parse_bool(v);
+        }
+        if let Some(v) = prop.get("static_peers_bypass_sequential") {
+            config.static_peers_bypass_sequential = parse_bool(v);
+        }
+        if let Some(v) = prop.get("max_inbound_syncs") {
+            if let Ok(n) = v.parse::<usize>() {
+                config.max_inbound_syncs = n.max(1);
             }
         }
         if let Some(v) = prop.get("announce_interval") {
@@ -703,6 +729,26 @@ fn display_status(stats: &rns_core::msgpack::Value) {
     }
 }
 
+fn sanitize_peer_name(name: &str) -> String {
+    let filtered: String =
+        name.nfkc()
+            .filter_map(|character| {
+                use GeneralCategory::*;
+                match get_general_category(character) {
+                    UppercaseLetter | LowercaseLetter | TitlecaseLetter | ModifierLetter
+                    | OtherLetter | DecimalNumber | LetterNumber | OtherNumber
+                    | ConnectorPunctuation | DashPunctuation | OpenPunctuation
+                    | ClosePunctuation | InitialPunctuation | FinalPunctuation
+                    | OtherPunctuation | SpacingMark => Some(character),
+                    SpaceSeparator | LineSeparator | ParagraphSeparator => Some(' '),
+                    _ => None,
+                }
+            })
+            .collect();
+
+    filtered.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 fn display_peers(stats: &rns_core::msgpack::Value) {
     let map = match stats.as_map() {
         Some(m) => m,
@@ -754,6 +800,26 @@ fn display_peers(stats: &rns_core::msgpack::Value) {
         println!();
         println!("  {}", hash);
 
+        if let Some(value) = pfind("name") {
+            let name = value
+                .as_str()
+                .map(str::to_owned)
+                .or_else(|| {
+                    value
+                        .as_bin()
+                        .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
+                })
+                .map(|name| sanitize_peer_name(&name))
+                .unwrap_or_default();
+            if !name.is_empty() {
+                let mut shown: String = name.chars().take(45).collect();
+                if name.chars().count() > 45 {
+                    shown.push_str("...");
+                }
+                println!("    Name         : {}", shown);
+            }
+        }
+
         if let Some(v) = pfind("alive") {
             let status = if v.as_bool() == Some(true) {
                 "alive"
@@ -804,6 +870,9 @@ fn build_router_config(config: &LxmdConfig, paths: &LxmdPaths) -> RouterConfig {
         propagation_cost_flexibility: config.propagation_stamp_cost_flexibility,
         peering_cost: config.peering_cost,
         max_peering_cost: config.remote_peering_cost_max,
+        max_inbound_syncs: config.max_inbound_syncs,
+        sequential_validation: config.sequential_pn_stamp_validation,
+        static_sequential: !config.static_peers_bypass_sequential,
         name: config.node_name.clone(),
     }
 }
@@ -1456,7 +1525,7 @@ fn main() {
         router_guard.set_node(node.clone());
         router_guard.register_delivery_identity(
             &identity,
-            Some(config.propagation_stamp_cost_target),
+            Some(config.peer_stamp_cost),
             Some(config.display_name.clone()),
         );
 
@@ -1678,6 +1747,15 @@ autopeer_maxdepth = 6
 # Only accept propagation from static peers.
 # from_static_only = True
 
+# Process propagation-node stamp validation batches sequentially.
+sequential_pn_stamp_validation = yes
+
+# Allow static peers to bypass sequential validation and inbound sync limits.
+static_peers_bypass_sequential = yes
+
+# Maximum concurrent inbound propagation sync resources.
+max_inbound_syncs = 3
+
 # Require authentication for message retrieval.
 auth_required = no
 
@@ -1692,6 +1770,9 @@ announce_at_start = no
 
 # Announce interval in minutes.
 # announce_interval = 360
+
+# Required stamp cost for incoming direct messages.
+stamp_cost = 12
 
 # Maximum accepted message size in KB.
 delivery_transfer_max_accepted_size = 1000
@@ -1734,5 +1815,120 @@ mod tests {
         let content = fs::read_to_string(&ready).unwrap();
         assert!(content.starts_with("pid="));
         let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn new_upstream_controls_have_safe_defaults() {
+        let config = LxmdConfig::default();
+
+        assert_eq!(config.peer_stamp_cost, 12);
+        assert!(config.sequential_pn_stamp_validation);
+        assert!(config.static_peers_bypass_sequential);
+        assert_eq!(config.max_inbound_syncs, 3);
+    }
+
+    #[test]
+    fn new_upstream_controls_parse_and_clamp_minimums() {
+        let ini = parse_ini(
+            r#"
+[lxmf]
+stamp_cost = 0
+
+[propagation]
+sequential_pn_stamp_validation = no
+static_peers_bypass_sequential = no
+max_inbound_syncs = 0
+"#,
+        );
+        let mut config = LxmdConfig::default();
+        apply_config(&ini, &mut config);
+
+        assert_eq!(config.peer_stamp_cost, 1);
+        assert!(!config.sequential_pn_stamp_validation);
+        assert!(!config.static_peers_bypass_sequential);
+        assert_eq!(config.max_inbound_syncs, 1);
+    }
+
+    #[test]
+    fn delivery_stamp_cost_is_independent_from_propagation_target() {
+        let ini = parse_ini(
+            r#"
+[lxmf]
+stamp_cost = 7
+
+[propagation]
+propagation_stamp_cost_target = 19
+"#,
+        );
+        let mut config = LxmdConfig::default();
+        apply_config(&ini, &mut config);
+
+        assert_eq!(config.peer_stamp_cost, 7);
+        assert_eq!(config.propagation_stamp_cost_target, 19);
+    }
+
+    #[test]
+    fn router_config_receives_inbound_sync_controls() {
+        let base = env::temp_dir().join("lxmd-upstream-config-test");
+        let paths = setup_paths(base.to_str());
+        let config = LxmdConfig {
+            sequential_pn_stamp_validation: false,
+            static_peers_bypass_sequential: false,
+            max_inbound_syncs: 7,
+            ..LxmdConfig::default()
+        };
+
+        let router_config = build_router_config(&config, &paths);
+
+        assert!(!router_config.sequential_validation);
+        assert!(router_config.static_sequential);
+        assert_eq!(router_config.max_inbound_syncs, 7);
+
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn example_config_documents_new_upstream_controls() {
+        assert!(EXAMPLE_CONFIG.contains("stamp_cost = 12"));
+        assert!(EXAMPLE_CONFIG.contains("sequential_pn_stamp_validation = yes"));
+        assert!(EXAMPLE_CONFIG.contains("static_peers_bypass_sequential = yes"));
+        assert!(EXAMPLE_CONFIG.contains("max_inbound_syncs = 3"));
+    }
+
+    #[test]
+    fn peer_name_sanitizer_normalizes_and_preserves_safe_text() {
+        assert_eq!(
+            sanitize_peer_name("  ＬＸＭＦ   Café—東京 42  "),
+            "LXMF Café—東京 42"
+        );
+        assert_eq!(sanitize_peer_name("Node_(EU), v2.0!"), "Node_(EU), v2.0!");
+    }
+
+    #[test]
+    fn peer_name_sanitizer_removes_terminal_and_direction_controls() {
+        assert_eq!(
+            sanitize_peer_name("safe\u{1b}[31m red\u{7f}\u{202e}evil\u{2066}"),
+            "safe[31m redevil"
+        );
+        assert_eq!(
+            sanitize_peer_name("left\u{200b}\u{200d}right\u{feff}"),
+            "leftright"
+        );
+    }
+
+    #[test]
+    fn peer_name_sanitizer_removes_symbols_private_use_and_emoji() {
+        assert_eq!(
+            sanitize_peer_name("Node 🚀 ☀ \u{e000} © + = arrows→"),
+            "Node arrows"
+        );
+    }
+
+    #[test]
+    fn peer_name_sanitizer_collapses_all_separator_whitespace() {
+        assert_eq!(
+            sanitize_peer_name("one\u{00a0}\u{2003}two\u{2028}three\u{2029}four"),
+            "one two three four"
+        );
     }
 }

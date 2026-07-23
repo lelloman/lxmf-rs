@@ -432,6 +432,9 @@ pub const PROPAGATION_COST_MIN: u8 = 13;
 pub const PROPAGATION_COST_FLEX: u8 = 3;
 pub const PROPAGATION_COST: u8 = 16;
 pub const PROPAGATION_LIMIT: u32 = 256; // KB
+pub const SEQUENTIAL_VALIDATION: bool = true;
+pub const STATIC_SEQUENTIAL: bool = false;
+pub const MAX_INBOUND_SYNCS: usize = 3;
 pub const SYNC_LIMIT: u32 = PROPAGATION_LIMIT * 40; // KB
 pub const DELIVERY_LIMIT: u32 = 1000; // KB
 

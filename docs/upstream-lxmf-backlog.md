@@ -27,7 +27,6 @@ The following commits after `fab12ad` remain to be ported or explicitly closed:
 
 | Upstream commit | Subject |
 | --- | --- |
-| `ca02fa5` | Added `lxmd` configuration and peer-name sanitization |
 | `241b29c` | Added bounded/sequential inbound PN sync processing |
 | `3e2cd36` | Updated version |
 | `5769d46` | Improved resource logging and safer delivery limit |
@@ -68,6 +67,7 @@ ported, tracked as no-op metadata, or judged Python/tooling-specific in the
 | `548be10` | No separate map locks are needed in Rust: router mutation is serialized through `Arc<Mutex<LxmRouter>>` and cache mutation requires `&mut self`. Added a concurrent writer/cleanup regression test that also verifies the persisted caches contain every non-expired update. |
 | `4a93697` | Rust already used saturating subtraction for the peer offer stamp floor, equivalent to upstream's corrected `max(0, target-flexibility)`. Factored the rule into a named helper and added boundary coverage for below/at threshold, underflow-to-zero, and zero flexibility. |
 | `982c9fc` | Ported by returning an empty-offer result before changing peer state or replacing `last_offer`. Tests cover empty results caused independently by stamp-cost, per-message transfer-size, and cumulative sync-size filtering. |
+| `ca02fa5` | Ported the independent `[lxmf] stamp_cost`, sequential PN validation, static-peer bypass, and maximum inbound-sync settings through `lxmd` and `RouterConfig`. Delivery announces no longer reuse the propagation target cost. Added Unicode NFKC/category-based peer-name sanitization at the terminal display boundary, plus default, parsing, clamping, independence, forwarding, example-config, and hostile-Unicode tests. |
 
 ## Refresh Procedure
 
