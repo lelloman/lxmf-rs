@@ -27,7 +27,6 @@ The following commits after `fab12ad` remain to be ported or explicitly closed:
 
 | Upstream commit | Subject |
 | --- | --- |
-| `241b29c` | Added bounded/sequential inbound PN sync processing |
 | `3e2cd36` | Updated version |
 | `5769d46` | Improved resource logging and safer delivery limit |
 | `d909619` | Added inbound resource tracking and cancellation |
@@ -68,6 +67,7 @@ ported, tracked as no-op metadata, or judged Python/tooling-specific in the
 | `4a93697` | Rust already used saturating subtraction for the peer offer stamp floor, equivalent to upstream's corrected `max(0, target-flexibility)`. Factored the rule into a named helper and added boundary coverage for below/at threshold, underflow-to-zero, and zero flexibility. |
 | `982c9fc` | Ported by returning an empty-offer result before changing peer state or replacing `last_offer`. Tests cover empty results caused independently by stamp-cost, per-message transfer-size, and cumulative sync-size filtering. |
 | `ca02fa5` | Ported the independent `[lxmf] stamp_cost`, sequential PN validation, static-peer bypass, and maximum inbound-sync settings through `lxmd` and `RouterConfig`. Delivery announces no longer reuse the propagation target cost. Added Unicode NFKC/category-based peer-name sanitization at the terminal display boundary, plus default, parsing, clamping, independence, forwarding, example-config, and hostile-Unicode tests. |
+| `241b29c` | Ported inbound `/offer` handling, peering-key validation, wanted-ID responses, accepted/transferring/validating lifecycle accounting, transfer-size admission, sequential validation pressure, maximum concurrent inbound syncs, configurable static-peer bypass, stamp-failure throttling, asynchronous PN stamp validation, message-store/distribution updates, and cleanup on invalid payloads, link closure, and resource failure. Tests cover every admission branch, offer parsing/key failure, lifecycle transition, direct/PN resource limits, asynchronous storage, and cleanup paths. |
 
 ## Refresh Procedure
 
