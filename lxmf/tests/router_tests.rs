@@ -857,7 +857,7 @@ fn resource_accept_query_enforces_delivery_and_propagation_limits() {
     router
         .accepted_offer_links
         .insert(propagation_link, InboundOfferState::Accepted);
-    router.config.delivery_limit = 1;
+    router.config.delivery_limit = 1.0;
     router.config.sync_limit = 2;
 
     let router = Arc::new(Mutex::new(router));
