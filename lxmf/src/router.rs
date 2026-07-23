@@ -1898,6 +1898,8 @@ mod tests {
     use super::*;
     use std::fs;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Barrier;
+    use std::thread;
 
     static NEXT_TEST_DIR: AtomicUsize = AtomicUsize::new(1);
 
@@ -1937,6 +1939,101 @@ mod tests {
         let supported = fields[2].as_array().unwrap();
         assert_eq!(supported.len(), 1);
         assert_eq!(supported[0].as_uint(), Some(SF_COMPRESSION as u64));
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn router_mutex_serializes_transient_cache_cleanup_and_delivery_updates() {
+        const WRITERS: usize = 6;
+        const IDS_PER_WRITER: usize = 80;
+
+        let dir = test_storage_dir("transient_cache_serialization");
+        let identity = Identity::new(&mut rns_crypto::OsRng);
+        let mut router = LxmRouter::new(
+            identity,
+            RouterConfig {
+                storagepath: dir.clone(),
+                ..RouterConfig::default()
+            },
+        );
+        let expired_at = now_timestamp() - MESSAGE_EXPIRY as f64 - 1.0;
+        for index in 0..32u8 {
+            router
+                .locally_delivered_transient_ids
+                .insert([index; 32], expired_at);
+            router
+                .locally_processed_transient_ids
+                .insert([index.wrapping_add(64); 32], expired_at);
+        }
+
+        let router = Arc::new(Mutex::new(router));
+        let start = Arc::new(Barrier::new(WRITERS + 1));
+        let mut handles = Vec::new();
+
+        for writer in 0..WRITERS {
+            let router = router.clone();
+            let start = start.clone();
+            handles.push(thread::spawn(move || {
+                start.wait();
+                for sequence in 0..IDS_PER_WRITER {
+                    let mut id = [0u8; 32];
+                    id[..8].copy_from_slice(&(writer as u64).to_be_bytes());
+                    id[8..16].copy_from_slice(&(sequence as u64).to_be_bytes());
+                    let now = now_timestamp();
+                    let mut router = router.lock().unwrap();
+                    router.locally_delivered_transient_ids.insert(id, now);
+                    id[31] = 1;
+                    router.locally_processed_transient_ids.insert(id, now);
+                }
+            }));
+        }
+
+        let cleanup_router = router.clone();
+        let cleanup_start = start.clone();
+        let cleanup = thread::spawn(move || {
+            cleanup_start.wait();
+            cleanup_router.lock().unwrap().clean_transient_id_caches();
+        });
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        cleanup.join().unwrap();
+
+        let mut router = Arc::try_unwrap(router)
+            .ok()
+            .expect("all worker references should be dropped")
+            .into_inner()
+            .unwrap();
+        router.clean_transient_id_caches();
+
+        assert_eq!(
+            router.locally_delivered_transient_ids.len(),
+            WRITERS * IDS_PER_WRITER
+        );
+        assert_eq!(
+            router.locally_processed_transient_ids.len(),
+            WRITERS * IDS_PER_WRITER
+        );
+        assert!(router
+            .locally_delivered_transient_ids
+            .values()
+            .all(|timestamp| *timestamp > expired_at));
+        assert!(router
+            .locally_processed_transient_ids
+            .values()
+            .all(|timestamp| *timestamp > expired_at));
+
+        router.exit_handler();
+        assert_eq!(
+            storage::load_transient_ids(&router.paths.local_deliveries),
+            router.locally_delivered_transient_ids
+        );
+        assert_eq!(
+            storage::load_transient_ids(&router.paths.locally_processed),
+            router.locally_processed_transient_ids
+        );
 
         fs::remove_dir_all(dir).unwrap();
     }
