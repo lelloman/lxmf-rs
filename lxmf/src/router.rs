@@ -179,6 +179,9 @@ pub struct RouterConfig {
     pub propagation_cost_flexibility: u8,
     pub peering_cost: u8,
     pub max_peering_cost: u8,
+    pub max_inbound_syncs: usize,
+    pub sequential_validation: bool,
+    pub static_sequential: bool,
     pub name: Option<String>,
 }
 
@@ -201,6 +204,9 @@ impl Default for RouterConfig {
             propagation_cost_flexibility: PROPAGATION_COST_FLEX,
             peering_cost: PEERING_COST,
             max_peering_cost: MAX_PEERING_COST,
+            max_inbound_syncs: MAX_INBOUND_SYNCS,
+            sequential_validation: SEQUENTIAL_VALIDATION,
+            static_sequential: STATIC_SEQUENTIAL,
             name: None,
         }
     }
