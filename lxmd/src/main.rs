@@ -1538,6 +1538,12 @@ fn main() {
         }
 
         if config.enable_node {
+            if let Err(error) =
+                LxmRouter::register_propagation_request_handlers(&node, router.clone())
+            {
+                eprintln!("Failed to register LXMF propagation handlers: {:?}", error);
+                process::exit(1);
+            }
             register_control_handlers(
                 &node,
                 router.clone(),

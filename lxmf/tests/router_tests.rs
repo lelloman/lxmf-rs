@@ -9,11 +9,11 @@ use lxmf_core::constants::{
 };
 use lxmf_core::message;
 use lxmf_rs::router::{
-    LxmRouter, LxmfCallbacks, OutboundError, OutboundMessage, PeerOfferResponseResult,
-    PeerSyncTransport, PeerSyncTransportError, RouterConfig,
+    InboundOfferState, LxmRouter, LxmfCallbacks, OutboundError, OutboundMessage,
+    PeerOfferResponseResult, PeerSyncTransport, PeerSyncTransportError, RouterConfig,
 };
 use rns_core::msgpack::{pack, unpack_exact, Value};
-use rns_core::types::{DestHash, IdentityHash};
+use rns_core::types::{DestHash, IdentityHash, LinkId};
 use rns_crypto::identity::Identity;
 use rns_net::destination::AnnouncedIdentity;
 use rns_net::driver::Callbacks;
@@ -639,5 +639,337 @@ fn peer_sync_wanted_messages_send_resource_and_track_transfer() {
     let message_bytes = messages[0].as_bin().expect("message should be binary");
     assert_eq!(&message_bytes[..lxm_data.len()], &lxm_data[..]);
     assert_eq!(&message_bytes[lxm_data.len()..], &[0x42u8; STAMP_SIZE][..]);
+    let _ = fs::remove_dir_all(dir);
+}
+
+fn remote_propagation_hash(identity_hash: [u8; 16]) -> [u8; 16] {
+    rns_core::destination::destination_hash(APP_NAME, &["propagation"], Some(&identity_hash))
+}
+
+#[test]
+fn inbound_offer_admission_serializes_validation_by_default() {
+    let (mut router, dir) = test_router("inbound_sequential");
+    let validating_peer = [0x21; 16];
+    let new_peer = [0x22; 16];
+    router
+        .validating_pn_stamps_from
+        .insert(validating_peer, lxmf_rs::router::now_timestamp());
+
+    assert_eq!(
+        router.check_inbound_offer_admission(new_peer),
+        Err(PeerError::Throttled)
+    );
+
+    router.config.sequential_validation = false;
+    assert_eq!(router.check_inbound_offer_admission(new_peer), Ok(()));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn inbound_offer_admission_enforces_transfer_cap() {
+    let (mut router, dir) = test_router("inbound_cap");
+    router.config.max_inbound_syncs = 2;
+    router
+        .accepted_offer_links
+        .insert([0x31; 16], InboundOfferState::Transferring);
+    assert_eq!(
+        router.check_inbound_offer_admission([0x41; 16]),
+        Ok(()),
+        "one transfer remains below the cap"
+    );
+
+    router
+        .accepted_offer_links
+        .insert([0x32; 16], InboundOfferState::Validating);
+    assert_eq!(
+        router.check_inbound_offer_admission([0x41; 16]),
+        Err(PeerError::Throttled)
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn static_peer_bypass_is_configurable_for_both_pressure_limits() {
+    let (mut router, dir) = test_router("static_bypass");
+    let static_peer = [0x51; 16];
+    router.config.static_peers.push(static_peer);
+    router.config.max_inbound_syncs = 1;
+    router
+        .accepted_offer_links
+        .insert([0x52; 16], InboundOfferState::Transferring);
+    router
+        .validating_pn_stamps_from
+        .insert([0x53; 16], lxmf_rs::router::now_timestamp());
+
+    assert_eq!(router.check_inbound_offer_admission(static_peer), Ok(()));
+
+    router.config.static_sequential = true;
+    assert_eq!(
+        router.check_inbound_offer_admission(static_peer),
+        Err(PeerError::Throttled)
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn from_static_only_rejects_unlisted_inbound_offer() {
+    let (mut router, dir) = test_router("inbound_static_only");
+    router.config.from_static_only = true;
+
+    assert_eq!(
+        router.check_inbound_offer_admission([0x61; 16]),
+        Err(PeerError::NoAccess)
+    );
+
+    router.config.static_peers.push([0x61; 16]);
+    assert_eq!(router.check_inbound_offer_admission([0x61; 16]), Ok(()));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn inbound_offer_admission_honors_active_but_not_expired_stamp_throttle() {
+    let (mut router, dir) = test_router("inbound_stamp_throttle");
+    let remote_hash = [0x62; 16];
+    router
+        .throttled_peers
+        .insert(remote_hash, lxmf_rs::router::now_timestamp() + 60.0);
+    assert_eq!(
+        router.check_inbound_offer_admission(remote_hash),
+        Err(PeerError::Throttled)
+    );
+
+    router
+        .throttled_peers
+        .insert(remote_hash, lxmf_rs::router::now_timestamp() - 1.0);
+    assert_eq!(router.check_inbound_offer_admission(remote_hash), Ok(()));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn valid_inbound_offer_records_link_and_returns_wanted_ids() {
+    let (mut router, dir) = test_router("inbound_offer");
+    router.config.peering_cost = 0;
+    let link_id = [0x71; 16];
+    let remote_identity = [0x72; 16];
+    let remote_hash = remote_propagation_hash(remote_identity);
+    let first = [0x73; 32];
+    let second = [0x74; 32];
+    let offer = pack(&Value::Array(vec![
+        Value::Bin(vec![0; STAMP_SIZE]),
+        Value::Array(vec![
+            Value::Bin(first.to_vec()),
+            Value::Bin(second.to_vec()),
+        ]),
+    ]));
+
+    let response = router.handle_inbound_offer(link_id, remote_identity, &offer);
+
+    assert_eq!(unpack_exact(&response).unwrap().as_bool(), Some(true));
+    assert_eq!(
+        router.accepted_offer_links.get(&link_id),
+        Some(&InboundOfferState::Accepted)
+    );
+    assert_eq!(router.inbound_offer_peers.get(&link_id), Some(&remote_hash));
+    assert!(router.validated_peer_links.contains(&link_id));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn inbound_offer_rejects_invalid_shape_and_invalid_peering_key() {
+    let (mut router, dir) = test_router("inbound_offer_invalid");
+    let link_id = [0x81; 16];
+    let remote_identity = [0x82; 16];
+
+    assert_eq!(
+        router.handle_inbound_offer(link_id, remote_identity, b"not msgpack"),
+        vec![PeerError::InvalidData as u8]
+    );
+
+    router.config.peering_cost = 255;
+    let offer = pack(&Value::Array(vec![
+        Value::Bin(vec![0; STAMP_SIZE]),
+        Value::Array(vec![Value::Bin(vec![0x83; 32])]),
+    ]));
+    assert_eq!(
+        router.handle_inbound_offer(link_id, remote_identity, &offer),
+        vec![PeerError::InvalidKey as u8]
+    );
+    assert!(router.accepted_offer_links.is_empty());
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn inbound_resource_admission_tracks_state_and_cleans_on_link_close() {
+    let (mut router, dir) = test_router("inbound_resource_state");
+    let link_id = [0x91; 16];
+    let remote_hash = [0x92; 16];
+    router
+        .accepted_offer_links
+        .insert(link_id, InboundOfferState::Accepted);
+    router.inbound_offer_peers.insert(link_id, remote_hash);
+
+    assert!(router.accept_inbound_propagation_resource(link_id, 1024));
+    assert_eq!(
+        router.accepted_offer_links.get(&link_id),
+        Some(&InboundOfferState::Transferring)
+    );
+
+    assert_eq!(router.begin_inbound_validation(link_id), Some(remote_hash));
+    assert_eq!(
+        router.accepted_offer_links.get(&link_id),
+        Some(&InboundOfferState::Validating)
+    );
+    assert!(router.validating_pn_stamps_from.contains_key(&remote_hash));
+
+    router.finish_inbound_sync(link_id);
+    assert!(!router.accepted_offer_links.contains_key(&link_id));
+    assert!(!router.inbound_offer_peers.contains_key(&link_id));
+    assert!(!router.validating_pn_stamps_from.contains_key(&remote_hash));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn inbound_resource_admission_rejects_unknown_and_oversized_resources() {
+    let (mut router, dir) = test_router("inbound_resource_reject");
+    let link_id = [0xA1; 16];
+    router.config.sync_limit = 1;
+
+    assert!(!router.accept_inbound_propagation_resource(link_id, 10));
+
+    router
+        .accepted_offer_links
+        .insert(link_id, InboundOfferState::Accepted);
+    assert!(!router.accept_inbound_propagation_resource(link_id, 1001));
+    assert_eq!(
+        router.accepted_offer_links.get(&link_id),
+        Some(&InboundOfferState::Accepted)
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn resource_accept_query_enforces_delivery_and_propagation_limits() {
+    let (mut router, dir) = test_router("resource_accept_query");
+    let delivery_link = [0xB1; 16];
+    let propagation_link = [0xB2; 16];
+    router.delivery_dest_hash = Some([0xB3; 16]);
+    router.link_destinations.insert(delivery_link, [0xB3; 16]);
+    router
+        .accepted_offer_links
+        .insert(propagation_link, InboundOfferState::Accepted);
+    router.config.delivery_limit = 1;
+    router.config.sync_limit = 2;
+
+    let router = Arc::new(Mutex::new(router));
+    let mut callbacks = LxmfCallbacks::new(router.clone());
+
+    assert!(callbacks.on_resource_accept_query(LinkId(delivery_link), vec![0; 32], 1000, false));
+    assert!(!callbacks.on_resource_accept_query(LinkId(delivery_link), vec![0; 32], 1001, false));
+    assert!(callbacks.on_resource_accept_query(LinkId(propagation_link), vec![0; 32], 2000, false));
+
+    let guard = router.lock().unwrap();
+    assert_eq!(
+        guard.accepted_offer_links.get(&propagation_link),
+        Some(&InboundOfferState::Transferring)
+    );
+    drop(guard);
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn inbound_propagation_resource_validates_stores_and_cleans_accounting() {
+    let (mut router, dir) = test_router("inbound_resource_processing");
+    let link_id = [0xC1; 16];
+    let remote_hash = [0xC2; 16];
+    router.config.propagation_cost = 0;
+    router.config.propagation_cost_flexibility = 0;
+    router
+        .accepted_offer_links
+        .insert(link_id, InboundOfferState::Transferring);
+    router.inbound_offer_peers.insert(link_id, remote_hash);
+
+    let mut lxm_data = make_lxm_data(&[0xC3; 16], b"inbound propagation");
+    lxm_data.push(0x01);
+    let mut stamped = lxm_data.clone();
+    stamped.extend_from_slice(&[0; STAMP_SIZE]);
+    let batch = pack(&Value::Array(vec![
+        Value::Float(1_700_000_000.0),
+        Value::Array(vec![Value::Bin(stamped)]),
+    ]));
+
+    let router = Arc::new(Mutex::new(router));
+    let mut callbacks = LxmfCallbacks::new(router.clone());
+    callbacks.on_resource_received(LinkId(link_id), batch, None);
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        let guard = router.lock().unwrap();
+        if guard.propagation_store.message_count() == 1 {
+            assert!(!guard.accepted_offer_links.contains_key(&link_id));
+            assert!(!guard.inbound_offer_peers.contains_key(&link_id));
+            assert!(!guard.validating_pn_stamps_from.contains_key(&remote_hash));
+            assert_eq!(guard.propagation_store.unpeered_propagation_incoming, 1);
+            assert_eq!(
+                guard.propagation_store.unpeered_propagation_rx_bytes,
+                lxm_data.len() as u64
+            );
+            break;
+        }
+        drop(guard);
+        assert!(
+            std::time::Instant::now() < deadline,
+            "validation worker did not store inbound message"
+        );
+        std::thread::yield_now();
+    }
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn invalid_inbound_propagation_payload_cleans_offer_accounting() {
+    let (mut router, dir) = test_router("invalid_inbound_payload");
+    let link_id = [0xD1; 16];
+    let remote_hash = [0xD2; 16];
+    router
+        .accepted_offer_links
+        .insert(link_id, InboundOfferState::Transferring);
+    router.inbound_offer_peers.insert(link_id, remote_hash);
+
+    let router = Arc::new(Mutex::new(router));
+    let mut callbacks = LxmfCallbacks::new(router.clone());
+    callbacks.on_resource_received(LinkId(link_id), b"invalid".to_vec(), None);
+
+    let guard = router.lock().unwrap();
+    assert!(!guard.accepted_offer_links.contains_key(&link_id));
+    assert!(!guard.inbound_offer_peers.contains_key(&link_id));
+    drop(guard);
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn link_close_cleans_every_inbound_offer_state() {
+    let (mut router, dir) = test_router("inbound_link_cleanup");
+    let link_id = [0xE1; 16];
+    let remote_hash = [0xE2; 16];
+    router
+        .accepted_offer_links
+        .insert(link_id, InboundOfferState::Validating);
+    router.inbound_offer_peers.insert(link_id, remote_hash);
+    router
+        .validating_pn_stamps_from
+        .insert(remote_hash, lxmf_rs::router::now_timestamp());
+    router.validated_peer_links.insert(link_id);
+
+    let router = Arc::new(Mutex::new(router));
+    let mut callbacks = LxmfCallbacks::new(router.clone());
+    callbacks.on_link_closed(LinkId(link_id), None);
+
+    let guard = router.lock().unwrap();
+    assert!(!guard.accepted_offer_links.contains_key(&link_id));
+    assert!(!guard.inbound_offer_peers.contains_key(&link_id));
+    assert!(!guard.validating_pn_stamps_from.contains_key(&remote_hash));
+    assert!(!guard.validated_peer_links.contains(&link_id));
+    drop(guard);
     let _ = fs::remove_dir_all(dir);
 }

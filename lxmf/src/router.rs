@@ -102,6 +102,13 @@ pub enum PeerOfferResponseResult {
     TransportError,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InboundOfferState {
+    Accepted,
+    Transferring,
+    Validating,
+}
+
 /// Information about a delivered message passed to the delivery callback.
 pub struct LxmDelivery {
     pub destination_hash: [u8; DESTINATION_LENGTH],
@@ -267,6 +274,11 @@ pub struct LxmRouter {
     pub propagation_store: PropagationStore,
     peer_sync_response_links: HashMap<[u8; 16], [u8; 16]>,
     peer_sync_transfer_sizes: HashMap<[u8; 16], usize>,
+    pub accepted_offer_links: HashMap<[u8; 16], InboundOfferState>,
+    pub inbound_offer_peers: HashMap<[u8; 16], [u8; 16]>,
+    pub validated_peer_links: HashSet<[u8; 16]>,
+    pub validating_pn_stamps_from: HashMap<[u8; 16], f64>,
+    pub throttled_peers: HashMap<[u8; 16], f64>,
 
     // Propagation transfer state (client-side)
     pub propagation_transfer_state: PropagationTransferState,
@@ -351,6 +363,11 @@ impl LxmRouter {
             propagation_store,
             peer_sync_response_links: HashMap::new(),
             peer_sync_transfer_sizes: HashMap::new(),
+            accepted_offer_links: HashMap::new(),
+            inbound_offer_peers: HashMap::new(),
+            validated_peer_links: HashSet::new(),
+            validating_pn_stamps_from: HashMap::new(),
+            throttled_peers: HashMap::new(),
             propagation_transfer_state: PropagationTransferState::Idle,
             propagation_transfer_progress: 0.0,
             propagation_transfer_max_messages: None,
@@ -369,6 +386,23 @@ impl LxmRouter {
     /// Set the RNS node reference. Called after starting the node.
     pub fn set_node(&mut self, node: Arc<RnsNode>) {
         self.node = Some(node);
+    }
+
+    pub fn register_propagation_request_handlers(
+        node: &Arc<RnsNode>,
+        router: Arc<Mutex<LxmRouter>>,
+    ) -> Result<(), PeerSyncTransportError> {
+        node.register_request_handler(OFFER_REQUEST_PATH, None, move |link_id, _, data, remote| {
+            let Some((remote_identity_hash, _)) = remote else {
+                return Some(vec![PeerError::NoIdentity as u8]);
+            };
+            let mut router = router.lock().unwrap();
+            if !router.propagation_node || !router.active_propagation_links.contains(&link_id) {
+                return Some(vec![PeerError::NoAccess as u8]);
+            }
+            Some(router.handle_inbound_offer(link_id, *remote_identity_hash, data))
+        })
+        .map_err(|_| PeerSyncTransportError::SendFailed)
     }
 
     /// Get a reference to the RNS node.
@@ -1104,6 +1138,195 @@ impl LxmRouter {
         Some(msgpack::pack(&payload))
     }
 
+    pub fn check_inbound_offer_admission(&self, remote_hash: [u8; 16]) -> Result<(), PeerError> {
+        let bypass_sequential =
+            !self.config.static_sequential && self.config.static_peers.contains(&remote_hash);
+
+        if self.config.from_static_only && !self.config.static_peers.contains(&remote_hash) {
+            return Err(PeerError::NoAccess);
+        }
+
+        if self
+            .throttled_peers
+            .get(&remote_hash)
+            .is_some_and(|until| *until > now_timestamp())
+        {
+            return Err(PeerError::Throttled);
+        }
+
+        if !bypass_sequential
+            && self.config.sequential_validation
+            && !self.validating_pn_stamps_from.is_empty()
+        {
+            return Err(PeerError::Throttled);
+        }
+
+        let resources_in_progress = self
+            .accepted_offer_links
+            .values()
+            .filter(|state| {
+                matches!(
+                    state,
+                    InboundOfferState::Transferring | InboundOfferState::Validating
+                )
+            })
+            .count();
+        if !bypass_sequential
+            && self.config.max_inbound_syncs > 0
+            && resources_in_progress >= self.config.max_inbound_syncs
+        {
+            return Err(PeerError::Throttled);
+        }
+
+        Ok(())
+    }
+
+    pub fn handle_inbound_offer(
+        &mut self,
+        link_id: [u8; 16],
+        remote_identity_hash: [u8; 16],
+        data: &[u8],
+    ) -> Vec<u8> {
+        let remote_hash = compute_dest_hash(APP_NAME, &["propagation"], &remote_identity_hash);
+        if let Err(error) = self.check_inbound_offer_admission(remote_hash) {
+            return vec![error as u8];
+        }
+
+        let value = match msgpack::unpack_exact(data) {
+            Ok(value) => value,
+            Err(_) => return vec![PeerError::InvalidData as u8],
+        };
+        let fields = match value.as_array() {
+            Some(fields) if fields.len() == 2 => fields,
+            _ => return vec![PeerError::InvalidData as u8],
+        };
+        let peering_key = match fields[0].as_bin() {
+            Some(key) if key.len() == STAMP_SIZE => key,
+            _ => return vec![PeerError::InvalidData as u8],
+        };
+        let transient_values = match fields[1].as_array() {
+            Some(values) => values,
+            None => return vec![PeerError::InvalidData as u8],
+        };
+        let mut transient_ids = Vec::with_capacity(transient_values.len());
+        for value in transient_values {
+            let Some(bytes) = value.as_bin() else {
+                return vec![PeerError::InvalidData as u8];
+            };
+            let Ok(transient_id) = <[u8; 32]>::try_from(bytes) else {
+                return vec![PeerError::InvalidData as u8];
+            };
+            transient_ids.push(transient_id);
+        }
+
+        let mut peering_id = Vec::with_capacity(32);
+        peering_id.extend_from_slice(self.identity.hash());
+        peering_id.extend_from_slice(&remote_identity_hash);
+        if !lxmf_core::stamp::validate_peering_key(
+            &peering_id,
+            peering_key,
+            self.config.peering_cost,
+        ) {
+            return vec![PeerError::InvalidKey as u8];
+        }
+        self.validated_peer_links.insert(link_id);
+
+        let response = self.propagation_store.handle_offer(&transient_ids);
+        if response.as_bool() != Some(false) {
+            self.accepted_offer_links
+                .insert(link_id, InboundOfferState::Accepted);
+            self.inbound_offer_peers.insert(link_id, remote_hash);
+        }
+        msgpack::pack(&response)
+    }
+
+    pub fn accept_inbound_propagation_resource(
+        &mut self,
+        link_id: [u8; 16],
+        transfer_size: u64,
+    ) -> bool {
+        if !matches!(
+            self.accepted_offer_links.get(&link_id),
+            Some(InboundOfferState::Accepted)
+        ) {
+            return false;
+        }
+        let limit = self.config.sync_limit as u64 * 1000;
+        if transfer_size > limit {
+            return false;
+        }
+
+        self.accepted_offer_links
+            .insert(link_id, InboundOfferState::Transferring);
+        true
+    }
+
+    pub fn begin_inbound_validation(&mut self, link_id: [u8; 16]) -> Option<[u8; 16]> {
+        let remote_hash = *self.inbound_offer_peers.get(&link_id)?;
+        self.accepted_offer_links
+            .insert(link_id, InboundOfferState::Validating);
+        self.validating_pn_stamps_from
+            .insert(remote_hash, now_timestamp());
+        Some(remote_hash)
+    }
+
+    pub fn finish_inbound_sync(&mut self, link_id: [u8; 16]) {
+        if let Some(remote_hash) = self.inbound_offer_peers.remove(&link_id) {
+            self.validating_pn_stamps_from.remove(&remote_hash);
+        }
+        self.accepted_offer_links.remove(&link_id);
+    }
+
+    fn cleanup_inbound_link(&mut self, link_id: [u8; 16]) {
+        self.finish_inbound_sync(link_id);
+        self.validated_peer_links.remove(&link_id);
+    }
+
+    fn store_validated_inbound_messages(
+        &mut self,
+        link_id: [u8; 16],
+        remote_hash: [u8; 16],
+        validated: Vec<lxmf_core::stamp::PnStampResult>,
+        invalid_count: usize,
+    ) {
+        for result in validated {
+            let message_len = result.lxm_data.len() as u64;
+            let stored = self.propagation_store.store_message(
+                &result.lxm_data,
+                Some(&result.stamp),
+                result.value,
+                Some(remote_hash),
+            );
+            if let Some(peer) = self.peers.get_mut(&remote_hash) {
+                peer.incoming = peer.incoming.saturating_add(1);
+                peer.rx_bytes = peer.rx_bytes.saturating_add(message_len);
+                if let Some(transient_id) = stored {
+                    peer.queue_handled_message(transient_id);
+                }
+            } else {
+                self.propagation_store.unpeered_propagation_incoming = self
+                    .propagation_store
+                    .unpeered_propagation_incoming
+                    .saturating_add(1);
+                self.propagation_store.unpeered_propagation_rx_bytes = self
+                    .propagation_store
+                    .unpeered_propagation_rx_bytes
+                    .saturating_add(message_len);
+            }
+        }
+
+        if invalid_count > 0 {
+            self.throttled_peers
+                .insert(remote_hash, now_timestamp() + PN_STAMP_THROTTLE as f64);
+            log::warn!(
+                "Inbound propagation sync from {:02x?} contained {} invalid stamp(s)",
+                &remote_hash[..4],
+                invalid_count
+            );
+        }
+        self.finish_inbound_sync(link_id);
+    }
+
     pub fn send_peer_sync_offer_with_transport<T: PeerSyncTransport + ?Sized>(
         &mut self,
         peer_hash: [u8; 16],
@@ -1700,7 +1923,7 @@ impl Callbacks for LxmfCallbacks {
             router.link_destinations.insert(link_id.0, dest_hash.0);
 
             // Track if it's a propagation link
-            if router.propagation_node {
+            if router.propagation_node && dest_hash.0 == router.propagation_dest_hash {
                 router.active_propagation_links.push(link_id.0);
             }
         }
@@ -1724,6 +1947,7 @@ impl Callbacks for LxmfCallbacks {
 
         router.peer_sync_response_links.remove(&link_id.0);
         router.peer_sync_transfer_sizes.remove(&link_id.0);
+        router.cleanup_inbound_link(link_id.0);
         for peer in router.peers.values_mut() {
             if peer.link_id == Some(link_id.0) {
                 peer.handle_link_closed();
@@ -1757,7 +1981,59 @@ impl Callbacks for LxmfCallbacks {
                 ENCRYPTION_DESCRIPTION_EC,
                 DeliveryMethod::Direct,
             );
+            return;
         }
+
+        let messages = match unpack_propagation_batch(&data) {
+            Some(messages) => messages,
+            None => {
+                self.router.lock().unwrap().cleanup_inbound_link(link_id.0);
+                return;
+            }
+        };
+        let (remote_hash, minimum_cost) = {
+            let mut router = self.router.lock().unwrap();
+            let Some(remote_hash) = router.begin_inbound_validation(link_id.0) else {
+                return;
+            };
+            (
+                remote_hash,
+                router
+                    .config
+                    .propagation_cost
+                    .saturating_sub(router.config.propagation_cost_flexibility),
+            )
+        };
+        let router = self.router.clone();
+        thread::spawn(move || {
+            let offered_count = messages.len();
+            let validated = crate::stamper::validate_pn_stamps(&messages, minimum_cost);
+            let invalid_count = offered_count.saturating_sub(validated.len());
+            router.lock().unwrap().store_validated_inbound_messages(
+                link_id.0,
+                remote_hash,
+                validated,
+                invalid_count,
+            );
+        });
+    }
+
+    fn on_resource_accept_query(
+        &mut self,
+        link_id: LinkId,
+        _resource_hash: Vec<u8>,
+        transfer_size: u64,
+        _has_metadata: bool,
+    ) -> bool {
+        let mut router = self.router.lock().unwrap();
+        if router
+            .link_destinations
+            .get(&link_id.0)
+            .is_some_and(|dest| router.delivery_dest_hash == Some(*dest))
+        {
+            return transfer_size <= router.config.delivery_limit as u64 * 1000;
+        }
+        router.accept_inbound_propagation_resource(link_id.0, transfer_size)
     }
 
     fn on_resource_completed(&mut self, link_id: LinkId) {
@@ -1816,6 +2092,7 @@ impl Callbacks for LxmfCallbacks {
     fn on_resource_failed(&mut self, link_id: LinkId, _error: String) {
         let mut router = self.router.lock().unwrap();
 
+        router.cleanup_inbound_link(link_id.0);
         router.peer_sync_transfer_sizes.remove(&link_id.0);
         if let Some(peer) = router
             .peers
@@ -1879,6 +2156,19 @@ impl Callbacks for LxmfCallbacks {
             );
         }
     }
+}
+
+fn unpack_propagation_batch(data: &[u8]) -> Option<Vec<Vec<u8>>> {
+    let value = msgpack::unpack_exact(data).ok()?;
+    let fields = value.as_array()?;
+    if fields.len() != 2 || fields[0].as_number().is_none() {
+        return None;
+    }
+    fields[1]
+        .as_array()?
+        .iter()
+        .map(|value| value.as_bin().map(ToOwned::to_owned))
+        .collect()
 }
 
 // ============================================================
