@@ -1057,17 +1057,20 @@ fn cancel_inbound_targets_exact_resource_and_removes_tracking() {
     let control = FakeInboundResourceControl::default();
     let first_hash = vec![0x41; 32];
     let second_hash = vec![0x42; 32];
-    router.track_inbound_delivery_resource([0x51; 16], first_hash.clone(), 100);
-    router.track_inbound_delivery_resource([0x52; 16], second_hash.clone(), 200);
+    let shared_link = [0x51; 16];
+    router.track_inbound_delivery_resource(shared_link, first_hash.clone(), 100);
+    router.track_inbound_delivery_resource(shared_link, second_hash.clone(), 200);
 
     assert!(router.cancel_inbound_with(&first_hash, &control));
     assert!(!router.cancel_inbound_with(&first_hash, &control));
     assert_eq!(router.inbound_count(), 1);
     assert_eq!(
         *control.cancellations.lock().unwrap(),
-        vec![([0x51; 16], first_hash)]
+        vec![(shared_link, first_hash)]
     );
-    assert_eq!(router.inbound_resources()[0].resource_hash, second_hash);
+    let remaining = &router.inbound_resources()[0];
+    assert_eq!(remaining.link_id, shared_link);
+    assert_eq!(remaining.resource_hash, second_hash);
     let _ = fs::remove_dir_all(dir);
 }
 

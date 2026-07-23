@@ -72,11 +72,11 @@ impl InboundResourceControl for RnsNode {
     fn cancel_inbound_resource(
         &self,
         link_id: [u8; 16],
-        _resource_hash: &[u8],
+        resource_hash: &[u8],
     ) -> Result<(), InboundResourceControlError> {
-        // rns-net does not yet expose receiver-side cancellation for one
-        // already accepted resource, so cancel its containing link.
-        self.teardown_link(link_id)
+        // Rejecting by hash also cancels a resource that has already been
+        // accepted, while leaving the containing link and other transfers up.
+        self.accept_resource(link_id, resource_hash.to_vec(), false)
             .map_err(|_| InboundResourceControlError::CancelFailed)
     }
 }
