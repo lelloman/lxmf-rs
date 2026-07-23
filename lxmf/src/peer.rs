@@ -184,10 +184,7 @@ impl LxmPeer {
             None => return None,
         };
 
-        let min_accepted_cost = self
-            .propagation_stamp_cost
-            .unwrap_or(0)
-            .saturating_sub(self.propagation_stamp_cost_flexibility.unwrap_or(0));
+        let min_accepted_cost = self.minimum_accepted_stamp_cost();
 
         let transfer_limit_bytes = self
             .propagation_transfer_limit
@@ -234,6 +231,12 @@ impl LxmPeer {
 
         self.state = PeerState::RequestSent;
         Some(msgpack::pack(&offer))
+    }
+
+    fn minimum_accepted_stamp_cost(&self) -> u8 {
+        self.propagation_stamp_cost
+            .unwrap_or(0)
+            .saturating_sub(self.propagation_stamp_cost_flexibility.unwrap_or(0))
     }
 
     /// Process the response from an offer request.
