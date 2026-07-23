@@ -436,7 +436,7 @@ pub const SEQUENTIAL_VALIDATION: bool = true;
 pub const STATIC_SEQUENTIAL: bool = false;
 pub const MAX_INBOUND_SYNCS: usize = 3;
 pub const SYNC_LIMIT: u32 = PROPAGATION_LIMIT * 40; // KB
-pub const DELIVERY_LIMIT: u32 = 1000; // KB
+pub const DELIVERY_LIMIT: f64 = 1000.0; // KB
 
 // Propagation request timing
 pub const PR_PATH_TIMEOUT: u64 = 10; // seconds

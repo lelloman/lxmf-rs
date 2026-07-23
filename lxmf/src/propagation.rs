@@ -427,7 +427,7 @@ impl PropagationStore {
             ),
             (
                 Value::Str("delivery_limit".to_string()),
-                Value::UInt(config_stats.delivery_limit as u64),
+                Value::Float(config_stats.delivery_limit),
             ),
             (
                 Value::Str("propagation_limit".to_string()),
@@ -507,7 +507,7 @@ impl PropagationStore {
 
 /// Configuration statistics passed to compile_stats.
 pub struct ConfigStats {
-    pub delivery_limit: u32,
+    pub delivery_limit: f64,
     pub propagation_limit: u32,
     pub sync_limit: u32,
     pub propagation_cost: u8,

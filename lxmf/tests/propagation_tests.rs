@@ -610,7 +610,7 @@ fn test_compile_stats() {
     let start_time = lxmf_rs::router::now_timestamp() - 3600.0;
 
     let config = ConfigStats {
-        delivery_limit: 256,
+        delivery_limit: 256.0,
         propagation_limit: 512,
         sync_limit: 10240,
         propagation_cost: 16,

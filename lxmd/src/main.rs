@@ -187,7 +187,7 @@ impl Default for LxmdConfig {
             announce_at_start: false,
             announce_interval: None,
             peer_stamp_cost: 12,
-            delivery_transfer_max_accepted_size: 1000.0,
+            delivery_transfer_max_accepted_size: 1.0,
             on_inbound: None,
 
             enable_node: false,
@@ -858,7 +858,7 @@ fn build_router_config(config: &LxmdConfig, paths: &LxmdPaths) -> RouterConfig {
         autopeer: config.autopeer,
         autopeer_maxdepth: config.autopeer_maxdepth.unwrap_or(AUTOPEER_MAXDEPTH),
         propagation_limit: config.propagation_message_max_accepted_size as u32,
-        delivery_limit: config.delivery_transfer_max_accepted_size as u32,
+        delivery_limit: config.delivery_transfer_max_accepted_size,
         sync_limit: config.propagation_sync_max_accepted_size as u32,
         enforce_ratchets: false,
         enforce_stamps: false,
@@ -969,7 +969,7 @@ fn build_status_payload(
         ),
         (
             Value::Str("delivery_limit".to_string()),
-            Value::UInt(router.config.delivery_limit as u64),
+            Value::Float(router.config.delivery_limit),
         ),
         (
             Value::Str("propagation_limit".to_string()),
@@ -1781,7 +1781,7 @@ announce_at_start = no
 stamp_cost = 12
 
 # Maximum accepted message size in KB.
-delivery_transfer_max_accepted_size = 1000
+delivery_transfer_max_accepted_size = 1
 
 # External program to run on message receipt.
 # on_inbound = rm
@@ -1831,6 +1831,33 @@ mod tests {
         assert!(config.sequential_pn_stamp_validation);
         assert!(config.static_peers_bypass_sequential);
         assert_eq!(config.max_inbound_syncs, 3);
+    }
+
+    #[test]
+    fn direct_delivery_resource_limit_defaults_to_one_kilobyte() {
+        let config = LxmdConfig::default();
+
+        assert_eq!(config.delivery_transfer_max_accepted_size, 1.0);
+        assert!(EXAMPLE_CONFIG.contains("delivery_transfer_max_accepted_size = 1"));
+        assert!(!EXAMPLE_CONFIG.contains("delivery_transfer_max_accepted_size = 1000"));
+    }
+
+    #[test]
+    fn configured_direct_delivery_resource_limit_keeps_upstream_minimum() {
+        let ini = parse_ini(
+            r#"
+[lxmf]
+delivery_transfer_max_accepted_size = 0.01
+"#,
+        );
+        let mut config = LxmdConfig::default();
+        apply_config(&ini, &mut config);
+
+        assert_eq!(config.delivery_transfer_max_accepted_size, 0.38);
+        let base = env::temp_dir().join("lxmd-delivery-limit-test");
+        let paths = setup_paths(base.to_str());
+        assert_eq!(build_router_config(&config, &paths).delivery_limit, 0.38);
+        let _ = fs::remove_dir_all(base);
     }
 
     #[test]

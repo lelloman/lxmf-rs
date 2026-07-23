@@ -27,7 +27,6 @@ The following commits after `fab12ad` remain to be ported or explicitly closed:
 
 | Upstream commit | Subject |
 | --- | --- |
-| `5769d46` | Improved resource logging and safer delivery limit |
 | `d909619` | Added inbound resource tracking and cancellation |
 | `7bb4bcf` | Updated stamp-cost logging |
 | `795fdaa` | Updated versions |
@@ -68,6 +67,7 @@ ported, tracked as no-op metadata, or judged Python/tooling-specific in the
 | `ca02fa5` | Ported the independent `[lxmf] stamp_cost`, sequential PN validation, static-peer bypass, and maximum inbound-sync settings through `lxmd` and `RouterConfig`. Delivery announces no longer reuse the propagation target cost. Added Unicode NFKC/category-based peer-name sanitization at the terminal display boundary, plus default, parsing, clamping, independence, forwarding, example-config, and hostile-Unicode tests. |
 | `241b29c` | Ported inbound `/offer` handling, peering-key validation, wanted-ID responses, accepted/transferring/validating lifecycle accounting, transfer-size admission, sequential validation pressure, maximum concurrent inbound syncs, configurable static-peer bypass, stamp-failure throttling, asynchronous PN stamp validation, message-store/distribution updates, and cleanup on invalid payloads, link closure, and resource failure. Tests cover every admission branch, offer parsing/key failure, lifecycle transition, direct/PN resource limits, asynchronous storage, and cleanup paths. |
 | `3e2cd36` | Python LXMF package version 1.0.2 → 1.1.0 only. Rust maintains an independent workspace version and does not mirror Python release numbers. |
+| `5769d46` | Ported the safer 1 KB default direct-delivery resource limit in both runtime defaults and generated config. Delivery limits now remain floating-point kilobytes through `RouterConfig`, preserving upstream's 0.38 KB minimum instead of truncating it to zero. Resource acceptance logs the resource type, byte size, link, and accept/reject outcome for direct delivery and propagation transfers. Tests cover the new default, example config, configured floor, exact forwarding, and byte-boundary admission. |
 
 ## Refresh Procedure
 

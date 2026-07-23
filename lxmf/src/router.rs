@@ -174,7 +174,7 @@ pub struct RouterConfig {
     pub autopeer: bool,
     pub autopeer_maxdepth: u8,
     pub propagation_limit: u32,
-    pub delivery_limit: u32,
+    pub delivery_limit: f64,
     pub sync_limit: u32,
     pub enforce_ratchets: bool,
     pub enforce_stamps: bool,
@@ -2031,9 +2031,23 @@ impl Callbacks for LxmfCallbacks {
             .get(&link_id.0)
             .is_some_and(|dest| router.delivery_dest_hash == Some(*dest))
         {
-            return transfer_size <= router.config.delivery_limit as u64 * 1000;
+            let accepted = transfer_size <= (router.config.delivery_limit * 1000.0) as u64;
+            log::debug!(
+                "{} {} byte inbound LXMF delivery resource on link {:02x?}",
+                if accepted { "Accepting" } else { "Rejecting" },
+                transfer_size,
+                &link_id.0[..4]
+            );
+            return accepted;
         }
-        router.accept_inbound_propagation_resource(link_id.0, transfer_size)
+        let accepted = router.accept_inbound_propagation_resource(link_id.0, transfer_size);
+        log::debug!(
+            "{} {} byte inbound LXMF propagation resource on link {:02x?}",
+            if accepted { "Accepting" } else { "Rejecting" },
+            transfer_size,
+            &link_id.0[..4]
+        );
+        accepted
     }
 
     fn on_resource_completed(&mut self, link_id: LinkId) {
