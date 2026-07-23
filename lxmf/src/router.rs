@@ -1200,6 +1200,11 @@ impl LxmRouter {
 
     /// Update outbound stamp cost for a destination.
     pub fn update_stamp_cost(&mut self, dest_hash: [u8; 16], cost: u8) {
+        log::trace!(
+            "Updating outbound stamp cost for {:02x?} to {}",
+            &dest_hash[..4],
+            cost
+        );
         let now = now_timestamp();
         self.outbound_stamp_costs.insert(dest_hash, (now, cost));
         let _ =
