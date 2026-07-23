@@ -55,6 +55,32 @@ pub trait PeerSyncTransport {
     fn teardown_peer_link(&self, link_id: [u8; 16]) -> Result<(), PeerSyncTransportError>;
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InboundResourceControlError {
+    CancelFailed,
+}
+
+pub trait InboundResourceControl {
+    fn cancel_inbound_resource(
+        &self,
+        link_id: [u8; 16],
+        resource_hash: &[u8],
+    ) -> Result<(), InboundResourceControlError>;
+}
+
+impl InboundResourceControl for RnsNode {
+    fn cancel_inbound_resource(
+        &self,
+        link_id: [u8; 16],
+        _resource_hash: &[u8],
+    ) -> Result<(), InboundResourceControlError> {
+        // rns-net does not yet expose receiver-side cancellation for one
+        // already accepted resource, so cancel its containing link.
+        self.teardown_link(link_id)
+            .map_err(|_| InboundResourceControlError::CancelFailed)
+    }
+}
+
 impl PeerSyncTransport for RnsNode {
     fn send_peer_offer(
         &self,
@@ -107,6 +133,24 @@ pub enum InboundOfferState {
     Accepted,
     Transferring,
     Validating,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InboundResource {
+    pub resource_hash: Vec<u8>,
+    pub link_id: [u8; 16],
+    pub received: u64,
+    pub total: u64,
+}
+
+impl InboundResource {
+    pub fn progress(&self) -> f64 {
+        if self.total == 0 {
+            0.0
+        } else {
+            self.received.min(self.total) as f64 / self.total as f64
+        }
+    }
 }
 
 /// Information about a delivered message passed to the delivery callback.
@@ -283,7 +327,11 @@ pub struct LxmRouter {
     // Propagation transfer state (client-side)
     pub propagation_transfer_state: PropagationTransferState,
     pub propagation_transfer_progress: f64,
+    pub propagation_transfer_size: Option<u64>,
     pub propagation_transfer_max_messages: Option<u32>,
+
+    // Active inbound direct-delivery resources
+    pub incoming_delivery_resources: HashMap<Vec<u8>, InboundResource>,
 
     // Identity cache (dest_hash → public_key) populated from announces.
     // Used for signature verification in lxmf_delivery to avoid synchronous
@@ -370,7 +418,9 @@ impl LxmRouter {
             throttled_peers: HashMap::new(),
             propagation_transfer_state: PropagationTransferState::Idle,
             propagation_transfer_progress: 0.0,
+            propagation_transfer_size: None,
             propagation_transfer_max_messages: None,
+            incoming_delivery_resources: HashMap::new(),
             identity_cache: HashMap::new(),
             identity_hash_cache: HashMap::new(),
             compression_cache: HashMap::new(),
@@ -716,6 +766,100 @@ impl LxmRouter {
     /// at a different propagation node.
     pub fn set_propagation_dest_hash(&mut self, dest_hash: [u8; 16]) {
         self.outbound_propagation_node = Some(dest_hash);
+    }
+
+    pub fn reset_propagation_transfer_progress(&mut self) {
+        self.propagation_transfer_progress = 0.0;
+        self.propagation_transfer_size = None;
+    }
+
+    pub fn track_inbound_delivery_resource(
+        &mut self,
+        link_id: [u8; 16],
+        resource_hash: Vec<u8>,
+        total: u64,
+    ) {
+        self.incoming_delivery_resources.insert(
+            resource_hash.clone(),
+            InboundResource {
+                resource_hash,
+                link_id,
+                received: 0,
+                total,
+            },
+        );
+    }
+
+    pub fn update_inbound_resource_progress(
+        &mut self,
+        link_id: [u8; 16],
+        received: usize,
+        total: usize,
+    ) {
+        for resource in self.incoming_delivery_resources.values_mut() {
+            if resource.link_id == link_id {
+                resource.total = resource.total.max(total as u64);
+                resource.received = resource.received.max(received as u64).min(resource.total);
+            }
+        }
+    }
+
+    fn finish_inbound_delivery_resources(&mut self, link_id: [u8; 16]) {
+        self.incoming_delivery_resources
+            .retain(|_, resource| resource.link_id != link_id);
+    }
+
+    pub fn inbound_count(&self) -> usize {
+        self.incoming_delivery_resources.len()
+    }
+
+    pub fn inbound_resources(&self) -> Vec<InboundResource> {
+        let mut resources: Vec<_> = self.incoming_delivery_resources.values().cloned().collect();
+        resources.sort_by(|left, right| left.resource_hash.cmp(&right.resource_hash));
+        resources
+    }
+
+    pub fn cancel_inbound_with<T: InboundResourceControl + ?Sized>(
+        &mut self,
+        resource_hash: &[u8],
+        control: &T,
+    ) -> bool {
+        let Some(resource) = self.incoming_delivery_resources.get(resource_hash).cloned() else {
+            return false;
+        };
+        if control
+            .cancel_inbound_resource(resource.link_id, &resource.resource_hash)
+            .is_err()
+        {
+            return false;
+        }
+        self.incoming_delivery_resources.remove(resource_hash);
+        true
+    }
+
+    pub fn cancel_all_inbound_with<T: InboundResourceControl + ?Sized>(
+        &mut self,
+        control: &T,
+    ) -> usize {
+        let resources = self.inbound_resources();
+        resources
+            .iter()
+            .filter(|resource| self.cancel_inbound_with(&resource.resource_hash, control))
+            .count()
+    }
+
+    pub fn cancel_inbound(&mut self, resource_hash: &[u8]) -> bool {
+        let Some(node) = self.node.clone() else {
+            return false;
+        };
+        self.cancel_inbound_with(resource_hash, node.as_ref())
+    }
+
+    pub fn cancel_all_inbound(&mut self) -> usize {
+        let Some(node) = self.node.clone() else {
+            return 0;
+        };
+        self.cancel_all_inbound_with(node.as_ref())
     }
 
     /// Run periodic jobs. Called every PROCESSING_INTERVAL seconds.
@@ -1948,6 +2092,7 @@ impl Callbacks for LxmfCallbacks {
         router.peer_sync_response_links.remove(&link_id.0);
         router.peer_sync_transfer_sizes.remove(&link_id.0);
         router.cleanup_inbound_link(link_id.0);
+        router.finish_inbound_delivery_resources(link_id.0);
         for peer in router.peers.values_mut() {
             if peer.link_id == Some(link_id.0) {
                 peer.handle_link_closed();
@@ -1975,6 +2120,10 @@ impl Callbacks for LxmfCallbacks {
 
     fn on_resource_received(&mut self, link_id: LinkId, data: Vec<u8>, _metadata: Option<Vec<u8>>) {
         if self.is_delivery_link(link_id) {
+            self.router
+                .lock()
+                .unwrap()
+                .finish_inbound_delivery_resources(link_id.0);
             self.spawn_lxmf_delivery(
                 data,
                 true,
@@ -2021,7 +2170,7 @@ impl Callbacks for LxmfCallbacks {
     fn on_resource_accept_query(
         &mut self,
         link_id: LinkId,
-        _resource_hash: Vec<u8>,
+        resource_hash: Vec<u8>,
         transfer_size: u64,
         _has_metadata: bool,
     ) -> bool {
@@ -2038,6 +2187,9 @@ impl Callbacks for LxmfCallbacks {
                 transfer_size,
                 &link_id.0[..4]
             );
+            if accepted {
+                router.track_inbound_delivery_resource(link_id.0, resource_hash, transfer_size);
+            }
             return accepted;
         }
         let accepted = router.accept_inbound_propagation_resource(link_id.0, transfer_size);
@@ -2048,6 +2200,19 @@ impl Callbacks for LxmfCallbacks {
             &link_id.0[..4]
         );
         accepted
+    }
+
+    fn on_resource_progress(&mut self, link_id: LinkId, received: usize, total: usize) {
+        let mut router = self.router.lock().unwrap();
+        router.update_inbound_resource_progress(link_id.0, received, total);
+        if router.propagation_link == Some(link_id.0) {
+            router.propagation_transfer_size = Some(total as u64);
+            router.propagation_transfer_progress = if total == 0 {
+                0.0
+            } else {
+                received.min(total) as f64 / total as f64
+            };
+        }
     }
 
     fn on_resource_completed(&mut self, link_id: LinkId) {
@@ -2107,6 +2272,7 @@ impl Callbacks for LxmfCallbacks {
         let mut router = self.router.lock().unwrap();
 
         router.cleanup_inbound_link(link_id.0);
+        router.finish_inbound_delivery_resources(link_id.0);
         router.peer_sync_transfer_sizes.remove(&link_id.0);
         if let Some(peer) = router
             .peers

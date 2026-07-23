@@ -9,8 +9,9 @@ use lxmf_core::constants::{
 };
 use lxmf_core::message;
 use lxmf_rs::router::{
-    InboundOfferState, LxmRouter, LxmfCallbacks, OutboundError, OutboundMessage,
-    PeerOfferResponseResult, PeerSyncTransport, PeerSyncTransportError, RouterConfig,
+    InboundOfferState, InboundResourceControl, InboundResourceControlError, LxmRouter,
+    LxmfCallbacks, OutboundError, OutboundMessage, PeerOfferResponseResult, PeerSyncTransport,
+    PeerSyncTransportError, RouterConfig,
 };
 use rns_core::msgpack::{pack, unpack_exact, Value};
 use rns_core::types::{DestHash, IdentityHash, LinkId};
@@ -84,6 +85,25 @@ impl PeerSyncTransport for FakePeerSyncTransport {
 
     fn teardown_peer_link(&self, link_id: [u8; 16]) -> Result<(), PeerSyncTransportError> {
         self.teardowns.lock().unwrap().push(link_id);
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct FakeInboundResourceControl {
+    cancellations: Mutex<Vec<([u8; 16], Vec<u8>)>>,
+}
+
+impl InboundResourceControl for FakeInboundResourceControl {
+    fn cancel_inbound_resource(
+        &self,
+        link_id: [u8; 16],
+        resource_hash: &[u8],
+    ) -> Result<(), InboundResourceControlError> {
+        self.cancellations
+            .lock()
+            .unwrap()
+            .push((link_id, resource_hash.to_vec()));
         Ok(())
     }
 }
@@ -869,6 +889,11 @@ fn resource_accept_query_enforces_delivery_and_propagation_limits() {
 
     let guard = router.lock().unwrap();
     assert_eq!(
+        guard.inbound_count(),
+        1,
+        "the rejected direct resource must not be tracked"
+    );
+    assert_eq!(
         guard.accepted_offer_links.get(&propagation_link),
         Some(&InboundOfferState::Transferring)
     );
@@ -970,6 +995,171 @@ fn link_close_cleans_every_inbound_offer_state() {
     assert!(!guard.inbound_offer_peers.contains_key(&link_id));
     assert!(!guard.validating_pn_stamps_from.contains_key(&remote_hash));
     assert!(!guard.validated_peer_links.contains(&link_id));
+    drop(guard);
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn direct_resource_tracking_reports_count_details_and_progress() {
+    let (mut router, dir) = test_router("direct_resource_tracking");
+    let first_hash = vec![0x11; 32];
+    let second_hash = vec![0x12; 32];
+
+    router.track_inbound_delivery_resource([0x21; 16], first_hash.clone(), 4000);
+    router.track_inbound_delivery_resource([0x22; 16], second_hash.clone(), 8000);
+    router.update_inbound_resource_progress([0x21; 16], 1000, 4000);
+
+    assert_eq!(router.inbound_count(), 2);
+    let resources = router.inbound_resources();
+    assert_eq!(resources.len(), 2);
+    let first = resources
+        .iter()
+        .find(|resource| resource.resource_hash == first_hash)
+        .unwrap();
+    assert_eq!(first.link_id, [0x21; 16]);
+    assert_eq!(first.received, 1000);
+    assert_eq!(first.total, 4000);
+    assert_eq!(first.progress(), 0.25);
+
+    let second = resources
+        .iter()
+        .find(|resource| resource.resource_hash == second_hash)
+        .unwrap();
+    assert_eq!(second.received, 0);
+    assert_eq!(second.progress(), 0.0);
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn inbound_resource_progress_is_monotonic_and_clamped_to_total() {
+    let (mut router, dir) = test_router("resource_progress_clamp");
+    let resource_hash = vec![0x31; 32];
+    router.track_inbound_delivery_resource([0x32; 16], resource_hash.clone(), 100);
+
+    router.update_inbound_resource_progress([0x32; 16], 70, 100);
+    router.update_inbound_resource_progress([0x32; 16], 20, 100);
+    router.update_inbound_resource_progress([0x32; 16], 150, 100);
+
+    let resource = router
+        .inbound_resources()
+        .into_iter()
+        .find(|resource| resource.resource_hash == resource_hash)
+        .unwrap();
+    assert_eq!(resource.received, 100);
+    assert_eq!(resource.progress(), 1.0);
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn cancel_inbound_targets_exact_resource_and_removes_tracking() {
+    let (mut router, dir) = test_router("cancel_inbound");
+    let control = FakeInboundResourceControl::default();
+    let first_hash = vec![0x41; 32];
+    let second_hash = vec![0x42; 32];
+    router.track_inbound_delivery_resource([0x51; 16], first_hash.clone(), 100);
+    router.track_inbound_delivery_resource([0x52; 16], second_hash.clone(), 200);
+
+    assert!(router.cancel_inbound_with(&first_hash, &control));
+    assert!(!router.cancel_inbound_with(&first_hash, &control));
+    assert_eq!(router.inbound_count(), 1);
+    assert_eq!(
+        *control.cancellations.lock().unwrap(),
+        vec![([0x51; 16], first_hash)]
+    );
+    assert_eq!(router.inbound_resources()[0].resource_hash, second_hash);
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn cancel_all_inbound_attempts_every_resource() {
+    let (mut router, dir) = test_router("cancel_all_inbound");
+    let control = FakeInboundResourceControl::default();
+    for index in 0..3u8 {
+        router.track_inbound_delivery_resource([0x60 + index; 16], vec![0x70 + index; 32], 100);
+    }
+
+    assert_eq!(router.cancel_all_inbound_with(&control), 3);
+    assert_eq!(router.inbound_count(), 0);
+    assert_eq!(control.cancellations.lock().unwrap().len(), 3);
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn delivery_resource_callbacks_track_progress_and_remove_completed_transfer() {
+    let (mut router, dir) = test_router("delivery_resource_callbacks");
+    let link_id = [0x81; 16];
+    let delivery_hash = [0x82; 16];
+    let resource_hash = vec![0x83; 32];
+    router.delivery_dest_hash = Some(delivery_hash);
+    router.link_destinations.insert(link_id, delivery_hash);
+    router.config.delivery_limit = 2.0;
+
+    let router = Arc::new(Mutex::new(router));
+    let mut callbacks = LxmfCallbacks::new(router.clone());
+    assert!(callbacks.on_resource_accept_query(
+        LinkId(link_id),
+        resource_hash.clone(),
+        1500,
+        false
+    ));
+    callbacks.on_resource_progress(LinkId(link_id), 750, 1500);
+
+    {
+        let guard = router.lock().unwrap();
+        assert_eq!(guard.inbound_count(), 1);
+        let resource = &guard.inbound_resources()[0];
+        assert_eq!(resource.resource_hash, resource_hash);
+        assert_eq!(resource.progress(), 0.5);
+    }
+
+    callbacks.on_resource_received(LinkId(link_id), vec![0; LXMF_OVERHEAD], None);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        if router.lock().unwrap().inbound_count() == 0 {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "completed inbound resource was not cleaned"
+        );
+        std::thread::yield_now();
+    }
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn failed_delivery_resource_is_removed_from_tracking() {
+    let (mut router, dir) = test_router("failed_delivery_resource");
+    let link_id = [0x88; 16];
+    router.track_inbound_delivery_resource(link_id, vec![0x89; 32], 1000);
+
+    let router = Arc::new(Mutex::new(router));
+    let mut callbacks = LxmfCallbacks::new(router.clone());
+    callbacks.on_resource_failed(LinkId(link_id), "test failure".into());
+
+    assert_eq!(router.lock().unwrap().inbound_count(), 0);
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn propagation_resource_progress_records_total_response_size() {
+    let (router, dir) = test_router("propagation_transfer_size");
+    let link_id = [0x91; 16];
+    let router = Arc::new(Mutex::new(router));
+    router.lock().unwrap().propagation_link = Some(link_id);
+    let mut callbacks = LxmfCallbacks::new(router.clone());
+
+    callbacks.on_resource_progress(LinkId(link_id), 250, 1000);
+    {
+        let guard = router.lock().unwrap();
+        assert_eq!(guard.propagation_transfer_size, Some(1000));
+        assert_eq!(guard.propagation_transfer_progress, 0.25);
+    }
+
+    router.lock().unwrap().reset_propagation_transfer_progress();
+    let guard = router.lock().unwrap();
+    assert_eq!(guard.propagation_transfer_size, None);
+    assert_eq!(guard.propagation_transfer_progress, 0.0);
     drop(guard);
     let _ = fs::remove_dir_all(dir);
 }
