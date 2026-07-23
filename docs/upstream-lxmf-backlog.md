@@ -12,10 +12,10 @@ closed out.
 - Upstream branch: `origin/master`
 - Current upstream head: `795fdaa2b0777c13033787d933d1afc94a2377cb`
 - Last reviewed Rust-port upstream point:
-  `fab12ad9bf9f997797034950f289fe41a79dcf5a`
+  `795fdaa2b0777c13033787d933d1afc94a2377cb`
 - Rust branch at latest review: `dev`
 - Rust head at latest review:
-  `4a6dc6f954b5d58d45fe89860d22cda815980cda`
+  `56e414352becddcdcf5c7829d43e855b50802231`
 
 The local upstream worktree branch `master` remains at the last reviewed
 baseline. The remote `origin/master` was checked at `795fdaa` during the
@@ -23,11 +23,9 @@ baseline. The remote `origin/master` was checked at `795fdaa` during the
 
 ## Open Upstream Commits
 
-The following commits after `fab12ad` remain to be ported or explicitly closed:
-
-| Upstream commit | Subject |
-| --- | --- |
-| `795fdaa` | Updated versions |
+None. Every commit in
+`fab12ad9bf9f997797034950f289fe41a79dcf5a..795fdaa2b0777c13033787d933d1afc94a2377cb`
+is ported, covered by tests, or explicitly closed as metadata/design-equivalent.
 
 ## Recently Reviewed And Closed
 
@@ -68,6 +66,7 @@ ported, tracked as no-op metadata, or judged Python/tooling-specific in the
 | `5769d46` | Ported the safer 1 KB default direct-delivery resource limit in both runtime defaults and generated config. Delivery limits now remain floating-point kilobytes through `RouterConfig`, preserving upstream's 0.38 KB minimum instead of truncating it to zero. Resource acceptance logs the resource type, byte size, link, and accept/reject outcome for direct delivery and propagation transfers. Tests cover the new default, example config, configured floor, exact forwarding, and byte-boundary admission. |
 | `d909619` | Ported inbound direct-resource identity, count/list APIs, monotonic progress, completion/failure/link cleanup, exact-hash cancellation APIs, cancel-all, and propagation response size/progress tracking and reset. The transport control is abstracted for exact resource cancellation; the current `rns-net` adapter stops an accepted transfer by tearing down its containing link because `RnsNode` does not expose individual receiver-side cancellation. Tests cover multiple resources, progress clamping, exact/cancel-all dispatch, callback lifecycle, rejected resources, failure cleanup, and propagation size reset. |
 | `7bb4bcf` | Added pathing-detail (`trace`) logging for outbound stamp-cost updates. Regression tests cover cache replacement, multiple destinations, atomic persistence, expiry filtering, and refresh after expiry. |
+| `795fdaa` | Python RNS minimum dependency metadata (1.3.8 → 1.4.0). No direct Cargo version mirroring; the receiver-side cancellation limitation is documented on `d909619` and isolated behind a transport abstraction. |
 
 ## Refresh Procedure
 
