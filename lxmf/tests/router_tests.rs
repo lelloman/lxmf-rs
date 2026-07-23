@@ -5,7 +5,8 @@ use std::sync::{Arc, Mutex};
 
 use lxmf_core::constants::{
     DeliveryMethod, MessageState, PeerError, PeerState, Representation, APP_NAME,
-    DESTINATION_LENGTH, ENCRYPTION_DESCRIPTION_UNENCRYPTED, LXMF_OVERHEAD, STAMP_SIZE,
+    DESTINATION_LENGTH, ENCRYPTION_DESCRIPTION_UNENCRYPTED, LXMF_OVERHEAD, STAMP_COST_EXPIRY,
+    STAMP_SIZE,
 };
 use lxmf_core::message;
 use lxmf_rs::router::{
@@ -1161,5 +1162,44 @@ fn propagation_resource_progress_records_total_response_size() {
     assert_eq!(guard.propagation_transfer_size, None);
     assert_eq!(guard.propagation_transfer_progress, 0.0);
     drop(guard);
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn stamp_cost_update_replaces_cache_and_persists_all_destinations() {
+    let (mut router, dir) = test_router("stamp_cost_update");
+    let first = [0xA1; 16];
+    let second = [0xA2; 16];
+
+    router.update_stamp_cost(first, 7);
+    router.update_stamp_cost(second, 11);
+    let first_timestamp = router.outbound_stamp_costs[&first].0;
+    router.update_stamp_cost(first, 13);
+
+    assert_eq!(router.get_stamp_cost(&first), Some(13));
+    assert_eq!(router.get_stamp_cost(&second), Some(11));
+    assert!(router.outbound_stamp_costs[&first].0 >= first_timestamp);
+    assert_eq!(
+        lxmf_rs::storage::load_stamp_costs(&router.paths.outbound_stamp_costs),
+        router.outbound_stamp_costs
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn expired_stamp_cost_is_not_returned_but_remains_persistable() {
+    let (mut router, dir) = test_router("expired_stamp_cost");
+    let destination = [0xB1; 16];
+    router.outbound_stamp_costs.insert(
+        destination,
+        (
+            lxmf_rs::router::now_timestamp() - STAMP_COST_EXPIRY as f64 - 1.0,
+            17,
+        ),
+    );
+
+    assert_eq!(router.get_stamp_cost(&destination), None);
+    router.update_stamp_cost(destination, 19);
+    assert_eq!(router.get_stamp_cost(&destination), Some(19));
     let _ = fs::remove_dir_all(dir);
 }

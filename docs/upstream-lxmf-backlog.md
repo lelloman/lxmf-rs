@@ -27,7 +27,6 @@ The following commits after `fab12ad` remain to be ported or explicitly closed:
 
 | Upstream commit | Subject |
 | --- | --- |
-| `7bb4bcf` | Updated stamp-cost logging |
 | `795fdaa` | Updated versions |
 
 ## Recently Reviewed And Closed
@@ -68,6 +67,7 @@ ported, tracked as no-op metadata, or judged Python/tooling-specific in the
 | `3e2cd36` | Python LXMF package version 1.0.2 → 1.1.0 only. Rust maintains an independent workspace version and does not mirror Python release numbers. |
 | `5769d46` | Ported the safer 1 KB default direct-delivery resource limit in both runtime defaults and generated config. Delivery limits now remain floating-point kilobytes through `RouterConfig`, preserving upstream's 0.38 KB minimum instead of truncating it to zero. Resource acceptance logs the resource type, byte size, link, and accept/reject outcome for direct delivery and propagation transfers. Tests cover the new default, example config, configured floor, exact forwarding, and byte-boundary admission. |
 | `d909619` | Ported inbound direct-resource identity, count/list APIs, monotonic progress, completion/failure/link cleanup, exact-hash cancellation APIs, cancel-all, and propagation response size/progress tracking and reset. The transport control is abstracted for exact resource cancellation; the current `rns-net` adapter stops an accepted transfer by tearing down its containing link because `RnsNode` does not expose individual receiver-side cancellation. Tests cover multiple resources, progress clamping, exact/cancel-all dispatch, callback lifecycle, rejected resources, failure cleanup, and propagation size reset. |
+| `7bb4bcf` | Added pathing-detail (`trace`) logging for outbound stamp-cost updates. Regression tests cover cache replacement, multiple destinations, atomic persistence, expiry filtering, and refresh after expiry. |
 
 ## Refresh Procedure
 
