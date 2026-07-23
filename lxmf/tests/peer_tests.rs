@@ -299,6 +299,60 @@ fn peer_offer_without_flexibility_requires_full_target_cost() {
     assert_eq!(offer_ids(&mut peer, &entries), vec![[0x09; 32]]);
 }
 
+fn assert_filtered_empty_offer_keeps_peer_ready(mut peer: LxmPeer, entries: &[OfferEntry]) {
+    let previous_offer = vec![[0xEE; 32]];
+    peer.last_offer = previous_offer.clone();
+    peer.handle_link_established([0x77; 16], 0.1);
+
+    assert!(peer.build_offer(entries).is_none());
+    assert_eq!(peer.state, PeerState::LinkReady);
+    assert_eq!(peer.last_offer, previous_offer);
+}
+
+#[test]
+fn peer_offer_stops_when_stamp_filter_removes_every_message() {
+    let peer = offer_peer(16, 3);
+    assert_filtered_empty_offer_keeps_peer_ready(
+        peer,
+        &[OfferEntry {
+            transient_id: [0x0C; 32],
+            weight: 1.0,
+            size: 128,
+            stamp_value: 12,
+        }],
+    );
+}
+
+#[test]
+fn peer_offer_stops_when_transfer_limit_removes_every_message() {
+    let mut peer = offer_peer(16, 3);
+    peer.propagation_transfer_limit = Some(0.1);
+    assert_filtered_empty_offer_keeps_peer_ready(
+        peer,
+        &[OfferEntry {
+            transient_id: [0x10; 32],
+            weight: 1.0,
+            size: 101,
+            stamp_value: 16,
+        }],
+    );
+}
+
+#[test]
+fn peer_offer_stops_when_sync_limit_cannot_fit_first_message() {
+    let mut peer = offer_peer(16, 3);
+    peer.propagation_sync_limit = Some(1);
+    assert_filtered_empty_offer_keeps_peer_ready(
+        peer,
+        &[OfferEntry {
+            transient_id: [0x10; 32],
+            weight: 1.0,
+            size: 961,
+            stamp_value: 16,
+        }],
+    );
+}
+
 #[test]
 fn test_peer_response_false() {
     let vectors = load_peer_vectors();

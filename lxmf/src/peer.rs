@@ -222,6 +222,10 @@ impl LxmPeer {
             offer_ids.push(entry.transient_id);
         }
 
+        if offer_ids.is_empty() {
+            return None;
+        }
+
         self.last_offer = offer_ids.clone();
 
         let offer_id_values: Vec<Value> =

@@ -27,7 +27,6 @@ The following commits after `fab12ad` remain to be ported or explicitly closed:
 
 | Upstream commit | Subject |
 | --- | --- |
-| `982c9fc` | Early sync completion for empty filtered offers |
 | `ca02fa5` | Added `lxmd` configuration and peer-name sanitization |
 | `241b29c` | Added bounded/sequential inbound PN sync processing |
 | `3e2cd36` | Updated version |
@@ -68,6 +67,7 @@ ported, tracked as no-op metadata, or judged Python/tooling-specific in the
 | `8395793` | Ported by routing all msgpack state persistence through a shared atomic writer, covering peers, transient-ID caches, stamp costs, node stats, and tickets as well as the already-atomic propagation message store. Tests cover replacement, symlink safety, failed-write cleanup, concurrent writers, and every state helper. |
 | `548be10` | No separate map locks are needed in Rust: router mutation is serialized through `Arc<Mutex<LxmRouter>>` and cache mutation requires `&mut self`. Added a concurrent writer/cleanup regression test that also verifies the persisted caches contain every non-expired update. |
 | `4a93697` | Rust already used saturating subtraction for the peer offer stamp floor, equivalent to upstream's corrected `max(0, target-flexibility)`. Factored the rule into a named helper and added boundary coverage for below/at threshold, underflow-to-zero, and zero flexibility. |
+| `982c9fc` | Ported by returning an empty-offer result before changing peer state or replacing `last_offer`. Tests cover empty results caused independently by stamp-cost, per-message transfer-size, and cumulative sync-size filtering. |
 
 ## Refresh Procedure
 
