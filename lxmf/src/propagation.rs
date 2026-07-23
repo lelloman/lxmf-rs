@@ -1,16 +1,13 @@
 use std::collections::{HashMap, VecDeque};
-use std::fs::{self, File};
-use std::io::{self, Write};
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::fs;
+use std::path::PathBuf;
 
 use lxmf_core::constants::*;
 use rns_core::msgpack::Value;
 use rns_crypto::sha256::sha256;
 
 use crate::router::now_timestamp;
-
-static NEXT_TMP_WRITE_ID: AtomicU64 = AtomicU64::new(1);
+use crate::storage::atomic_write;
 
 /// A stored propagation message entry.
 pub struct PropagationEntry {
@@ -552,37 +549,6 @@ fn hex_to_bytes32(hex: &str) -> Option<[u8; 32]> {
         result[i] = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).ok()?;
     }
     Some(result)
-}
-
-fn atomic_write(path: &Path, data: &[u8]) -> io::Result<()> {
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    let filename = path.file_name().ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "atomic write path has no filename",
-        )
-    })?;
-    let tmp_id = NEXT_TMP_WRITE_ID.fetch_add(1, Ordering::Relaxed);
-    let tmp_filename = format!(
-        ".tmp.{}.{}.{}",
-        std::process::id(),
-        tmp_id,
-        filename.to_string_lossy()
-    );
-    let tmp_path = parent.join(tmp_filename);
-
-    let result = (|| {
-        let mut file = File::create(&tmp_path)?;
-        file.write_all(data)?;
-        file.sync_all()?;
-        fs::rename(&tmp_path, path)
-    })();
-
-    if result.is_err() {
-        let _ = fs::remove_file(&tmp_path);
-    }
-
-    result
 }
 
 fn bytes_to_hex(bytes: &[u8]) -> String {

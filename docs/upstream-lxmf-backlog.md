@@ -27,7 +27,6 @@ The following commits after `fab12ad` remain to be ported or explicitly closed:
 
 | Upstream commit | Subject |
 | --- | --- |
-| `8395793` | Ensure atomic writes |
 | `548be10` | Added transient ID processing locks |
 | `4a93697` | Fixed PN peer offer preparation minimum stamp cost |
 | `982c9fc` | Early sync completion for empty filtered offers |
@@ -68,6 +67,7 @@ ported, tracked as no-op metadata, or judged Python/tooling-specific in the
 | `2086413` | Ported in this pass: propagation sync retry after `ERROR_NO_IDENTITY` identifies with the router identity and retries the offer; covered by `peer_sync_no_identity_identifies_with_router_identity_and_retries_offer`. |
 | `fab12ad` | Python Makefile/setup.py build-script upload metadata; no Rust-port action. |
 | `fb0fd24` | Python LXMF version and Python RNS minimum dependency metadata. Rust has an independent crate version line; retain the RNS 1.3.8 floor as compatibility context for later resource API ports. |
+| `8395793` | Ported by routing all msgpack state persistence through a shared atomic writer, covering peers, transient-ID caches, stamp costs, node stats, and tickets as well as the already-atomic propagation message store. Tests cover replacement, symlink safety, failed-write cleanup, concurrent writers, and every state helper. |
 
 ## Refresh Procedure
 
