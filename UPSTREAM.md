@@ -8,10 +8,10 @@ The current upstream reference baseline is:
 - Repository: `git@github.com:markqvist/LXMF.git`
 - Local checkout used: `~/LXMF`
 - Branch: `origin/master`
-- Commit: `fab12ad9bf9f997797034950f289fe41a79dcf5a`
-- Describe: `1.0.1-1-gfab12ad`
-- Commit date: `2026-06-01T14:26:47+02:00`
-- Subject: `Updated build scripts`
+- Commit: `795fdaa2b0777c13033787d933d1afc94a2377cb`
+- Describe: `1.1.0`
+- Commit date: `2026-07-20T18:49:54+02:00`
+- Subject: `Updated versions`
 
 The previous major review baseline was `8499729024a4cddfceb47ca07188bb5b1d11d179`
 (`0.9.6`). The upstream range
@@ -83,6 +83,15 @@ The post-`b53a3ce` behavior ports are covered by
 `peer_sync_no_identity_identifies_with_router_identity_and_retries_offer` in
 `lxmf/tests/router_tests.rs`.
 
+The subsequent upstream range
+`fab12ad9bf9f997797034950f289fe41a79dcf5a..795fdaa2b0777c13033787d933d1afc94a2377cb`
+has also been reviewed. Applicable state-persistence, propagation-sync,
+resource-limit, resource-tracking, cancellation, and logging behavior is ported
+on the Rust `dev` branch. Python release and dependency metadata, and behavior
+already guaranteed by Rust ownership, were explicitly closed as no-op parity
+items. The commit-by-commit disposition and test coverage are recorded in
+`docs/upstream-lxmf-backlog.md`.
+
 ## RNS Dependency Baseline
 
 `lxmf-rs` depends on published Rust Reticulum crates from crates.io:
@@ -100,7 +109,7 @@ The corresponding `rns-rs` integration baseline is:
 When updating RNS integration, publish the required `rns-rs` crates, update the
 exact versions in `Cargo.toml`, and record the release commit here.
 
-The current upstream Python LXMF post-`1.0.1` head requires `rns>=1.3.2`. The
+The current upstream Python LXMF `1.1.0` baseline requires `rns>=1.4.0`. The
 Rust dependency baseline above uses the corresponding latest published `rns-rs`
 crates; treat Python RNS dependency bumps as dependency-parity review input,
 not as direct Cargo version edits.

@@ -409,8 +409,8 @@ database used by `scripts/vps_daily_report.py` in `rns-rs`; do not replace the
 live RNS node runtime database at `/var/lib/rns-node/stats.db`.
 
 Before running the daily report, check whether upstream Python LXMF moved past
-the local upstream baseline used for `lxmf-rs` parity work. The upstream checkout
-location is workstation-local. Store it in the gitignored file
+the reviewed baseline recorded in `UPSTREAM.md`. The upstream checkout location
+is workstation-local. Store it in the gitignored file
 `.local/lxmf-upstream.path`; the first non-empty, non-comment line must be the
 absolute path to the local upstream LXMF repository. For this workstation that
 file should contain:
@@ -419,23 +419,26 @@ file should contain:
 /home/lelloman/LXMF
 ```
 
-The upstream check treats the pointed checkout's current `HEAD` as the LXMF
-baseline reviewed or integrated into `lxmf-rs`. Fetch the GitHub remote and, if
-configured, the LXMF `rns-git` remote, then list commits present on either remote
-that are not in that local baseline. If either log prints commits, include that
-in the daily report as upstream LXMF work not integrated yet:
+The upstream checkout's current `HEAD` may intentionally remain pinned to an
+older commit, so do not use it as the parity baseline. Read the authoritative
+reviewed commit from `UPSTREAM.md`. Fetch the GitHub remote and, if configured,
+the LXMF `rns-git` remote, then list commits present on either remote that are
+not in the reviewed baseline. If either log prints commits, include that in the
+daily report as upstream LXMF work not integrated yet:
 
 ```bash
 LXMF_UPSTREAM_DIR="$(sed -n '/^[[:space:]]*#/d; /^[[:space:]]*$/d; p; q' .local/lxmf-upstream.path)"
+LXMF_REVIEWED_BASELINE="$(sed -n 's/^- Commit: `\([0-9a-f]\{40\}\)`$/\1/p' UPSTREAM.md)"
 test -n "$LXMF_UPSTREAM_DIR"
 test -d "$LXMF_UPSTREAM_DIR/.git"
+test -n "$LXMF_REVIEWED_BASELINE"
 LXMF_GITHUB_REMOTE="${LXMF_GITHUB_REMOTE:-origin}"
 LXMF_RGIT_REMOTE="${LXMF_RGIT_REMOTE:-rgit}"
 git -C "$LXMF_UPSTREAM_DIR" fetch "$LXMF_GITHUB_REMOTE"
-git -C "$LXMF_UPSTREAM_DIR" log --oneline "HEAD..$LXMF_GITHUB_REMOTE/master"
+git -C "$LXMF_UPSTREAM_DIR" log --oneline "$LXMF_REVIEWED_BASELINE..$LXMF_GITHUB_REMOTE/master"
 if git -C "$LXMF_UPSTREAM_DIR" remote get-url "$LXMF_RGIT_REMOTE" >/dev/null 2>&1; then
   git -C "$LXMF_UPSTREAM_DIR" fetch "$LXMF_RGIT_REMOTE"
-  git -C "$LXMF_UPSTREAM_DIR" log --oneline "HEAD..$LXMF_RGIT_REMOTE/master"
+  git -C "$LXMF_UPSTREAM_DIR" log --oneline "$LXMF_REVIEWED_BASELINE..$LXMF_RGIT_REMOTE/master"
 fi
 ```
 

@@ -6,7 +6,7 @@ closed out.
 
 ## Current State
 
-- Last checked: 2026-07-23
+- Last checked: 2026-08-31
 - Upstream checkout: `/home/lelloman/LXMF`
 - Upstream remote: `git@github.com:markqvist/LXMF.git`
 - Upstream branch: `origin/master`
@@ -15,11 +15,12 @@ closed out.
   `795fdaa2b0777c13033787d933d1afc94a2377cb`
 - Rust branch at latest review: `dev`
 - Rust head at latest review:
-  `56e414352becddcdcf5c7829d43e855b50802231`
+  `b610ffabc91dd0c6cb4374d662e1b607f4f0567e`
 
-The local upstream worktree branch `master` remains at the last reviewed
-baseline. The remote `origin/master` was checked at `795fdaa` during the
-2026-07-23 review pass.
+The local upstream worktree branch `master` intentionally remains at the older
+`fab12ad` baseline. Do not use its `HEAD` as the reviewed Rust-port baseline;
+the authoritative reviewed commit is recorded in `UPSTREAM.md`. The remote
+`origin/master` was checked at `795fdaa` during the 2026-08-31 refresh.
 
 ## Open Upstream Commits
 
@@ -30,8 +31,8 @@ is ported, covered by tests, or explicitly closed as metadata/design-equivalent.
 ## Recently Reviewed And Closed
 
 These upstream commits are not open backlog items because they were already
-ported, tracked as no-op metadata, or judged Python/tooling-specific in the
-2026-05-24 and 2026-05-29 review passes.
+ported, tracked as no-op metadata, or judged Python/tooling-specific in review
+passes from 2026-05-24 through 2026-07-23.
 
 | Upstream commit(s) | Status |
 | --- | --- |
@@ -70,12 +71,16 @@ ported, tracked as no-op metadata, or judged Python/tooling-specific in the
 
 ## Refresh Procedure
 
-From the upstream checkout:
+From the `lxmf-rs` workspace, read the reviewed baseline from `UPSTREAM.md`
+rather than assuming that the upstream checkout's current branch points to it:
 
 ```bash
-cd ~/LXMF
-git fetch origin --prune
-git log --oneline --reverse fab12ad9bf9f997797034950f289fe41a79dcf5a..origin/master
+LXMF_UPSTREAM_DIR="$(sed -n '/^[[:space:]]*#/d; /^[[:space:]]*$/d; p; q' .local/lxmf-upstream.path)"
+LXMF_REVIEWED_BASELINE="$(sed -n 's/^- Commit: `\([0-9a-f]\{40\}\)`$/\1/p' UPSTREAM.md)"
+test -n "$LXMF_UPSTREAM_DIR"
+test -n "$LXMF_REVIEWED_BASELINE"
+git -C "$LXMF_UPSTREAM_DIR" fetch origin --prune
+git -C "$LXMF_UPSTREAM_DIR" log --oneline --reverse "$LXMF_REVIEWED_BASELINE..origin/master"
 ```
 
 For each new commit:
@@ -86,4 +91,5 @@ For each new commit:
 3. When a Rust commit ports or closes an item, move it to "Recently Reviewed
    And Closed" and record the Rust commit hash or no-op reason.
 4. Advance "Last reviewed Rust-port upstream point" only after every commit up
-   to that upstream hash is either ported or explicitly closed.
+   to that upstream hash is either ported or explicitly closed. Update the
+   current reference baseline in `UPSTREAM.md` in the same change.
