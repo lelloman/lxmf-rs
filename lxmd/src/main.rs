@@ -477,7 +477,7 @@ fn load_or_create_identity(path: &Path) -> rns_crypto::identity::Identity {
     let mut rng = rns_crypto::OsRng;
     let id = Identity::new(&mut rng);
     if let Some(prv) = id.get_private_key() {
-        if let Err(e) = fs::write(path, &prv) {
+        if let Err(e) = fs::write(path, prv) {
             log::error!("Failed to save identity to {}: {}", path.display(), e);
         } else {
             log::info!("Created new identity, saved to {}", path.display());
@@ -1074,7 +1074,7 @@ fn register_control_handlers(
                 return Some(vec![lxmf_core::constants::PeerError::InvalidData as u8]);
             }
             let mut peer_hash = [0u8; 16];
-            peer_hash.copy_from_slice(&data);
+            peer_hash.copy_from_slice(data);
             let mut r = sync_router.lock().unwrap();
             match r.sync_peer(&peer_hash) {
                 Ok(()) => Some(msgpack::pack(&Value::Bool(true))),
@@ -1092,7 +1092,7 @@ fn register_control_handlers(
                 return Some(vec![lxmf_core::constants::PeerError::InvalidData as u8]);
             }
             let mut peer_hash = [0u8; 16];
-            peer_hash.copy_from_slice(&data);
+            peer_hash.copy_from_slice(data);
             let mut r = unpeer_router.lock().unwrap();
             match r.unpeer(&peer_hash) {
                 Ok(()) => Some(msgpack::pack(&Value::Bool(true))),
@@ -1480,8 +1480,8 @@ fn main() {
         println!("Mode      : Client");
     }
 
-    if config.on_inbound.is_some() {
-        println!("On inbound: {}", config.on_inbound.as_ref().unwrap());
+    if let Some(on_inbound) = &config.on_inbound {
+        println!("On inbound: {}", on_inbound);
     }
 
     println!("Config    : {}", paths.configdir.display());

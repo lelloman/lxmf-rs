@@ -295,9 +295,9 @@ mod tests {
 
         let handles: Vec<_> = payloads
             .iter()
-            .cloned()
             .map(|value| {
                 let path = path.clone();
+                let value = value.clone();
                 thread::spawn(move || save_msgpack(&path, &value))
             })
             .collect();

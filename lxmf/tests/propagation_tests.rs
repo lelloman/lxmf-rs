@@ -25,7 +25,7 @@ fn make_lxm_data(dest_hash: &[u8; 16], payload: &[u8]) -> Vec<u8> {
     } else {
         LXMF_OVERHEAD - 16 - payload.len()
     };
-    data.extend(std::iter::repeat(0u8).take(padding_needed));
+    data.extend(std::iter::repeat_n(0u8, padding_needed));
     data.extend_from_slice(payload);
     data
 }
@@ -498,11 +498,11 @@ fn test_clean_weight_prioritised() {
 
     // Store messages for both destinations
     for i in 0..10u8 {
-        let lxm = make_lxm_data(&priority_dest, &vec![i; 50]);
+        let lxm = make_lxm_data(&priority_dest, &[i; 50]);
         store.store_message(&lxm, None, 0, None);
     }
     for i in 10..20u8 {
-        let lxm = make_lxm_data(&normal_dest, &vec![i; 50]);
+        let lxm = make_lxm_data(&normal_dest, &[i; 50]);
         store.store_message(&lxm, None, 0, None);
     }
 

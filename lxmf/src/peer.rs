@@ -103,13 +103,7 @@ impl LxmPeer {
             None => return false,
         };
         match &self.peering_key {
-            Some((_, value)) => {
-                if *value >= cost as u32 {
-                    true
-                } else {
-                    false
-                }
-            }
+            Some((_, value)) => *value >= cost as u32,
             None => false,
         }
     }

@@ -14,7 +14,7 @@ pub fn handle_delivery_announce(
     destination_hash: [u8; 16],
     app_data: Option<&[u8]>,
 ) -> DeliveryAnnounceResult {
-    let stamp_cost = app_data.and_then(|data| announce::stamp_cost_from_app_data(data));
+    let stamp_cost = app_data.and_then(announce::stamp_cost_from_app_data);
 
     DeliveryAnnounceResult {
         destination_hash,
@@ -81,6 +81,7 @@ pub fn parse_propagation_announce(
 /// - `autopeer`: Whether auto-peering is enabled
 /// - `hops`: Number of hops to this destination (None if unknown)
 /// - `autopeer_maxdepth`: Maximum hop count for auto-peering
+#[allow(clippy::too_many_arguments)]
 pub fn decide_propagation_action(
     info: &PropagationPeerInfo,
     is_path_response: bool,

@@ -412,7 +412,8 @@ impl PropagationStore {
         peer_stats: Vec<(Value, Value)>,
     ) -> Value {
         let now = now_timestamp();
-        let node_stats = Value::Map(vec![
+
+        Value::Map(vec![
             (
                 Value::Str("identity_hash".to_string()),
                 Value::Bin(identity_hash.to_vec()),
@@ -500,8 +501,7 @@ impl PropagationStore {
                 Value::UInt(config_stats.max_peers as u64),
             ),
             (Value::Str("peers".to_string()), Value::Map(peer_stats)),
-        ]);
-        node_stats
+        ])
     }
 }
 

@@ -67,6 +67,7 @@ pub fn compute_hash(
 ///
 /// The `sign_fn` takes the data to sign and returns a 64-byte signature.
 /// The stamp, if present, is included in the packed payload but NOT in the hash/signature.
+#[allow(clippy::too_many_arguments)]
 pub fn pack(
     dest_hash: &[u8; DESTINATION_LENGTH],
     src_hash: &[u8; DESTINATION_LENGTH],
@@ -129,14 +130,15 @@ pub fn pack(
     })
 }
 
+/// Signature verifier: `(source_hash, signature, signed_data) -> valid`.
+pub type VerifyFn<'a> =
+    dyn Fn(&[u8; DESTINATION_LENGTH], &[u8; SIGNATURE_LENGTH], &[u8]) -> bool + 'a;
+
 /// Unpack an LXMF message from packed bytes.
 ///
 /// The `verify_fn` takes (source_hash, signature, signed_data) and returns whether valid.
 /// If None, signature validation is skipped.
-pub fn unpack(
-    data: &[u8],
-    verify_fn: Option<&dyn Fn(&[u8; DESTINATION_LENGTH], &[u8; SIGNATURE_LENGTH], &[u8]) -> bool>,
-) -> Result<UnpackResult, Error> {
+pub fn unpack(data: &[u8], verify_fn: Option<&VerifyFn<'_>>) -> Result<UnpackResult, Error> {
     let min_size = DESTINATION_LENGTH + DESTINATION_LENGTH + SIGNATURE_LENGTH;
     if data.len() < min_size + 1 {
         return Err(Error::InvalidPayload("Message too short"));
@@ -357,7 +359,7 @@ pub fn unpack_container(data: &[u8]) -> Result<ContainerData, Error> {
                 transport_encrypted = v.as_bool();
             }
             Some("transport_encryption") => {
-                transport_encryption = v.as_str().map(|s| String::from(s));
+                transport_encryption = v.as_str().map(String::from);
             }
             Some("method") => {
                 method = v.as_uint().map(|n| n as u8);
@@ -384,7 +386,7 @@ pub fn unpack_container(data: &[u8]) -> Result<ContainerData, Error> {
 fn base64url_encode(data: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
-    let mut out = String::with_capacity((data.len() + 2) / 3 * 4);
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
     let mut i = 0;
     while i + 2 < data.len() {
         let n = ((data[i] as u32) << 16) | ((data[i + 1] as u32) << 8) | (data[i + 2] as u32);
