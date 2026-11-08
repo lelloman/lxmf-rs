@@ -15,6 +15,12 @@ pub struct TicketStore {
     pub last_deliveries: HashMap<[u8; 16], f64>,
 }
 
+impl Default for TicketStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TicketStore {
     pub fn new() -> Self {
         Self {

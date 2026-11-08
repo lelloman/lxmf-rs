@@ -384,7 +384,7 @@ pub const ENCRYPTION_DESCRIPTION_UNENCRYPTED: &str = "Unencrypted";
 pub const TICKET_EXPIRY: u64 = 21 * 24 * 60 * 60; // 21 days
 pub const TICKET_GRACE: u64 = 5 * 24 * 60 * 60; // 5 days
 pub const TICKET_RENEW: u64 = 14 * 24 * 60 * 60; // 14 days
-pub const TICKET_INTERVAL: u64 = 1 * 24 * 60 * 60; // 1 day
+pub const TICKET_INTERVAL: u64 = 24 * 60 * 60; // 1 day
 pub const COST_TICKET: u32 = 0x100; // 256
 
 // ============================================================

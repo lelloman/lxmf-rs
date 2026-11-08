@@ -3,7 +3,6 @@ use rns_core::msgpack::{pack, unpack_exact, Value};
 use rns_crypto::identity::Identity;
 use rns_crypto::sha256::sha256;
 use serde::Deserialize;
-use serde_json;
 use std::fs;
 
 // Simple base64 decoder (standard alphabet, with padding)
@@ -60,6 +59,7 @@ fn b64(s: &str) -> Vec<u8> {
     base64_impl::decode(s)
 }
 
+#[allow(dead_code)] // mirrors the JSON test-vector schema
 #[derive(Deserialize)]
 struct Vector {
     name: String,
@@ -273,7 +273,7 @@ fn test_bool_true() {
     assert_eq!(packed, expected);
 
     let unpacked = unpack_exact(&expected).unwrap();
-    assert_eq!(unpacked.as_bool().unwrap(), true);
+    assert!(unpacked.as_bool().unwrap());
 }
 
 #[test]
@@ -286,7 +286,7 @@ fn test_bool_false() {
     assert_eq!(packed, expected);
 
     let unpacked = unpack_exact(&expected).unwrap();
-    assert_eq!(unpacked.as_bool().unwrap(), false);
+    assert!(!unpacked.as_bool().unwrap());
 }
 
 #[test]
@@ -360,7 +360,7 @@ fn test_file_container_unpack() {
                 found_method = true;
             }
             Some("transport_encrypted") => {
-                assert_eq!(v.as_bool().unwrap(), true);
+                assert!(v.as_bool().unwrap());
                 found_encrypted = true;
             }
             Some("transport_encryption") => {
@@ -385,9 +385,9 @@ fn test_pn_announce_data_unpack() {
     let arr = value.as_array().expect("Expected array");
     assert_eq!(arr.len(), 7);
 
-    assert_eq!(arr[0].as_bool().unwrap(), false); // legacy flag
+    assert!(!arr[0].as_bool().unwrap()); // legacy flag
     assert_eq!(arr[1].as_uint().unwrap(), 1700000000); // timebase
-    assert_eq!(arr[2].as_bool().unwrap(), true); // enabled
+    assert!(arr[2].as_bool().unwrap()); // enabled
     assert_eq!(arr[3].as_uint().unwrap(), 256); // transfer limit
     assert_eq!(arr[4].as_uint().unwrap(), 10240); // sync limit
 
@@ -547,7 +547,7 @@ fn test_time_constants() {
     assert_eq!(TICKET_EXPIRY, 21 * 24 * 60 * 60);
     assert_eq!(TICKET_GRACE, 5 * 24 * 60 * 60);
     assert_eq!(TICKET_RENEW, 14 * 24 * 60 * 60);
-    assert_eq!(TICKET_INTERVAL, 1 * 24 * 60 * 60);
+    assert_eq!(TICKET_INTERVAL, 24 * 60 * 60);
     assert_eq!(MESSAGE_EXPIRY, 30 * 24 * 60 * 60);
     assert_eq!(STAMP_COST_EXPIRY, 45 * 24 * 60 * 60);
     assert_eq!(MAX_UNREACHABLE, 14 * 24 * 60 * 60);
@@ -622,6 +622,7 @@ fn test_enum_from_u8_roundtrip() {
 // Phase 2: LXMessage wire format tests
 // ============================================================
 
+#[allow(dead_code)] // mirrors the JSON test-vector schema
 #[derive(Deserialize)]
 struct MessageVector {
     name: String,
@@ -1095,6 +1096,7 @@ fn test_signature_invalid_detection() {
 
 use lxmf_core::stamp;
 
+#[allow(dead_code)] // mirrors the JSON test-vector schema
 #[derive(Deserialize)]
 struct StampVector {
     name: String,
@@ -1570,7 +1572,7 @@ fn test_storage_transient_ids_roundtrip() {
     assert_eq!(map.len(), 2);
 
     let mut loaded: HashMap<[u8; 32], f64> = HashMap::new();
-    for &(ref k, ref v) in map {
+    for (k, v) in map {
         let key_bytes = k.as_bin().unwrap();
         let ts = v.as_number().unwrap();
         let mut key = [0u8; 32];
@@ -1608,7 +1610,7 @@ fn test_storage_stamp_costs_roundtrip() {
     assert_eq!(map.len(), 2);
 
     let mut loaded: HashMap<[u8; 16], (f64, u8)> = HashMap::new();
-    for &(ref k, ref v) in map {
+    for (k, v) in map {
         let key_bytes = k.as_bin().unwrap();
         let arr = v.as_array().unwrap();
         let ts = arr[0].as_number().unwrap();
@@ -1628,6 +1630,7 @@ fn test_storage_stamp_costs_roundtrip() {
 // Phase 7: Announce parsing tests
 // ============================================================
 
+#[allow(dead_code)] // mirrors the JSON test-vector schema
 #[derive(Debug, Deserialize)]
 struct AnnounceVector {
     name: String,

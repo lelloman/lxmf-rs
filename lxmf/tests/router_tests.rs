@@ -113,7 +113,7 @@ fn make_lxm_data(dest_hash: &[u8; DESTINATION_LENGTH], payload: &[u8]) -> Vec<u8
     let mut data = Vec::new();
     data.extend_from_slice(dest_hash);
     let padding_needed = LXMF_OVERHEAD.saturating_sub(DESTINATION_LENGTH + payload.len());
-    data.extend(std::iter::repeat(0u8).take(padding_needed));
+    data.extend(std::iter::repeat_n(0u8, padding_needed));
     data.extend_from_slice(payload);
     data
 }

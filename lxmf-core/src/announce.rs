@@ -26,7 +26,7 @@ pub fn display_name_from_app_data(app_data: &[u8]) -> Option<String> {
             .map(|s| s.replace('\0', "").trim().into())
     } else {
         // Legacy format: raw UTF-8 string
-        core::str::from_utf8(app_data).ok().map(|s| String::from(s))
+        core::str::from_utf8(app_data).ok().map(String::from)
     }
 }
 
@@ -171,9 +171,7 @@ pub fn pn_name_from_app_data(app_data: &[u8]) -> Option<String> {
     for (k, v) in metadata {
         if k.as_uint() == Some(PN_META_NAME as u64) {
             let name_bytes = v.as_bin()?;
-            return core::str::from_utf8(name_bytes)
-                .ok()
-                .map(|s| String::from(s));
+            return core::str::from_utf8(name_bytes).ok().map(String::from);
         }
     }
     None
@@ -231,5 +229,5 @@ pub fn parse_pn_announce_data(app_data: &[u8]) -> Option<PnAnnounceData> {
 
 /// Check if byte is a msgpack array header (fixarray 0x90-0x9f or array16 0xdc).
 fn is_msgpack_array(byte: u8) -> bool {
-    (byte >= 0x90 && byte <= 0x9f) || byte == 0xdc
+    (0x90..=0x9f).contains(&byte) || byte == 0xdc
 }

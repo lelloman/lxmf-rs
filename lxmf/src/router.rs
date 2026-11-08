@@ -25,6 +25,9 @@ use crate::storage::{self, StoragePaths};
 /// Callback function types for the router.
 pub type DeliveryCallback = Box<dyn Fn(&LxmDelivery) + Send>;
 pub type ProgressCallback = Box<dyn Fn(&[u8; 32], f64) + Send>;
+/// Per-message callback types stored on an [`OutboundMessage`].
+pub type OutboundCallback = Box<dyn Fn(&OutboundMessage) + Send>;
+pub type OutboundProgressCallback = Box<dyn Fn(&OutboundMessage, f64) + Send>;
 
 struct DirectLinkResult {
     dest_hash: [u8; 16],
@@ -185,9 +188,9 @@ pub struct OutboundMessage {
     pub propagation_packed: Option<Vec<u8>>,
     pub propagation_stamp: Option<Vec<u8>>,
     pub transient_id: Option<[u8; 32]>,
-    pub delivery_callback: Option<Box<dyn Fn(&OutboundMessage) + Send>>,
-    pub failed_callback: Option<Box<dyn Fn(&OutboundMessage) + Send>>,
-    pub progress_callback: Option<Box<dyn Fn(&OutboundMessage, f64) + Send>>,
+    pub delivery_callback: Option<OutboundCallback>,
+    pub failed_callback: Option<OutboundCallback>,
+    pub progress_callback: Option<OutboundProgressCallback>,
     /// Tracking link_id for direct delivery
     pub link_id: Option<[u8; 16]>,
     /// Tracking packet_hash for opportunistic delivery
@@ -875,12 +878,12 @@ impl LxmRouter {
         self.clean_links();
 
         // Transient ID cleanup (every 60 cycles = 4 min)
-        if self.processing_count % JOB_TRANSIENT_INTERVAL == 0 {
+        if self.processing_count.is_multiple_of(JOB_TRANSIENT_INTERVAL) {
             self.clean_transient_id_caches();
         }
 
         // Peer propagation sync (every 6 cycles = 24s)
-        if self.processing_count % JOB_PEERSYNC_INTERVAL == 0 {
+        if self.processing_count.is_multiple_of(JOB_PEERSYNC_INTERVAL) {
             if let Some(node) = self.node.clone() {
                 self.ensure_peer_sync_links(node.as_ref());
                 self.process_peer_syncs_with_transport(node.as_ref());
@@ -888,7 +891,7 @@ impl LxmRouter {
         }
 
         // Message store cleanup and peer save (every 120 cycles = 8 min)
-        if self.processing_count % JOB_STORE_INTERVAL == 0 {
+        if self.processing_count.is_multiple_of(JOB_STORE_INTERVAL) {
             self.propagation_store
                 .clean_messagestore(&self.prioritised_list);
             self.save_peers();
@@ -1817,7 +1820,7 @@ impl LxmfCallbacks {
         router
             .link_destinations
             .get(&link_id.0)
-            .map_or(false, |dh| router.delivery_dest_hash == Some(*dh))
+            .is_some_and(|dh| router.delivery_dest_hash == Some(*dh))
     }
 }
 
@@ -1874,13 +1877,9 @@ impl Callbacks for LxmfCallbacks {
                                 let sync_strategy = router.config.sync_strategy;
 
                                 if info.peering_cost > router.config.max_peering_cost {
-                                    if router
-                                        .peers
-                                        .get(&info.destination_hash)
-                                        .map_or(false, |peer| {
-                                            announced_timebase >= peer.peering_timebase
-                                        })
-                                    {
+                                    if router.peers.get(&info.destination_hash).is_some_and(
+                                        |peer| announced_timebase >= peer.peering_timebase,
+                                    ) {
                                         router.peers.remove(&info.destination_hash);
                                         router.save_peers();
                                     }
@@ -1930,7 +1929,7 @@ impl Callbacks for LxmfCallbacks {
                                 destination_hash,
                                 node_timebase,
                             } => {
-                                if router.peers.get(&destination_hash).map_or(false, |peer| {
+                                if router.peers.get(&destination_hash).is_some_and(|peer| {
                                     node_timebase as f64 >= peer.peering_timebase
                                 }) {
                                     router.peers.remove(&destination_hash);

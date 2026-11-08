@@ -1,7 +1,7 @@
 use lxmf_core::constants::*;
 use lxmf_rs::handlers::{
     decide_propagation_action, handle_delivery_announce, parse_propagation_announce,
-    PropagationAnnounceResult, PropagationPeerInfo,
+    PropagationAnnounceResult,
 };
 use lxmf_rs::tickets::{ticket_stamp, validate_stamp_with_tickets, TicketStore};
 use rns_crypto::sha256::sha256;
@@ -47,6 +47,7 @@ fn b64(s: &str) -> Vec<u8> {
     base64_impl::decode(s)
 }
 
+#[allow(dead_code)] // mirrors the JSON test-vector schema
 #[derive(Debug, serde::Deserialize)]
 struct TicketVector {
     name: String,
@@ -422,7 +423,7 @@ fn test_ticket_store_inbound() {
     let dest = [0xEE; 16];
 
     // Generate inbound tickets
-    let t1 = store.generate_ticket(dest).unwrap();
+    let _t1 = store.generate_ticket(dest).unwrap();
     store.last_deliveries.clear(); // clear throttle
 
     // Create a second ticket manually
@@ -469,9 +470,9 @@ fn test_ticket_store_clean() {
 
     store.clean();
 
-    assert!(store.outbound.get(&dest).is_none()); // expired, cleaned
-    assert!(store.outbound.get(&dest2).is_some()); // valid, kept
-    assert!(store.inbound.get(&dest).is_none() || store.inbound.get(&dest).unwrap().is_empty());
+    assert!(!store.outbound.contains_key(&dest)); // expired, cleaned
+    assert!(store.outbound.contains_key(&dest2)); // valid, kept
+    assert!(!store.inbound.contains_key(&dest) || store.inbound.get(&dest).unwrap().is_empty());
 }
 
 #[test]
