@@ -382,8 +382,15 @@ pub fn as_uri(paper_packed: &[u8]) -> String {
 
 /// Decode an lxm:// URI back to paper-packed bytes.
 pub fn from_uri(uri: &str) -> Result<Vec<u8>, Error> {
-    let data_str = uri.strip_prefix("lxm://").ok_or(Error::InvalidUri)?;
-    base64url_decode(data_str).ok_or(Error::InvalidUri)
+    // As `ingest_lxm_uri`: the scheme is matched case-insensitively and
+    // line-break slashes inserted by QR or text layouts are ignored.
+    let prefix_len = URI_SCHEMA.len() + 3;
+    let prefix = uri.get(..prefix_len).ok_or(Error::InvalidUri)?;
+    if !prefix.eq_ignore_ascii_case("lxm://") {
+        return Err(Error::InvalidUri);
+    }
+    let data_str: String = uri[prefix_len..].chars().filter(|c| *c != '/').collect();
+    base64url_decode(&data_str).ok_or(Error::InvalidUri)
 }
 
 /// Pack a message into file container format.
