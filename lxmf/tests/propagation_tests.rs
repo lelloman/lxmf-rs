@@ -476,7 +476,7 @@ fn test_clean_keeps_fresh_messages() {
 fn test_clean_weight_culling() {
     // Use a very small storage limit to trigger culling
     let dir = temp_dir("clean_cull");
-    let mut store = PropagationStore::new(dir.clone(), Some(1 * 1000)); // 1 KB = 1000 bytes
+    let mut store = PropagationStore::new(dir.clone(), Some(1000)); // 1 KB = 1000 bytes
 
     let dest = [0xEE; 16];
     // Each message is ~112 bytes + payload, store several to exceed 1000 bytes
@@ -502,7 +502,7 @@ fn test_clean_weight_culling() {
 #[test]
 fn test_clean_weight_prioritised() {
     let dir = temp_dir("clean_priority");
-    let mut store = PropagationStore::new(dir.clone(), Some(1 * 1000)); // 1 KB limit
+    let mut store = PropagationStore::new(dir.clone(), Some(1000)); // 1 KB limit
 
     let priority_dest = [0x11; 16];
     let normal_dest = [0x22; 16];
