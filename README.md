@@ -30,13 +30,13 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-lxmf = "0.1"
+lxmf-rs = "0.2"
 ```
 
 A minimal example that sends a message:
 
 ```rust
-use lxmf::router::{LxmRouter, RouterConfig, OutboundMessage};
+use lxmf_rs::router::{LxmRouter, RouterConfig, OutboundMessage};
 use lxmf_core::{constants::*, message};
 use rns_crypto::identity::Identity;
 use rns_net::node::{RnsNode, NodeConfig};
@@ -179,8 +179,9 @@ cargo run -p lxmf-server -- start
 
 ## Project Status
 
-- **Version**: 0.1.7
-- **Tests**: 158 passing
+- **Version**: 0.2.0 (see [CHANGELOG.md](./CHANGELOG.md))
+- **Tests**: 292 passing, plus the live Python interop test
+- **Parity**: remaining differences from upstream are tracked in [docs/parity-gaps.md](./docs/parity-gaps.md)
 - **Compatibility**: Wire-compatible with the tracked Python LXMF upstream baseline in [UPSTREAM.md](./UPSTREAM.md)
 - **Repository**: [https://github.com/lelloman/lxmf-rs](https://github.com/lelloman/lxmf-rs)
 
