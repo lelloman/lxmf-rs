@@ -342,7 +342,7 @@ When unpacking, if a stamp is present (payload has >4 elements):
 
 | Method | Max Content | Calculation |
 |--------|-------------|-------------|
-| **Opportunistic (SINGLE)** | 295 bytes | `Packet.ENCRYPTED_MDU + TIMESTAMP_SIZE - LXMF_OVERHEAD + DESTINATION_LENGTH` |
+| **Opportunistic (SINGLE)** | 287 bytes | `Packet.ENCRYPTED_MDU - LXMF_OVERHEAD + DESTINATION_LENGTH` (383 - 112 + 16) |
 | **Opportunistic (PLAIN)** | 368 bytes | `Packet.PLAIN_MDU - LXMF_OVERHEAD + DESTINATION_LENGTH` |
 | **Direct/Propagated (packet)** | 319 bytes | `Link.MDU - LXMF_OVERHEAD` (Link MDU = 431) |
 | **Direct/Propagated (resource)** | Unlimited | Transferred as RNS.Resource over link |
@@ -497,7 +497,7 @@ The `FIELD_TICKET` contains: `[expires: float, ticket: bytes]`
 **When to use:** Short messages to known destinations that can be reached without an established link.
 
 **Size constraint:** Content must fit in a single RNS packet.
-- SINGLE destination: max 295 bytes content
+- SINGLE destination: max 287 bytes content
 - PLAIN destination: max 368 bytes content
 - If content exceeds limit, automatically falls back to DIRECT
 
@@ -698,12 +698,16 @@ STAMP_SIZE                       = 32    # HASHLENGTH / 8 = 256 / 8
 
 ### 7.3 Stamp Generation
 
+Since LXMF 1.3 (RNS 1.6 `RNS.Stamps`) costs are fractional, on a 1/256
+fixed-point grid: `cost_to_fp(cost) = floor(cost * 256 + 0.5)`, clamped to
+`STAMP_COST_CAP = 100`, and the target is derived from that grid point. For
+whole costs the target is exactly `2^(256 - cost)`, the legacy rule.
+
 ```python
 def generate_stamp(message_id, stamp_cost, expand_rounds):
     workblock = stamp_workblock(message_id, expand_rounds)
-    # Find a 32-byte nonce where:
-    #   SHA256(workblock + nonce) has >= stamp_cost leading zero bits
-    target = 1 << (256 - stamp_cost)
+    # Find a 32-byte nonce whose product is at or below the cost's target
+    target = target_from_fp(cost_to_fp(stamp_cost))
     while True:
         nonce = os.urandom(32)
         result = SHA256(workblock + nonce)
@@ -717,25 +721,19 @@ The stamp is the 32-byte nonce.
 
 ```python
 def stamp_valid(stamp, target_cost, workblock):
-    target = 1 << (256 - target_cost)
+    target = target_from_fp(cost_to_fp(target_cost))
     result = SHA256(workblock + stamp)
     return int.from_bytes(result, "big") <= target
 ```
 
 ### 7.5 Stamp Value Calculation
 
-```python
-def stamp_value(workblock, stamp):
-    value = 0
-    material = SHA256(workblock + stamp)
-    i = int.from_bytes(material, "big")
-    while (i & (1 << 255)) == 0:
-        i <<= 1
-        value += 1
-    return value
-```
-
-The value is the number of leading zero bits in the hash.
+The value is fractional (`RNS.Stamps.stamp_value`): the leading zero bits of
+`SHA256(workblock + stamp)` plus how far its normalised mantissa reaches into
+the next bit, floored onto the 1/256 grid, so a stamp never reports more than
+it is worth. The whole part equals the legacy leading-zero value
+(`stamp_value_legacy`). Rust: `rns_core::stamp::stamp_value` returns a
+`StampValue`; costs are `StampCost`.
 
 ### 7.6 Ticket-Based Stamp Bypass
 
@@ -880,11 +878,19 @@ control_destination.register_request_handler("/pn/peer/unpeer", ...)
 
 ### 8.4 Announce App Data
 
-**Delivery destination announce data** (version 0.5.0+):
+**Delivery destination announce data** (LXMF 1.3):
 ```python
-peer_data = [display_name_bytes_or_none, stamp_cost_int_or_none]
+peer_data = [
+    display_name_bytes_or_none,
+    ceil(stamp_cost) or None,       # 1: integer cost for older readers
+    [SF_COMPRESSION],               # 2: supported functionality
+    stamp_cost_float_or_none,       # 3: exact fractional cost (transitional)
+]
 app_data = msgpack.packb(peer_data)
 ```
+
+Readers use element 3 when it is a number, otherwise element 1. Older
+announces have only the first two or three elements.
 
 Detection: First byte is in range `0x90-0x9F` or is `0xDC` (msgpack array header).
 
@@ -896,8 +902,9 @@ announce_data = [
     node_state_bool,                # 2: Propagation node enabled
     propagation_per_transfer_limit, # 3: Per-transfer limit in KB
     propagation_per_sync_limit,     # 4: Sync limit in KB
-    [stamp_cost, flexibility, peering_cost], # 5: Stamp cost config
-    metadata_dict                   # 6: Node metadata
+    [ceil(cost), ceil(flex), ceil(peering)], # 5: Integer costs
+    metadata_dict,                  # 6: Node metadata
+    [cost, flex, peering],          # 7: Exact fractional costs (transitional)
 ]
 app_data = msgpack.packb(announce_data)
 ```
@@ -1041,7 +1048,7 @@ propagation_entries[transient_id] = [
     msg_size,           # 3: File size in bytes
     handled_peers,      # 4: List of peer destination_hashes that have this message
     unhandled_peers,    # 5: List of peer destination_hashes that need this message
-    stamp_value,        # 6: Proof-of-work stamp value (int)
+    stamp_value,        # 6: Proof-of-work stamp value, quantized float
 ]
 ```
 
@@ -1052,7 +1059,11 @@ Files are stored in `messagestore/` with names:
 {transient_id_hex}_{received_timestamp}_{stamp_value}
 ```
 
-Example: `a1b2c3d4..._{1234567890.123}_{16}`
+The value component is the quantized stamp value written as a Python float
+(`quantize_cost`), e.g. `_16.25` or `_17.0`; stores from before LXMF 1.3 hold
+integers.
+
+Example: `a1b2c3d4..._1234567890.123_16.25`
 
 The file content is: `lxmf_data + stamp_data` (stamp appended to the encrypted message data).
 
@@ -1065,8 +1076,9 @@ announce_data = [
     propagation_node and not from_static_only, # 2: Node state
     propagation_per_transfer_limit,     # 3: Transfer limit (KB)
     propagation_per_sync_limit,         # 4: Sync limit (KB)
-    [stamp_cost, flexibility, peering_cost], # 5: Costs
-    metadata                            # 6: Metadata dict
+    [ceil(cost), ceil(flex), ceil(peering)], # 5: Integer costs
+    metadata,                           # 6: Metadata dict
+    [cost, flex, peering],              # 7: Exact fractional costs (transitional)
 ]
 ```
 
@@ -1074,12 +1086,13 @@ announce_data = [
 
 | ID | Constant | Type | Description |
 |----|----------|------|-------------|
-| `0x00` | `PN_META_VERSION` | bytes | Software version |
+| `0x00` | `PN_META_VERSION` | str | Implementation version |
 | `0x01` | `PN_META_NAME` | bytes | Node name (UTF-8) |
 | `0x02` | `PN_META_SYNC_STRATUM` | int | Sync stratum level |
 | `0x03` | `PN_META_SYNC_THROTTLE` | int | Sync throttle setting |
 | `0x04` | `PN_META_AUTH_BAND` | bytes | Auth band info |
 | `0x05` | `PN_META_UTIL_PRESSURE` | float | Utilization pressure |
+| `0xFE` | `PN_META_IMPL_NAME` | str | Implementation name ("lxmd" upstream, "lxmf-rs" here) |
 | `0xFF` | `PN_META_CUSTOM` | any | Custom metadata |
 
 ### 9.6 Storage Limits & Culling
@@ -1196,7 +1209,7 @@ If any check fails, sync is postponed. If peering key is missing, generation is 
 3. If not validated and >1 message: reject (clients can only send 1 at a time)
 4. Validate stamps on all messages using `validate_pn_stamps()`
 5. For each valid message: call `lxmf_propagation()`, update peer stats
-6. If any invalid stamps: teardown link, throttle peer for `PN_STAMP_THROTTLE = 180s`
+6. If any invalid stamps: teardown link, throttle peer for `pn_stamp_throttle` (default `PN_STAMP_THROTTLE = 300s`)
 
 ### 10.5 Peer Persistence
 
@@ -1518,7 +1531,7 @@ Exit handler:
 | `LXMRouter.P_LINK_MAX_INACTIVITY` | 180 | 3 minutes |
 | `LXMRouter.NODE_ANNOUNCE_DELAY` | 20 | 20 seconds |
 | `LXMRouter.PR_PATH_TIMEOUT` | 10 | 10 seconds |
-| `LXMRouter.PN_STAMP_THROTTLE` | 180 | 3 minutes |
+| `LXMRouter.PN_STAMP_THROTTLE` | 300 | 5 minutes (configurable since 1.3) |
 | `LXMRouter.MESSAGE_EXPIRY` | 2,592,000 | 30 days |
 | `LXMRouter.STAMP_COST_EXPIRY` | 3,888,000 | 45 days |
 | `LXMPeer.MAX_UNREACHABLE` | 1,209,600 | 14 days |
@@ -1557,11 +1570,14 @@ Exit handler:
 
 | Constant | Value | Description |
 |----------|-------|-------------|
-| `LXMRouter.PROPAGATION_COST` | 16 | Default propagation stamp cost |
-| `LXMRouter.PROPAGATION_COST_MIN` | 13 | Minimum propagation stamp cost |
-| `LXMRouter.PROPAGATION_COST_FLEX` | 3 | Default stamp cost flexibility |
-| `LXMRouter.PEERING_COST` | 18 | Default peering key cost |
-| `LXMRouter.MAX_PEERING_COST` | 26 | Max acceptable remote peering cost |
+| `LXMRouter.PROPAGATION_COST` | 16.0 | Default propagation stamp cost |
+| `LXMRouter.PROPAGATION_COST_MIN` | 13.0 | Minimum propagation stamp cost |
+| `LXMRouter.PROPAGATION_COST_FLEX` | 3.0 | Default stamp cost flexibility |
+| `LXMRouter.PEERING_COST` | 18.0 | Default peering key cost |
+| `LXMRouter.MAX_PEERING_COST` | 26.0 | Max acceptable remote peering cost |
+| `LXMRouter.DELIVERY_LINK_COST` | 3.25 | Link request cost of the delivery destination |
+| `LXMRouter.PROPAGATION_LINK_COST` | 3.25 | Link request cost of the propagation destination |
+| `Transport.STAMP_COST_CAP` | 100 | Upper bound for any stamp cost |
 | `LXStamper.WORKBLOCK_EXPAND_ROUNDS` | 3,000 | Normal stamp workblock rounds |
 | `LXStamper.WORKBLOCK_EXPAND_ROUNDS_PN` | 1,000 | PN stamp workblock rounds |
 | `LXStamper.WORKBLOCK_EXPAND_ROUNDS_PEERING` | 25 | Peering key workblock rounds |
