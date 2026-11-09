@@ -33,9 +33,6 @@ Each received message is written atomically (temporary file, fsync, rename) to
 a msgpack map with `state`, `lxmf_bytes`, `transport_encrypted`,
 `transport_encryption` and `method`.
 
-> `lxmf_bytes` is currently written as nil: the router's `LxmDelivery` does not
-> expose the raw packed message yet.
-
 When `on_inbound` (or `-i/--on-inbound`) is set, lxmd runs it like upstream,
 splitting `<command> "<message path>"` with shell-style quoting, so commands
 with arguments work (`on_inbound = /usr/local/bin/handler --flag`).

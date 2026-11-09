@@ -286,8 +286,10 @@ pub fn parse_pn_announce_data(app_data: &[u8]) -> Option<PnAnnounceData> {
 pub struct PnAnnounceParams<'a> {
     pub node_timebase: u64,
     pub propagation_enabled: bool,
-    pub propagation_transfer_limit: u64,
-    pub propagation_sync_limit: u64,
+    /// Per-transfer limit in kilobytes; may be fractional.
+    pub propagation_transfer_limit: f64,
+    /// Sync limit in kilobytes; may be fractional.
+    pub propagation_sync_limit: f64,
     pub propagation_stamp_cost: StampCost,
     pub propagation_stamp_cost_flexibility: StampCost,
     pub peering_cost: StampCost,
@@ -342,12 +344,22 @@ pub fn build_pn_announce_data(params: &PnAnnounceParams<'_>) -> Vec<u8> {
         Value::Bool(false),
         Value::UInt(params.node_timebase),
         Value::Bool(params.propagation_enabled),
-        Value::UInt(params.propagation_transfer_limit),
-        Value::UInt(params.propagation_sync_limit),
+        kilobyte_value(params.propagation_transfer_limit),
+        kilobyte_value(params.propagation_sync_limit),
         Value::Array(ceil_costs),
         build_pn_metadata(params.implementation, params.name),
         Value::Array(exact_costs),
     ]))
+}
+
+/// A kilobyte limit as an integer when whole, else a float, as Python
+/// writes whatever numeric type the limit was configured with.
+fn kilobyte_value(kb: f64) -> Value {
+    if kb >= 0.0 && kb == (kb as u64) as f64 {
+        Value::UInt(kb as u64)
+    } else {
+        Value::Float(kb)
+    }
 }
 
 /// `ceil(cost)` on the fixed-point grid (no float math needed).
@@ -425,8 +437,8 @@ mod tests {
         let data = build_pn_announce_data(&PnAnnounceParams {
             node_timebase: 42,
             propagation_enabled: true,
-            propagation_transfer_limit: 256,
-            propagation_sync_limit: 10240,
+            propagation_transfer_limit: 256.0,
+            propagation_sync_limit: 10240.0,
             propagation_stamp_cost: StampCost::from_f64(16.25),
             propagation_stamp_cost_flexibility: StampCost::from_f64(3.0),
             peering_cost: StampCost::from_f64(18.0),

@@ -481,12 +481,6 @@ fn effective_loglevel(configured: Option<u8>, verbose: u32, quiet: u32) -> u8 {
     )
 }
 
-/// Router limits are whole kilobytes; round fractional limits up so a
-/// configured minimum such as 0.38 KB never becomes 0.
-fn kilobyte_limit(kb: f64) -> u32 {
-    kb.ceil().clamp(1.0, f64::from(u32::MAX)) as u32
-}
-
 // ============================================================
 // Directory and path setup
 // ============================================================
@@ -781,18 +775,10 @@ fn run_on_inbound(command: &str, path: &Path) -> Result<(), String> {
 
 /// `lxmf_delivery` in lxmd: write the message to the message directory and
 /// run the `on_inbound` program on it.
-///
-/// `lxmf_bytes` are the raw packed message bytes; `LxmDelivery` does not
-/// carry them yet, so the container's `lxmf_bytes` is nil until it does.
-fn handle_inbound_message(
-    message_dir: &Path,
-    on_inbound: Option<&str>,
-    delivery: &LxmDelivery,
-    lxmf_bytes: Option<&[u8]>,
-) {
+fn handle_inbound_message(message_dir: &Path, on_inbound: Option<&str>, delivery: &LxmDelivery) {
     let message = format!("<LXMessage {}>", hexrep(&delivery.message_hash));
     let container = packed_container(
-        lxmf_bytes,
+        Some(&delivery.lxmf_bytes),
         delivery.transport_encrypted,
         delivery
             .transport_encrypted
@@ -1785,9 +1771,9 @@ fn build_router_config(config: &LxmdConfig, paths: &LxmdPaths) -> RouterConfig {
         storagepath: paths.storagepath.clone(),
         autopeer: config.autopeer,
         autopeer_maxdepth: config.autopeer_maxdepth.unwrap_or(AUTOPEER_MAXDEPTH),
-        propagation_limit: kilobyte_limit(config.propagation_message_max_accepted_size),
+        propagation_limit: config.propagation_message_max_accepted_size,
         delivery_limit: config.delivery_transfer_max_accepted_size,
-        sync_limit: kilobyte_limit(config.propagation_sync_max_accepted_size),
+        sync_limit: config.propagation_sync_max_accepted_size,
         enforce_ratchets: false,
         enforce_stamps: false,
         static_peers: config.static_peers.clone(),
@@ -1982,8 +1968,7 @@ fn run_daemon(args: &Args) {
     let message_dir = paths.messagedir.clone();
     let on_inbound = config.on_inbound.clone();
     router.set_delivery_callback(Box::new(move |delivery| {
-        // `LxmDelivery` does not expose the raw packed message bytes.
-        handle_inbound_message(&message_dir, on_inbound.as_deref(), delivery, None);
+        handle_inbound_message(&message_dir, on_inbound.as_deref(), delivery);
     }));
 
     let router = Arc::new(Mutex::new(router));
@@ -2440,9 +2425,8 @@ mod tests {
 
         let paths = LxmdPaths::new(temp_dir("kb-limits"));
         let router_config = build_router_config(&config, &paths);
-        assert_eq!(router_config.propagation_limit, 1);
-        assert_eq!(router_config.sync_limit, 257);
-        assert_eq!(kilobyte_limit(256.0), 256);
+        assert_eq!(router_config.propagation_limit, 0.38);
+        assert_eq!(router_config.sync_limit, 256.5);
     }
 
     #[test]
