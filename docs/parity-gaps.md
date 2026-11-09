@@ -14,7 +14,7 @@ Status: `open`, `done` (with the commit), or `blocked` (with the reason).
 | --- | --- |
 | Outbound message stamps and propagation stamps generated in the background | done (`ce79538`) |
 | `cancel_outbound`, outbound progress, pre-emptive opportunistic path request | done (`ce79538`) |
-| Tickets: learn `FIELD_TICKET` from inbound messages, stamp with outbound tickets, issue tickets (`include_ticket`), record deliveries, accept ticket stamps inbound, persist `available_tickets` | open |
+| Tickets: learn `FIELD_TICKET` from inbound messages, stamp with outbound tickets, issue tickets (`include_ticket`), record deliveries, accept ticket stamps inbound, persist `available_tickets` | done (`51fbb3d`) |
 | Hash inbound payloads from the original bytes when no stamp is present (`unpack_from_bytes`) | done (`fd7bac9`) |
 | Changing the outbound propagation node tears down the old propagation link | done (`fd7bac9`) |
 | Backchannel identification on the direct link after delivery | open |
@@ -28,7 +28,7 @@ Status: `open`, `done` (with the commit), or `blocked` (with the reason).
 | Gap | Status |
 | --- | --- |
 | Messages for another destination hash are dropped | done (`fd7bac9`) |
-| Stamps are validated whenever a cost is set; validity and value reach the app | open |
+| Stamps are validated whenever a cost is set; validity and value reach the app | done (`51fbb3d`) |
 | Unknown source is distinguished from an invalid signature; identities recalled from the transport | open |
 | Delivery callback runs without the router lock held | open |
 | Delivery announce handling only for `lxmf.delivery` destinations | done (`fd7bac9`) |
