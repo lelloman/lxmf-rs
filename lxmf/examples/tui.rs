@@ -520,6 +520,7 @@ fn main() {
                                             link_id: None,
                                             packet_hash: None,
                                             tracking: Default::default(),
+                                            include_ticket: false,
                                         });
                                         app.push_log(format!(
                                             "[{}] SEND to={} \"{}\"",

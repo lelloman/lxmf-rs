@@ -313,6 +313,7 @@ fn main() {
                                 link_id: None,
                                 packet_hash: None,
                                 tracking: Default::default(),
+                                include_ticket: false,
                             });
                             println!("[SEND] Echo queued to {}", hex(&source_hash));
                         }

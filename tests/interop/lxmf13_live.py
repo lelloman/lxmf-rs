@@ -193,12 +193,12 @@ def main():
         rust_identity = RNS.Identity.recall(rust_delivery)
         destination = RNS.Destination(rust_identity, RNS.Destination.OUT, RNS.Destination.SINGLE, "lxmf", "delivery")
 
-        def send(title, content, method):
-            message = LXMessage(destination, source, content, title, desired_method=method)
+        def send(title, content, method, include_ticket=False):
+            message = LXMessage(destination, source, content, title, desired_method=method, include_ticket=include_ticket)
             router.handle_outbound(message)
             return message
 
-        def expect_echo(title, label):
+        def expect_echo(title, label, ticket_stamp=False):
             deadline = time.time() + TIMEOUT
             while time.time() < deadline:
                 try:
@@ -211,12 +211,18 @@ def main():
                         message.signature_validated and message.stamp_valid,
                         (message.method, message.stamp_value),
                     )
+                    if ticket_stamp:
+                        check(
+                            f"{label}: rust stamps the echo with python's ticket",
+                            message.stamp_value == LXMessage.COST_TICKET,
+                            message.stamp_value,
+                        )
                     return message
             check(f"{label}: echo received from rust", False)
             return None
 
-        def run_case(label, title, content, method, final_state):
-            message = send(title, content, method)
+        def run_case(label, title, content, method, final_state, include_ticket=False):
+            message = send(title, content, method, include_ticket)
             reached = wait_for(lambda: message.state in (final_state, LXMessage.FAILED))
             check(f"{label}: python message reaches {final_state:#x}", message.state == final_state, f"state={message.state:#x}")
             delivered = wait_for(lambda: rust.find("delivered", title=title))
@@ -228,11 +234,17 @@ def main():
             return reached
 
         # 2. Opportunistic, stamped at the fractional cost Rust announced.
-        run_case("opportunistic", "opp", "hello from python", LXMessage.OPPORTUNISTIC, LXMessage.DELIVERED)
-        expect_echo("opp", "opportunistic")
+        run_case("opportunistic", "opp", "hello from python", LXMessage.OPPORTUNISTIC, LXMessage.DELIVERED, include_ticket=True)
+        expect_echo("opp", "opportunistic", ticket_stamp=True)
 
         # 3. Direct, as a single link packet.
         run_case("direct packet", "link", "small direct", LXMessage.DIRECT, LXMessage.DELIVERED)
+        delivered = rust.find("delivered", title="link")
+        check(
+            "python stamps with the ticket rust issued",
+            delivered and delivered.get("stamp_value") == LXMessage.COST_TICKET,
+            delivered.get("stamp_value") if delivered else None,
+        )
         expect_echo("link", "direct packet")
 
         # 4. Direct, as a resource.
