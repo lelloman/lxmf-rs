@@ -872,7 +872,7 @@ fn inbound_resource_admission_tracks_state_and_cleans_on_link_close() {
 fn inbound_resource_admission_rejects_unknown_and_oversized_resources() {
     let (mut router, dir) = test_router("inbound_resource_reject");
     let link_id = [0xA1; 16];
-    router.config.sync_limit = 1;
+    router.config.sync_limit = 1.0;
 
     assert!(!router.accept_inbound_propagation_resource(link_id, 10, false));
 
@@ -898,7 +898,7 @@ fn resource_accept_query_enforces_delivery_and_propagation_limits() {
         .accepted_offer_links
         .insert(propagation_link, InboundOfferState::Accepted);
     router.config.delivery_limit = 1.0;
-    router.config.sync_limit = 2;
+    router.config.sync_limit = 2.0;
 
     let router = Arc::new(Mutex::new(router));
     let mut callbacks = LxmfCallbacks::new(router.clone());

@@ -286,8 +286,8 @@ fn pn_announces_match_upstream() {
             let built = announce::build_pn_announce_data(&PnAnnounceParams {
                 node_timebase: v.timebase,
                 propagation_enabled: v.propagation_enabled,
-                propagation_transfer_limit: v.transfer_limit as u64,
-                propagation_sync_limit: v.sync_limit as u64,
+                propagation_transfer_limit: v.transfer_limit,
+                propagation_sync_limit: v.sync_limit,
                 propagation_stamp_cost: cost(v.stamp_cost),
                 propagation_stamp_cost_flexibility: cost(v.stamp_cost_flexibility),
                 peering_cost: cost(v.peering_cost),

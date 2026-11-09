@@ -78,7 +78,7 @@ fn client_resources_are_accepted_on_propagation_links_only() {
 
     router.active_propagation_links.push(link);
     assert!(router.accept_inbound_propagation_resource(link, 1_000, false));
-    router.config.sync_limit = 1;
+    router.config.sync_limit = 1.0;
     assert!(!router.accept_inbound_propagation_resource(link, 1_001, false));
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -351,8 +351,8 @@ fn pn_announced(identity_hash: [u8; 16], hops: u8) -> rns_net::destination::Anno
         lxmf_core::announce::build_pn_announce_data(&lxmf_core::announce::PnAnnounceParams {
             node_timebase: 1_700_000_000,
             propagation_enabled: true,
-            propagation_transfer_limit: 256,
-            propagation_sync_limit: 10240,
+            propagation_transfer_limit: 256.0,
+            propagation_sync_limit: 10240.0,
             propagation_stamp_cost: StampCost::from_whole(16),
             propagation_stamp_cost_flexibility: StampCost::from_whole(3),
             peering_cost: StampCost::from_whole(18),

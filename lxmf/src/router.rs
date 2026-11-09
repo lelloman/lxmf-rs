@@ -203,6 +203,9 @@ pub struct LxmDelivery {
     pub transport_encrypted: bool,
     pub transport_encryption: String,
     pub method: DeliveryMethod,
+    /// The packed message as received (`LXMessage.packed`), e.g. for
+    /// writing it to disk the way `write_to_directory` does.
+    pub lxmf_bytes: Vec<u8>,
 }
 
 /// An outbound message queued for delivery.
@@ -323,9 +326,11 @@ pub struct RouterConfig {
     pub storagepath: PathBuf,
     pub autopeer: bool,
     pub autopeer_maxdepth: u8,
-    pub propagation_limit: u32,
+    /// Per-transfer propagation limit in kilobytes; may be fractional.
+    pub propagation_limit: f64,
     pub delivery_limit: f64,
-    pub sync_limit: u32,
+    /// Propagation sync limit in kilobytes; may be fractional.
+    pub sync_limit: f64,
     pub enforce_ratchets: bool,
     pub enforce_stamps: bool,
     pub static_peers: Vec<[u8; 16]>,
@@ -354,9 +359,9 @@ impl Default for RouterConfig {
             storagepath: PathBuf::from("."),
             autopeer: AUTOPEER,
             autopeer_maxdepth: AUTOPEER_MAXDEPTH,
-            propagation_limit: PROPAGATION_LIMIT,
+            propagation_limit: PROPAGATION_LIMIT as f64,
             delivery_limit: DELIVERY_LIMIT,
-            sync_limit: SYNC_LIMIT,
+            sync_limit: SYNC_LIMIT as f64,
             enforce_ratchets: false,
             enforce_stamps: false,
             static_peers: Vec::new(),
@@ -876,7 +881,15 @@ impl LxmRouter {
                     (s("network_distance"), Value::UInt(distance)),
                     (s("rx_bytes"), Value::UInt(peer.rx_bytes)),
                     (s("tx_bytes"), Value::UInt(peer.tx_bytes)),
-                    (s("acceptance_rate"), Value::Float(peer.acceptance_rate())),
+                    (
+                        s("acceptance_rate"),
+                        // Upstream reports an integer 0 before anything was offered.
+                        if peer.offered == 0 {
+                            Value::UInt(0)
+                        } else {
+                            Value::Float(peer.acceptance_rate())
+                        },
+                    ),
                     (
                         s("messages"),
                         Value::Map(vec![
@@ -920,9 +933,9 @@ impl LxmRouter {
             ),
             (
                 s("propagation_limit"),
-                Value::UInt(self.config.propagation_limit as u64),
+                Value::Float(self.config.propagation_limit),
             ),
-            (s("sync_limit"), Value::UInt(self.config.sync_limit as u64)),
+            (s("sync_limit"), Value::Float(self.config.sync_limit)),
             (
                 s("target_stamp_cost"),
                 Value::Float(self.config.propagation_cost.as_f64()),
@@ -2684,6 +2697,7 @@ impl LxmRouter {
                 transport_encrypted,
                 transport_encryption: transport_encryption.to_string(),
                 method,
+                lxmf_bytes: lxmf_bytes.to_vec(),
             };
             callback(&delivery);
         }
@@ -2970,7 +2984,7 @@ impl LxmRouter {
             }
         }
 
-        let limit = self.config.sync_limit as u64 * 1000;
+        let limit = (self.config.sync_limit * 1000.0) as u64;
         if transfer_size > limit {
             log::debug!(
                 "Rejecting {} byte propagation resource exceeding the {} byte limit",
@@ -4596,8 +4610,8 @@ pub fn now_timestamp() -> f64 {
 /// so the announce can be sent after `NODE_ANNOUNCE_DELAY`.
 struct PnAnnounceSnapshot {
     propagation_enabled: bool,
-    transfer_limit: u64,
-    sync_limit: u64,
+    transfer_limit: f64,
+    sync_limit: f64,
     costs: [StampCost; 3],
     name: Option<String>,
 }
@@ -4606,8 +4620,8 @@ impl PnAnnounceSnapshot {
     fn of(router: &LxmRouter) -> Self {
         Self {
             propagation_enabled: router.propagation_node && !router.config.from_static_only,
-            transfer_limit: router.config.propagation_limit as u64,
-            sync_limit: router.config.sync_limit as u64,
+            transfer_limit: router.config.propagation_limit,
+            sync_limit: router.config.sync_limit,
             costs: [
                 router.config.propagation_cost,
                 router.config.propagation_cost_flexibility,
