@@ -8,10 +8,10 @@ The current upstream reference baseline is:
 - Repository: `git@github.com:markqvist/LXMF.git`
 - Local checkout used: `~/LXMF`
 - Branch: `origin/master`
-- Commit: `795fdaa2b0777c13033787d933d1afc94a2377cb`
-- Describe: `1.1.0`
-- Commit date: `2026-07-20T18:49:54+02:00`
-- Subject: `Updated versions`
+- Commit: `101fd447815b4f4f699f8bb700e0df613f71efce`
+- Describe: `1.3.0-1-g101fd44`
+- Commit date: `2026-11-08T11:12:02+01:00`
+- Subject: `Cleanup`
 
 The previous major review baseline was `8499729024a4cddfceb47ca07188bb5b1d11d179`
 (`0.9.6`). The upstream range
@@ -92,24 +92,52 @@ already guaranteed by Rust ownership, were explicitly closed as no-op parity
 items. The commit-by-commit disposition and test coverage are recorded in
 `docs/upstream-lxmf-backlog.md`.
 
+The upstream range
+`795fdaa2b0777c13033787d933d1afc94a2377cb..101fd447815b4f4f699f8bb700e0df613f71efce`
+(42 commits, LXMF 1.2.0 and 1.3.0) has been reviewed and ported on `dev`:
+fractional stamp costs and the transitional announce formats, propagation
+node version metadata, delivery/propagation link costs, announce type
+filtering, the configurable PN stamp throttle, the corrected encrypted packet
+MDU, and the medium-aware outbound retry, path-request and slow-path handling.
+The SQLite storage backend (`c7a902f`) is a Python-local persistence choice
+and was closed without porting. Per-commit dispositions are in
+`docs/upstream-lxmf-backlog.md`.
+
+Interop with this baseline is checked two ways:
+
+- `tests/generate_lxmf13_vectors.py` calls the upstream Python code to produce
+  `tests/fixtures/lxmf13_vectors.json` (announce builders and parsers, stamp
+  valuation and generation, packet limits), consumed by
+  `lxmf-core/tests/lxmf13_interop.rs`.
+- `tests/interop/run_live.sh` runs upstream Python LXMF against the Rust
+  `interop_peer` example over a real RNS TCP link: announces both ways,
+  stamped opportunistic and direct (packet and resource) delivery with
+  proofs, and propagation through the Rust propagation node. CI runs it as
+  the `Python LXMF Interop` job against the pinned upstream commits.
+
 ## RNS Dependency Baseline
 
 `lxmf-rs` depends on published Rust Reticulum crates from crates.io:
 
-- `rns-crypto` `=0.1.7`
-- `rns-core` `=0.1.12`
-- `rns-net` `=0.5.9`
+- `rns-crypto` `=0.2.2`
+- `rns-core` `=0.7.0`
+- `rns-net` `=0.12.0`
 
 The corresponding `rns-rs` integration baseline is:
 
 - Repository: `git@github.com:lelloman/rns-rs.git`
 - Branch used for integration work: `dev`
-- GitHub release tag commit: `869a4bc2354329bf4ea480b1c27efcbef605a722`
+- GitHub release tag commit: `32f697056661fbf7cf3f71db907cc313b69a677d`
+  (`rns-core-v0.7.0`, `rns-net-v0.12.0`, `rns-crypto-v0.2.2`)
+
+The live interop job pins upstream Python RNS at Reticulum
+`c5d205ffea16ef4519150745edf644dd03e48e5f` (RNS 1.6.0), the version upstream
+LXMF 1.3 requires (`rns>=1.6.0`).
 
 When updating RNS integration, publish the required `rns-rs` crates, update the
 exact versions in `Cargo.toml`, and record the release commit here.
 
-The current upstream Python LXMF `1.1.0` baseline requires `rns>=1.4.0`. The
+The current upstream Python LXMF `1.3.0` baseline requires `rns>=1.6.0`. The
 Rust dependency baseline above uses the corresponding latest published `rns-rs`
 crates; treat Python RNS dependency bumps as dependency-parity review input,
 not as direct Cargo version edits.

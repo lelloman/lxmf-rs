@@ -6,27 +6,67 @@ closed out.
 
 ## Current State
 
-- Last checked: 2026-08-31
+- Last checked: 2026-11-09
 - Upstream checkout: `/home/lelloman/LXMF`
 - Upstream remote: `git@github.com:markqvist/LXMF.git`
 - Upstream branch: `origin/master`
-- Current upstream head: `795fdaa2b0777c13033787d933d1afc94a2377cb`
+- Current upstream head: `101fd447815b4f4f699f8bb700e0df613f71efce`
 - Last reviewed Rust-port upstream point:
-  `795fdaa2b0777c13033787d933d1afc94a2377cb`
+  `101fd447815b4f4f699f8bb700e0df613f71efce`
 - Rust branch at latest review: `dev`
-- Rust head at latest review:
-  `b610ffabc91dd0c6cb4374d662e1b607f4f0567e`
+- Rust port commit: `d700a89` (plus the interop test commit that follows it)
 
 The local upstream worktree branch `master` intentionally remains at the older
 `fab12ad` baseline. Do not use its `HEAD` as the reviewed Rust-port baseline;
 the authoritative reviewed commit is recorded in `UPSTREAM.md`. The remote
-`origin/master` was checked at `795fdaa` during the 2026-08-31 refresh.
+`origin/master` was checked at `101fd44` during the 2026-11-09 refresh.
 
 ## Open Upstream Commits
 
 None. Every commit in
-`fab12ad9bf9f997797034950f289fe41a79dcf5a..795fdaa2b0777c13033787d933d1afc94a2377cb`
+`fab12ad9bf9f997797034950f289fe41a79dcf5a..101fd447815b4f4f699f8bb700e0df613f71efce`
 is ported, covered by tests, or explicitly closed as metadata/design-equivalent.
+
+## Reviewed 2026-11-09: `795fdaa..101fd44` (LXMF 1.2.0, 1.3.0)
+
+Ported by Rust commit `d700a89` together with the move to `rns-core` 0.7 /
+`rns-net` 0.12, which provide the fractional stamp, link cost, medium timing,
+announce filtering and resource app-flag APIs these commits rely on. Interop
+is covered by the upstream-generated vectors in
+`lxmf-core/tests/lxmf13_interop.rs` and the live Python interop run
+(`tests/interop/run_live.sh`).
+
+| Upstream commit(s) | Status |
+| --- | --- |
+| `6e898e6`, `3297f21` | Ported: costs are `StampCost` and values `StampValue` on the 1/256 grid. Delivery announces carry `ceil(cost)` in [1] and the exact cost in [3]; PN announces carry ceil'd costs in [5] and exact costs in [7]; parsers prefer the exact elements and accept floats wherever upstream does. Message store filenames use quantized float values; peers and stamp costs persist as floats; `lxmd` parses costs as floats; `set_inbound_stamp_cost` caps at `STAMP_COST_CAP`; propagation resources carry the app flag and static-only nodes admit app-flagged client resources. Covered by `lxmf13_interop` (byte-identical announces, parsing, quantization, stamp values) and `propagation_node_tests`. |
+| `98e09bb`, `700a462`, `308498e`, `d6df0f7`, `c98bca2`, `1df7ebc`, `8669218` | LXStamper now wraps `RNS.Stamps`; Rust already delegates to `rns_core::stamp`, now with fractional costs. Remaining changes are Python worker/multiprocessing internals and a log fix; not applicable to the Rayon stamper. Upstream-generated stamps validate in `upstream_generated_stamps_validate`. |
+| `0889401`, `fbc821e`, `acaa9e3`, `beac6bc`, `170e71d`, `43a077b`, `5745f85` | Ported in `lxmf/src/outbound.rs` and `process_outbound`: medium-aware round trips, scheduled attempts and attempt limits with airtime jitter, debounced path requests (60 s with a slow interface online), stale-path rediscovery, `awaiting_path` wakeups from announces and path updates, slow-path holds with one in-flight message per slow target, and idempotent delivered/propagated marking. Covered by `outbound_tests`. |
+| `2470081` | Ported: send errors fail the message instead of retrying silently. Covered by `send_errors_fail_the_message`. The deferred-stamp parts do not apply (no deferred stamp pipeline in Rust). |
+| `3fc60af` | Ported: `ENCRYPTED_PACKET_MDU` is `Packet.ENCRYPTED_MDU` (383; Rust had 399), and oversized opportunistic messages fall back to direct delivery as `LXMessage.pack` does. Covered by `constants_match_upstream` and `oversized_opportunistic_message_falls_back_to_direct`. |
+| `c3ff2d6` | Ported: PN metadata carries `PN_META_IMPL_NAME` (`lxmf-rs`), `PN_META_VERSION` and the configured node name, which Rust previously never announced. Covered by `pn_announces_match_upstream`. |
+| `a0793f6` | Ported: delivery and propagation destinations set a link cost of 3.25. |
+| `810c345` | Ported: the router registers `lxmf.delivery` and `lxmf.propagation` with `wants_destination_type`. |
+| `40dcd7d` | Ported: `pn_stamp_throttle` in `RouterConfig`, `[propagation] propagation_stamp_throttle` (minutes, 5-minute floor) in `lxmd`, default 300 s. Covered by `fractional_costs_and_stamp_throttle_follow_upstream_bounds`. |
+| `d845503` | Ported: stamp costs are marked dirty and saved with the periodic store job and on exit. Covered by `stamp_cost_update_replaces_cache_and_persists_all_destinations`. |
+| `c939e25` | Ported: an unanswered peer path request backs off the peer and marks it not alive. Covered by `unanswered_peer_path_requests_back_off`. |
+| `2059784` | Ported: announce data is retained when a propagated message is accepted, as for delivered messages. Covered by `small_propagated_message_is_sent_as_link_packet`. |
+| `2b09146` | Already covered: display-name decoding returns `None` on unpack or UTF-8 failure. |
+| `8ded002` | Not applicable: Rust has no outbound cancel or deferred-stamp API. Revisit if one is added. |
+| `c7a902f` | Closed as a design choice: the SQLite backend is Python-local persistence with legacy-file import; it changes no wire or interop format. Its peer identity resolution retry is matched by resolving peer keys from announces or the transport on every sync pass. |
+| `3290c4e` | Ported: `ENCRYPTION_DESCRIPTION_AES` is "AES-256". |
+| `da1b9c0`, `6fb5a36`, `599bb67`, `e8ba024`, `01387b1`, `cc702b7` | Python version and RNS floor metadata (now `rns>=1.6.0`); dependency-parity context only. |
+| `41cdce6`, `1dc8097`, `2c69fd3` | Log level and log message cleanup. |
+| `aa7137d` | GitHub issue template removal. |
+| `e52016c`, `db2bd9e` | README and micron README documentation. |
+| `101fd44` | LICENSE copyright year. |
+
+Found while porting this range (pre-existing Rust gaps, fixed in `d700a89`):
+concluded messages were never removed from the outbound queue; transient ID
+caches expired after 30 days instead of upstream's 180; propagation nodes
+accepted only offered peer transfers, not client uploads; delivery and
+propagation destinations had no proof strategy, so their packets were never
+proven; propagation nodes never generated peering keys; and propagated link
+packets never reached the sent state.
 
 ## Recently Reviewed And Closed
 
