@@ -14,6 +14,9 @@ the real wire protocol:
      proven (SENT) and delivered locally on the Rust side
   6. a propagated resource (app flag set) for a third party, stored by the
      Rust propagation node
+  7. the Rust propagation node peers with the Python one and syncs that
+     message to it (Rust generates a fractional-cost peering key)
+  8. the Python propagation node syncs a message to the Rust one
 
 Usage:
     LXMF_SRC=../LXMF RNS_SRC=../Reticulum \\
@@ -39,6 +42,7 @@ for var in ("RNS_SRC", "LXMF_SRC"):
 
 import RNS  # noqa: E402
 import LXMF  # noqa: E402
+import LXMF.LXStamper  # noqa: E402,F401
 from LXMF.LXMessage import LXMessage  # noqa: E402
 
 TIMEOUT = float(os.environ.get("INTEROP_TIMEOUT", "90"))
@@ -133,11 +137,18 @@ def main():
         )
 
     RNS.Reticulum(configdir=configdir)
-    router = LXMF.LXMRouter(identity=RNS.Identity(), storagepath=os.path.join(workdir, "lxmf"))
+    router = LXMF.LXMRouter(
+        identity=RNS.Identity(),
+        storagepath=os.path.join(workdir, "lxmf"),
+        propagation_cost=13.0,
+        peering_cost=7.5,
+    )
     identity = RNS.Identity()
     source = router.register_delivery_identity(identity, display_name="python 1.3 interop")
     inbox = queue.Queue()
     router.register_delivery_callback(lambda message: inbox.put(message))
+    router.enable_propagation()
+    python_pn = RNS.Destination.hash_from_name_and_identity("lxmf.propagation", router.identity)
 
     rust = RustPeer(binary, port, os.path.join(workdir, "rust"))
     try:
@@ -150,6 +161,7 @@ def main():
 
         # 1. Announces both ways.
         router.announce(source.hash)
+        router.announce_propagation_node()
         got_path = wait_for(lambda: RNS.Transport.has_path(rust_delivery) and RNS.Identity.recall(rust_delivery))
         check("python learns rust delivery destination", got_path)
         if not got_path:
@@ -232,8 +244,49 @@ def main():
         router.handle_outbound(message)
         wait_for(lambda: message.state in (LXMessage.SENT, LXMessage.FAILED))
         check("propagated resource: python message reaches SENT", message.state == LXMessage.SENT, f"state={message.state:#x}")
-        stored = wait_for(lambda: rust.find("propagation_stored", count=1), 30)
-        check("propagated resource: rust PN stores the message", stored, stored)
+        third_tid = RNS.hexrep(message.transient_id, delimit=False) if message.transient_id else None
+
+        def rust_state():
+            with rust.lock:
+                states = [e for e in rust.events if e.get("event") == "propagation_state"]
+            return states[-1] if states else {}
+
+        stored = wait_for(lambda: third_tid in rust_state().get("transient_ids", []), 30)
+        check("propagated resource: rust PN stores the message", stored, third_tid)
+
+        # 7. Rust PN -> Python PN peer sync.
+        def rust_peer(hash_bytes):
+            for peer in rust_state().get("peers", []):
+                if peer["hash"] == hash_bytes.hex():
+                    return peer
+            return None
+
+        check("rust PN peers with the python PN", wait_for(lambda: rust_peer(python_pn), 60), rust_peer(python_pn))
+        synced = wait_for(lambda: message.transient_id in router.propagation_entries, 180)
+        check(
+            "rust PN syncs the stored message to the python PN",
+            synced,
+            rust_peer(python_pn),
+        )
+        check(
+            "python accounts the transfer to its rust peer",
+            rust_pn in router.peers and router.peers[rust_pn].incoming >= 1,
+            router.peers[rust_pn].incoming if rust_pn in router.peers else "not peered",
+        )
+
+        # 8. Python PN -> Rust PN peer sync, with a stamp meeting the Rust
+        # node's fractional target.
+        lxmf_data = RNS.Identity.full_hash(b"third-party")[:16] + os.urandom(200)
+        transient_id = RNS.Identity.full_hash(lxmf_data)
+        stamp, value = LXMF.LXStamper.generate_stamp(
+            transient_id, 10.5, expand_rounds=LXMF.LXStamper.WORKBLOCK_EXPAND_ROUNDS_PN
+        )
+        router.lxmf_propagation(lxmf_data, stamp_value=value, stamp_data=stamp)
+        check("python PN stores the ingested message", transient_id in router.propagation_entries)
+        synced = wait_for(lambda: transient_id.hex() in rust_state().get("transient_ids", []), 180)
+        check("python PN syncs the message to the rust PN", synced, rust_peer(python_pn))
+        peer = rust_peer(python_pn)
+        check("rust accounts the transfer to its python peer", peer and peer["incoming"] >= 1, peer)
     finally:
         rust.stop()
         failed = [name for name, ok, _ in results if not ok]

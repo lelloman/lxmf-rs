@@ -341,3 +341,91 @@ fn missing_peering_keys_are_generated_in_the_background() {
     ));
     let _ = std::fs::remove_dir_all(dir);
 }
+
+fn pn_announced(identity_hash: [u8; 16], hops: u8) -> rns_net::destination::AnnouncedIdentity {
+    let dest_hash =
+        rns_core::destination::destination_hash(APP_NAME, &["propagation"], Some(&identity_hash));
+    let app_data =
+        lxmf_core::announce::build_pn_announce_data(&lxmf_core::announce::PnAnnounceParams {
+            node_timebase: 1_700_000_000,
+            propagation_enabled: true,
+            propagation_transfer_limit: 256,
+            propagation_sync_limit: 10240,
+            propagation_stamp_cost: StampCost::from_whole(16),
+            propagation_stamp_cost_flexibility: StampCost::from_whole(3),
+            peering_cost: StampCost::from_whole(18),
+            implementation: None,
+            name: None,
+        });
+    rns_net::destination::AnnouncedIdentity {
+        dest_hash: DestHash(dest_hash),
+        identity_hash: rns_core::types::IdentityHash(identity_hash),
+        public_key: [0x42; 64],
+        app_data: Some(app_data),
+        hops,
+        received_at: 0.0,
+        receiving_interface: rns_net::InterfaceId(1),
+        rssi: None,
+        snr: None,
+    }
+}
+
+#[test]
+fn incoming_sync_from_announced_node_auto_peers() {
+    let (router, dir) = test_router("autopeer_incoming");
+    let remote_identity = [0xF1; 16];
+    let link = [0xF2; 16];
+    let router = Arc::new(Mutex::new(router));
+    let mut callbacks = LxmfCallbacks::new(router.clone());
+
+    let announced = pn_announced(remote_identity, 1);
+    let remote_hash = announced.dest_hash.0;
+    callbacks.on_announce(announced);
+    {
+        let mut r = router.lock().unwrap();
+        assert!(r.peers.contains_key(&remote_hash));
+        // Unpeered since (e.g. rotated out); it syncs to us anyway.
+        r.unpeer(&remote_hash).unwrap();
+        r.active_propagation_links.push(link);
+        r.link_remote_identities.insert(link, remote_identity);
+    }
+
+    callbacks.on_resource_received(LinkId(link), batch(vec![transient(0xA9, b"synced")]), None);
+
+    assert!(wait_until(&router, |r| r.propagation_store.message_count() == 1));
+    let r = router.lock().unwrap();
+    let peer = r
+        .peers
+        .get(&remote_hash)
+        .expect("auto-peered via incoming sync");
+    assert_eq!(peer.incoming, 1, "the transfer counts as peer traffic");
+    assert_eq!(r.propagation_store.unpeered_propagation_incoming, 0);
+    drop(r);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn incoming_sync_does_not_auto_peer_distant_or_unannounced_nodes() {
+    let (mut router, dir) = test_router("autopeer_limits");
+    assert!(
+        !router.autopeer_from_incoming_sync([0xF3; 16]),
+        "never announced"
+    );
+
+    let router = Arc::new(Mutex::new(router));
+    let mut callbacks = LxmfCallbacks::new(router.clone());
+    let announced = pn_announced([0xF4; 16], AUTOPEER_MAXDEPTH + 1);
+    let remote_hash = announced.dest_hash.0;
+    callbacks.on_announce(announced);
+
+    let mut r = router.lock().unwrap();
+    assert!(
+        !r.autopeer_from_incoming_sync(remote_hash),
+        "beyond autopeer depth"
+    );
+    assert!(!r.peers.contains_key(&remote_hash));
+    r.config.autopeer = false;
+    assert!(!r.autopeer_from_incoming_sync(remote_hash));
+    drop(r);
+    let _ = std::fs::remove_dir_all(dir);
+}
