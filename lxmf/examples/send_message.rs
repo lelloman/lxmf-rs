@@ -14,10 +14,8 @@ use std::time::Duration;
 use lxmf_core::constants::*;
 use lxmf_core::message;
 use lxmf_rs::router::{LxmDelivery, LxmRouter, LxmfCallbacks, OutboundMessage, RouterConfig};
-use rns_core::types::{DestHash, IdentityHash, LinkId, PacketHash};
 use rns_crypto::identity::Identity;
 use rns_net::destination::AnnouncedIdentity;
-use rns_net::driver::Callbacks;
 use rns_net::interface::tcp::TcpClientConfig;
 use rns_net::node::{InterfaceConfig, NodeConfig, RnsNode};
 use rns_net::InterfaceId;
@@ -41,67 +39,6 @@ enum AppEvent {
         method: DeliveryMethod,
     },
     Announce(AnnouncedIdentity),
-}
-
-struct AppCallbacks {
-    inner: LxmfCallbacks,
-    tx: mpsc::Sender<AppEvent>,
-}
-
-impl Callbacks for AppCallbacks {
-    fn on_announce(&mut self, announced: AnnouncedIdentity) {
-        let _ = self.tx.send(AppEvent::Announce(announced.clone()));
-        self.inner.on_announce(announced);
-    }
-    fn on_path_updated(&mut self, dest_hash: DestHash, hops: u8) {
-        self.inner.on_path_updated(dest_hash, hops);
-    }
-    fn on_local_delivery(&mut self, dest_hash: DestHash, raw: Vec<u8>, packet_hash: PacketHash) {
-        self.inner.on_local_delivery(dest_hash, raw, packet_hash);
-    }
-    fn on_link_established(
-        &mut self,
-        link_id: LinkId,
-        dest_hash: DestHash,
-        rtt: f64,
-        is_initiator: bool,
-    ) {
-        self.inner
-            .on_link_established(link_id, dest_hash, rtt, is_initiator);
-    }
-    fn on_link_closed(&mut self, link_id: LinkId, reason: Option<rns_core::link::TeardownReason>) {
-        self.inner.on_link_closed(link_id, reason);
-    }
-    fn on_remote_identified(
-        &mut self,
-        link_id: LinkId,
-        identity_hash: IdentityHash,
-        public_key: [u8; 64],
-    ) {
-        self.inner
-            .on_remote_identified(link_id, identity_hash, public_key);
-    }
-    fn on_resource_received(&mut self, link_id: LinkId, data: Vec<u8>, metadata: Option<Vec<u8>>) {
-        self.inner.on_resource_received(link_id, data, metadata);
-    }
-    fn on_resource_completed(&mut self, link_id: LinkId) {
-        self.inner.on_resource_completed(link_id);
-    }
-    fn on_resource_failed(&mut self, link_id: LinkId, error: String) {
-        self.inner.on_resource_failed(link_id, error);
-    }
-    fn on_response(&mut self, link_id: LinkId, request_id: [u8; 16], data: Vec<u8>) {
-        self.inner.on_response(link_id, request_id, data);
-    }
-    fn on_proof(&mut self, dest_hash: DestHash, packet_hash: PacketHash, rtt: f64) {
-        self.inner.on_proof(dest_hash, packet_hash, rtt);
-    }
-    fn on_proof_requested(&mut self, dest_hash: DestHash, packet_hash: PacketHash) -> bool {
-        self.inner.on_proof_requested(dest_hash, packet_hash)
-    }
-    fn on_link_data(&mut self, link_id: LinkId, context: u8, data: Vec<u8>) {
-        self.inner.on_link_data(link_id, context, data);
-    }
 }
 
 fn main() {
@@ -193,10 +130,12 @@ fn main() {
     }));
 
     let router = Arc::new(Mutex::new(router));
-    let app_callbacks = AppCallbacks {
-        inner: LxmfCallbacks::new(router.clone()),
-        tx,
-    };
+    let app_callbacks = LxmfCallbacks::with_announce_handler(
+        router.clone(),
+        Box::new(move |announced: &AnnouncedIdentity| {
+            let _ = tx.send(AppEvent::Announce(announced.clone()));
+        }),
+    );
 
     // Start node
     let node = Arc::new(
@@ -271,29 +210,13 @@ fn main() {
         println!("[QUEUE] message queued for {}", hex(&target_dest));
 
         let mut r = router.lock().unwrap();
-        let _ = r.handle_outbound(OutboundMessage {
-            destination_hash: target_dest,
-            source_hash: src_hash,
-            packed: packed.packed,
-            message_hash: packed.message_hash,
-            method: DeliveryMethod::Opportunistic,
-            state: MessageState::Outbound,
-            representation: Representation::Unknown,
-            attempts: 0,
-            last_attempt: 0.0,
-            stamp: None,
-            stamp_cost: None,
-            propagation_packed: None,
-            propagation_stamp: None,
-            transient_id: None,
-            delivery_callback: None,
-            failed_callback: None,
-            progress_callback: None,
-            link_id: None,
-            packet_hash: None,
-            tracking: Default::default(),
-            include_ticket: false,
-        });
+        let _ = r.handle_outbound(OutboundMessage::new(
+            target_dest,
+            src_hash,
+            packed.packed,
+            packed.message_hash,
+            DeliveryMethod::Opportunistic,
+        ));
     }
     println!("Waiting...");
     println!();

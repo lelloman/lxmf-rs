@@ -4,9 +4,8 @@ use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::{Arc, Mutex};
 
 use lxmf_core::constants::{
-    DeliveryMethod, MessageState, PeerError, PeerState, Representation, APP_NAME,
-    DESTINATION_LENGTH, ENCRYPTION_DESCRIPTION_UNENCRYPTED, LXMF_OVERHEAD, STAMP_COST_EXPIRY,
-    STAMP_SIZE,
+    DeliveryMethod, MessageState, PeerError, PeerState, APP_NAME, DESTINATION_LENGTH,
+    ENCRYPTION_DESCRIPTION_UNENCRYPTED, LXMF_OVERHEAD, STAMP_COST_EXPIRY, STAMP_SIZE,
 };
 use lxmf_core::message;
 use lxmf_core::stamp::{StampCost, StampValue};
@@ -159,29 +158,16 @@ fn prepared_peer_sync_router(
 }
 
 fn outbound(method: DeliveryMethod) -> OutboundMessage {
-    OutboundMessage {
-        destination_hash: [0xAA; DESTINATION_LENGTH],
-        source_hash: [0xBB; DESTINATION_LENGTH],
-        packed: vec![0xCC; 128],
-        message_hash: [0xDD; 32],
+    let mut msg = OutboundMessage::new(
+        [0xAA; DESTINATION_LENGTH],
+        [0xBB; DESTINATION_LENGTH],
+        vec![0xCC; 128],
+        [0xDD; 32],
         method,
-        state: MessageState::Outbound,
-        representation: Representation::Unknown,
-        attempts: 0,
-        last_attempt: 0.0,
-        stamp: None,
-        stamp_cost: None,
-        propagation_packed: Some(vec![0xEE; 64]),
-        propagation_stamp: None,
-        transient_id: Some([0x11; 32]),
-        delivery_callback: None,
-        failed_callback: None,
-        progress_callback: None,
-        link_id: None,
-        packet_hash: None,
-        tracking: Default::default(),
-        include_ticket: false,
-    }
+    );
+    msg.propagation_packed = Some(vec![0xEE; 64]);
+    msg.transient_id = Some([0x11; 32]);
+    msg
 }
 
 fn pack_delivery_message(
