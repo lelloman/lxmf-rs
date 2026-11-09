@@ -1875,3 +1875,39 @@ fn test_pn_announce_no_name() {
     let pn_name = announce::pn_name_from_app_data(&data);
     assert_eq!(pn_name, None);
 }
+
+#[test]
+fn unstamped_payloads_verify_over_their_original_encoding() {
+    // A float32 timestamp is valid msgpack that our encoder would re-encode
+    // as float64; upstream hashes the bytes as received.
+    let identity = Identity::new(&mut rns_crypto::OsRng);
+    let dest = [0x11u8; 16];
+    let src = [0x22u8; 16];
+    let mut payload = vec![0x94, 0xca];
+    payload.extend_from_slice(&1_700_000_000f32.to_be_bytes());
+    payload.extend_from_slice(&[0xc4, 0x01, b'T', 0xc4, 0x01, b'C', 0x80]);
+
+    let mut hashed = Vec::new();
+    hashed.extend_from_slice(&dest);
+    hashed.extend_from_slice(&src);
+    hashed.extend_from_slice(&payload);
+    let hash = sha256(&hashed);
+    let mut signed = hashed.clone();
+    signed.extend_from_slice(&hash);
+    let signature = identity.sign(&signed).unwrap();
+
+    let mut packed = Vec::new();
+    packed.extend_from_slice(&dest);
+    packed.extend_from_slice(&src);
+    packed.extend_from_slice(&signature);
+    packed.extend_from_slice(&payload);
+
+    let public = Identity::from_public_key(&identity.get_public_key().unwrap()).unwrap();
+    let result = message::unpack(
+        &packed,
+        Some(&|_src: &[u8; 16], sig: &[u8; 64], data: &[u8]| public.verify(sig, data)),
+    )
+    .unwrap();
+    assert_eq!(result.message_hash, hash);
+    assert_eq!(result.signature_valid, Some(true));
+}
