@@ -182,6 +182,10 @@ def main():
             (LXMF.display_name_from_app_data(app_data), LXMF.stamp_cost_from_app_data(app_data)),
         )
         check(
+            "rust delivery destination announces a ratchet",
+            RNS.Identity.current_ratchet_id(rust_delivery) is not None,
+        )
+        check(
             "python stores rust's fractional stamp cost",
             wait_for(lambda: router.get_outbound_stamp_cost(rust_delivery) == ready["delivery_stamp_cost"], 15),
             router.get_outbound_stamp_cost(rust_delivery),

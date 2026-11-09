@@ -525,6 +525,9 @@ pub struct LxmRouter {
     // Display name for delivery announces
     pub display_name: Option<String>,
     pub delivery_stamp_cost: Option<StampCost>,
+    /// Ratchets of the delivery destination: announced with it and used to
+    /// decrypt messages to it (`enable_ratchets`).
+    delivery_ratchets: Option<Arc<rns_net::LocalRatchets>>,
 }
 
 impl LxmRouter {
@@ -633,6 +636,7 @@ impl LxmRouter {
             node: None,
             display_name: None,
             delivery_stamp_cost: None,
+            delivery_ratchets: None,
             config,
             paths,
         }
@@ -1162,6 +1166,57 @@ impl LxmRouter {
                 &["delivery"],
                 Some(DELIVERY_LINK_COST),
             );
+            let node = node.clone();
+            self.delivery_ratchets = self.enable_delivery_ratchets(&node, delivery_identity);
+        }
+    }
+
+    /// Enable ratchets on the delivery destination, persisted where
+    /// upstream keeps them (`<storage>/lxmf/ratchets/<dest>.ratchets`), and
+    /// enforce them when configured.
+    fn enable_delivery_ratchets(
+        &self,
+        node: &RnsNode,
+        identity: &Identity,
+    ) -> Option<Arc<rns_net::LocalRatchets>> {
+        let prv = identity.get_private_key()?;
+        let dest = Destination::single_in(APP_NAME, &["delivery"], IdentityHash(*identity.hash()));
+        if let Err(err) = std::fs::create_dir_all(&self.paths.ratchets) {
+            log::error!("Could not create ratchet directory: {}", err);
+            return None;
+        }
+        let path = self
+            .paths
+            .ratchets
+            .join(format!("{}.ratchets", hex_string(&dest.hash.0)));
+        let owner =
+            match rns_net::LocalRatchets::persistent(&dest, Identity::from_private_key(&prv), path)
+            {
+                Ok(owner) => owner,
+                Err(err) => {
+                    log::error!(
+                        "Could not enable ratchets for the delivery destination: {}",
+                        err
+                    );
+                    return None;
+                }
+            };
+        if self.config.enforce_ratchets {
+            owner.enforce();
+        }
+        if let Err(err) = node.attach_local_ratchets(owner.clone()) {
+            log::error!("Could not attach delivery ratchets: {}", err);
+            return None;
+        }
+        Some(owner)
+    }
+
+    /// Decrypt data sent to our delivery destination, using its ratchets
+    /// when enabled (which also enforces them when configured).
+    fn decrypt_for_delivery(&self, ciphertext: &[u8]) -> Option<Vec<u8>> {
+        match &self.delivery_ratchets {
+            Some(owner) => owner.decrypt(ciphertext).ok().map(|d| d.plaintext),
+            None => self.identity.decrypt(ciphertext).ok(),
         }
     }
 
@@ -3226,8 +3281,8 @@ impl LxmRouter {
         destination_hash.copy_from_slice(&lxmf_data[..DESTINATION_LENGTH]);
 
         if self.delivery_dest_hash == Some(destination_hash) {
-            match self.identity.decrypt(&lxmf_data[DESTINATION_LENGTH..]) {
-                Ok(decrypted) => {
+            match self.decrypt_for_delivery(&lxmf_data[DESTINATION_LENGTH..]) {
+                Some(decrypted) => {
                     let mut delivery_data =
                         Vec::with_capacity(DESTINATION_LENGTH + decrypted.len());
                     delivery_data.extend_from_slice(&destination_hash);
@@ -3249,7 +3304,7 @@ impl LxmRouter {
                     self.locally_delivered_transient_ids
                         .insert(transient_id, now_timestamp());
                 }
-                Err(_) => log::debug!("Could not decrypt propagated message for local delivery"),
+                None => log::debug!("Could not decrypt propagated message for local delivery"),
             }
             return Some(transient_id);
         }
@@ -4285,10 +4340,10 @@ impl Callbacks for LxmfCallbacks {
                         }
                     };
                     // Decrypt the data payload (encrypted with our public key by sender)
-                    let plaintext = match router.identity.decrypt(packet.data()) {
-                        Ok(p) => p,
-                        Err(e) => {
-                            log::warn!("on_local_delivery: decrypt failed: {:?}", e);
+                    let plaintext = match router.decrypt_for_delivery(packet.data()) {
+                        Some(p) => p,
+                        None => {
+                            log::warn!("on_local_delivery: decrypt failed");
                             return;
                         }
                     };
@@ -4841,6 +4896,10 @@ impl PnAnnounceSnapshot {
             name: self.name.as_deref(),
         })
     }
+}
+
+fn hex_string(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
 /// The error rns-net reports for a resource the receiver rejected
