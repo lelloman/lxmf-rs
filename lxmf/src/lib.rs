@@ -1,4 +1,5 @@
 pub mod handlers;
+pub mod outbound;
 pub mod peer;
 pub mod propagation;
 pub mod router;

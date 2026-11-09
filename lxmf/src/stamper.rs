@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use lxmf_core::constants::STAMP_SIZE;
-use lxmf_core::stamp::{stamp_valid, stamp_value, stamp_workblock};
+use lxmf_core::stamp::{stamp_valid, stamp_value, stamp_workblock, StampCost, StampValue};
 use rns_crypto::OsRng;
 use rns_crypto::Rng;
 
@@ -10,12 +10,14 @@ use rns_crypto::Rng;
 ///
 /// Returns Some((stamp, value)) on success, None if cancelled.
 /// The `cancel` flag can be set from another thread to abort work.
+/// Costs may be fractional; a stamp is valid when its product is at or below
+/// the cost's target, and its reported value is then at least the cost.
 pub fn generate_stamp(
     message_id: &[u8],
-    stamp_cost: u8,
+    stamp_cost: StampCost,
     expand_rounds: u32,
     cancel: Arc<AtomicBool>,
-) -> Option<([u8; STAMP_SIZE], u32)> {
+) -> Option<([u8; STAMP_SIZE], StampValue)> {
     let workblock = stamp_workblock(message_id, expand_rounds);
 
     // Use rayon to search in parallel
@@ -70,7 +72,7 @@ pub fn cancel_work(cancel: &AtomicBool) {
 /// Validate multiple PN stamps in parallel using rayon.
 pub fn validate_pn_stamps(
     transient_list: &[Vec<u8>],
-    target_cost: u8,
+    target_cost: StampCost,
 ) -> Vec<lxmf_core::stamp::PnStampResult> {
     use rayon::prelude::*;
 

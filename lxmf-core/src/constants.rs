@@ -1,6 +1,8 @@
 // LXMF Protocol Constants
 // Tracked against the Python LXMF upstream baseline in UPSTREAM.md
 
+use rns_core::stamp::StampCost;
+
 // ============================================================
 // Application
 // ============================================================
@@ -11,6 +13,10 @@ pub const APP_NAME: &str = "lxmf";
 pub const ASPECT_DELIVERY: &str = "lxmf.delivery";
 pub const ASPECT_PROPAGATION: &str = "lxmf.propagation";
 pub const ASPECT_PROPAGATION_CONTROL: &str = "lxmf.propagation.control";
+
+/// Implementation name announced in propagation node metadata
+/// (`PN_META_IMPL_NAME`; upstream announces "lxmd").
+pub const IMPLEMENTATION_NAME: &str = "lxmf-rs";
 
 // ============================================================
 // Message Field IDs (LXMF.py)
@@ -101,6 +107,7 @@ pub const PN_META_SYNC_STRATUM: u8 = 0x02;
 pub const PN_META_SYNC_THROTTLE: u8 = 0x03;
 pub const PN_META_AUTH_BAND: u8 = 0x04;
 pub const PN_META_UTIL_PRESSURE: u8 = 0x05;
+pub const PN_META_IMPL_NAME: u8 = 0xFE;
 pub const PN_META_CUSTOM: u8 = 0xFF;
 
 // ============================================================
@@ -357,10 +364,12 @@ pub const LXMF_OVERHEAD: usize =
 
 pub const STAMP_SIZE: usize = 32;
 
-// Packet MDU values (from RNS)
-pub const ENCRYPTED_PACKET_MDU: usize = 399; // Packet.ENCRYPTED_MDU + TIMESTAMP_SIZE
-pub const LINK_PACKET_MDU: usize = 431; // Link.MDU
-pub const PLAIN_PACKET_MDU: usize = 464; // Packet.PLAIN_MDU
+// Packet MDU values (from RNS). Upstream 3fc60af dropped the stray
+// `+ TIMESTAMP_SIZE` term, so the encrypted packet MDU is exactly
+// `Packet.ENCRYPTED_MDU` (383 with the default MTU of 500).
+pub const ENCRYPTED_PACKET_MDU: usize = rns_core::constants::ENCRYPTED_MDU; // Packet.ENCRYPTED_MDU
+pub const LINK_PACKET_MDU: usize = rns_core::constants::LINK_MDU; // Link.MDU
+pub const PLAIN_PACKET_MDU: usize = rns_core::constants::PLAIN_MDU; // Packet.PLAIN_MDU
 
 pub const ENCRYPTED_PACKET_MAX_CONTENT: usize =
     ENCRYPTED_PACKET_MDU - LXMF_OVERHEAD + DESTINATION_LENGTH;
@@ -373,7 +382,7 @@ pub const QR_MAX_STORAGE: usize = 2953;
 pub const PAPER_MDU: usize = (QR_MAX_STORAGE - URI_SCHEMA.len() - 3) * 6 / 8; // 3 = "://"
 
 // Encryption descriptions
-pub const ENCRYPTION_DESCRIPTION_AES: &str = "AES-128";
+pub const ENCRYPTION_DESCRIPTION_AES: &str = "AES-256";
 pub const ENCRYPTION_DESCRIPTION_EC: &str = "Curve25519";
 pub const ENCRYPTION_DESCRIPTION_UNENCRYPTED: &str = "Unencrypted";
 
@@ -406,12 +415,18 @@ pub const MAX_DELIVERY_ATTEMPTS: u32 = 5;
 pub const PROCESSING_INTERVAL: u64 = 4; // seconds
 pub const DELIVERY_RETRY_WAIT: u64 = 10; // seconds
 pub const PATH_REQUEST_WAIT: u64 = 7; // seconds
+pub const PATH_REQUEST_DEBOUNCE: u64 = 60; // seconds
+pub const SLOW_INTERFACE_BITRATE: u64 = 2000; // bits per second
+pub const AIRTIME_AWARE_MTU_TIME: f64 = 0.5; // seconds
 pub const MAX_PATHLESS_TRIES: u32 = 1;
 pub const LINK_MAX_INACTIVITY: u64 = 10 * 60; // 10 minutes
 pub const P_LINK_MAX_INACTIVITY: u64 = 3 * 60; // 3 minutes
 
 // Message and stamp expiry
 pub const MESSAGE_EXPIRY: u64 = 30 * 24 * 60 * 60; // 30 days
+/// How long delivered/processed transient IDs are remembered for duplicate
+/// suppression (`MESSAGE_EXPIRY*6.0` upstream).
+pub const TRANSIENT_ID_EXPIRY: u64 = MESSAGE_EXPIRY * 6; // 180 days
 pub const STAMP_COST_EXPIRY: u64 = 45 * 24 * 60 * 60; // 45 days
 
 // Node configuration
@@ -425,12 +440,19 @@ pub const FASTEST_N_RANDOM_POOL: usize = 2;
 pub const ROTATION_HEADROOM_PCT: usize = 10;
 pub const ROTATION_AR_MAX: f64 = 0.5;
 
-// Stamp and propagation costs
-pub const PEERING_COST: u8 = 18;
-pub const MAX_PEERING_COST: u8 = 26;
-pub const PROPAGATION_COST_MIN: u8 = 13;
-pub const PROPAGATION_COST_FLEX: u8 = 3;
-pub const PROPAGATION_COST: u8 = 16;
+// Stamp and propagation costs. Since upstream 6e898e6 costs are fractional
+// values on the 1/256 grid of `RNS.Stamps`.
+pub const PEERING_COST: StampCost = StampCost::from_whole(18);
+pub const MAX_PEERING_COST: StampCost = StampCost::from_whole(26);
+pub const PROPAGATION_COST_MIN: StampCost = StampCost::from_whole(13);
+pub const PROPAGATION_COST_FLEX: StampCost = StampCost::from_whole(3);
+pub const PROPAGATION_COST: StampCost = StampCost::from_whole(16);
+/// Global cap on stamp costs (`Transport.STAMP_COST_CAP`).
+pub const STAMP_COST_CAP: u8 = rns_core::constants::STAMP_COST_CAP;
+
+// Link request costs set on the delivery and propagation destinations.
+pub const DELIVERY_LINK_COST: f64 = 3.25;
+pub const PROPAGATION_LINK_COST: f64 = 3.25;
 pub const PROPAGATION_LIMIT: u32 = 256; // KB
 pub const SEQUENTIAL_VALIDATION: bool = true;
 pub const STATIC_SEQUENTIAL: bool = false;
@@ -440,7 +462,7 @@ pub const DELIVERY_LIMIT: f64 = 1000.0; // KB
 
 // Propagation request timing
 pub const PR_PATH_TIMEOUT: u64 = 10; // seconds
-pub const PN_STAMP_THROTTLE: u64 = 180; // seconds
+pub const PN_STAMP_THROTTLE: u64 = 300; // seconds
 
 // Job intervals (in processing cycles)
 pub const JOB_OUTBOUND_INTERVAL: u32 = 1;

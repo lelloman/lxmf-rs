@@ -4,6 +4,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use lxmf_core::stamp::StampCost;
 use rns_core::msgpack::{self, Value};
 
 static NEXT_TMP_WRITE_ID: AtomicU64 = AtomicU64::new(1);
@@ -130,14 +131,18 @@ pub fn load_transient_ids(path: &Path) -> HashMap<[u8; 32], f64> {
     map
 }
 
-/// Save stamp costs: dest_hash -> [timestamp, cost].
-pub fn save_stamp_costs(path: &Path, costs: &HashMap<[u8; 16], (f64, u8)>) -> std::io::Result<()> {
+/// Save stamp costs: dest_hash -> [timestamp, cost]. Costs are written as
+/// floats, as LXMF 1.3 does since costs became fractional.
+pub fn save_stamp_costs(
+    path: &Path,
+    costs: &HashMap<[u8; 16], (f64, StampCost)>,
+) -> std::io::Result<()> {
     let entries: Vec<(Value, Value)> = costs
         .iter()
         .map(|(k, (ts, cost))| {
             (
                 Value::Bin(k.to_vec()),
-                Value::Array(vec![Value::Float(*ts), Value::UInt(*cost as u64)]),
+                Value::Array(vec![Value::Float(*ts), Value::Float(cost.as_f64())]),
             )
         })
         .collect();
@@ -145,7 +150,7 @@ pub fn save_stamp_costs(path: &Path, costs: &HashMap<[u8; 16], (f64, u8)>) -> st
 }
 
 /// Load stamp costs from storage.
-pub fn load_stamp_costs(path: &Path) -> HashMap<[u8; 16], (f64, u8)> {
+pub fn load_stamp_costs(path: &Path) -> HashMap<[u8; 16], (f64, StampCost)> {
     let mut map = HashMap::new();
     if let Some(Value::Map(entries)) = load_msgpack(path) {
         for (k, v) in entries {
@@ -153,8 +158,8 @@ pub fn load_stamp_costs(path: &Path) -> HashMap<[u8; 16], (f64, u8)> {
                 if key_bytes.len() == 16 && arr.len() >= 2 {
                     let mut key = [0u8; 16];
                     key.copy_from_slice(key_bytes);
-                    if let (Some(ts), Some(cost)) = (arr[0].as_number(), arr[1].as_uint()) {
-                        map.insert(key, (ts, cost as u8));
+                    if let (Some(ts), Some(cost)) = (arr[0].as_number(), arr[1].as_number()) {
+                        map.insert(key, (ts, StampCost::from_f64(cost)));
                     }
                 }
             }
@@ -330,7 +335,10 @@ mod tests {
         save_transient_ids(&paths.local_deliveries, &transient_ids).unwrap();
         assert_eq!(load_transient_ids(&paths.local_deliveries), transient_ids);
 
-        let costs = HashMap::from([([0x33; 16], (2345.5, 17))]);
+        let costs = HashMap::from([
+            ([0x33; 16], (2345.5, StampCost::from_whole(17))),
+            ([0x34; 16], (2346.5, StampCost::from_f64(8.25))),
+        ]);
         save_stamp_costs(&paths.outbound_stamp_costs, &costs).unwrap();
         assert_eq!(load_stamp_costs(&paths.outbound_stamp_costs), costs);
 

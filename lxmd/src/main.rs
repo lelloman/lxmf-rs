@@ -6,6 +6,7 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::{env, fs, thread, time};
 
 use lxmf_core::constants::*;
+use lxmf_core::stamp::StampCost;
 use lxmf_rs::router::{LxmRouter, LxmfCallbacks, RouterConfig};
 use rns_core::destination::destination_hash;
 use rns_core::msgpack::{self, Value};
@@ -147,7 +148,7 @@ pub struct LxmdConfig {
     pub display_name: String,
     pub announce_at_start: bool,
     pub announce_interval: Option<u64>,
-    pub peer_stamp_cost: u8,
+    pub peer_stamp_cost: f64,
     pub delivery_transfer_max_accepted_size: f64,
     pub on_inbound: Option<String>,
 
@@ -166,10 +167,12 @@ pub struct LxmdConfig {
     pub propagation_transfer_max_accepted_size: f64,
     pub propagation_message_max_accepted_size: f64,
     pub propagation_sync_max_accepted_size: f64,
-    pub propagation_stamp_cost_target: u8,
-    pub propagation_stamp_cost_flexibility: u8,
-    pub peering_cost: u8,
-    pub remote_peering_cost_max: u8,
+    pub propagation_stamp_cost_target: f64,
+    pub propagation_stamp_cost_flexibility: f64,
+    /// Throttle period for peers delivering invalid stamps, in seconds.
+    pub propagation_stamp_throttle: f64,
+    pub peering_cost: f64,
+    pub remote_peering_cost_max: f64,
     pub prioritise_destinations: Vec<[u8; 16]>,
     pub control_allowed: Vec<[u8; 16]>,
     pub static_peers: Vec<[u8; 16]>,
@@ -186,7 +189,7 @@ impl Default for LxmdConfig {
             display_name: "Anonymous Peer".to_string(),
             announce_at_start: false,
             announce_interval: None,
-            peer_stamp_cost: 12,
+            peer_stamp_cost: 12.0,
             delivery_transfer_max_accepted_size: 1.0,
             on_inbound: None,
 
@@ -204,10 +207,11 @@ impl Default for LxmdConfig {
             propagation_transfer_max_accepted_size: 256.0,
             propagation_message_max_accepted_size: 256.0,
             propagation_sync_max_accepted_size: 10240.0,
-            propagation_stamp_cost_target: PROPAGATION_COST,
-            propagation_stamp_cost_flexibility: PROPAGATION_COST_FLEX,
-            peering_cost: PEERING_COST,
-            remote_peering_cost_max: MAX_PEERING_COST,
+            propagation_stamp_cost_target: PROPAGATION_COST.as_f64(),
+            propagation_stamp_cost_flexibility: PROPAGATION_COST_FLEX.as_f64(),
+            propagation_stamp_throttle: PN_STAMP_THROTTLE as f64,
+            peering_cost: PEERING_COST.as_f64(),
+            remote_peering_cost_max: MAX_PEERING_COST.as_f64(),
             prioritise_destinations: Vec::new(),
             control_allowed: Vec::new(),
             static_peers: Vec::new(),
@@ -248,6 +252,11 @@ fn parse_ini(content: &str) -> HashMap<String, HashMap<String, String>> {
     sections
 }
 
+/// Parse a float config value (ConfigObj `as_float`).
+fn parse_float(s: &str) -> Option<f64> {
+    s.trim().parse::<f64>().ok().filter(|v| v.is_finite())
+}
+
 fn parse_bool(s: &str) -> bool {
     matches!(s.to_lowercase().as_str(), "yes" | "true" | "1" | "on")
 }
@@ -282,8 +291,8 @@ fn apply_config(ini: &HashMap<String, HashMap<String, String>>, config: &mut Lxm
             }
         }
         if let Some(v) = lxmf.get("stamp_cost") {
-            if let Ok(cost) = v.parse::<u8>() {
-                config.peer_stamp_cost = cost.max(1);
+            if let Some(cost) = parse_float(v) {
+                config.peer_stamp_cost = cost.max(1.0);
             }
         }
         if let Some(v) = lxmf.get("delivery_transfer_max_accepted_size") {
@@ -354,23 +363,28 @@ fn apply_config(ini: &HashMap<String, HashMap<String, String>>, config: &mut Lxm
             }
         }
         if let Some(v) = prop.get("propagation_stamp_cost_target") {
-            if let Ok(n) = v.parse::<u8>() {
-                config.propagation_stamp_cost_target = n.max(PROPAGATION_COST_MIN);
+            if let Some(n) = parse_float(v) {
+                config.propagation_stamp_cost_target = n.max(PROPAGATION_COST_MIN.as_f64());
             }
         }
         if let Some(v) = prop.get("propagation_stamp_cost_flexibility") {
-            if let Ok(n) = v.parse() {
-                config.propagation_stamp_cost_flexibility = n;
+            if let Some(n) = parse_float(v) {
+                config.propagation_stamp_cost_flexibility = n.max(0.0);
+            }
+        }
+        if let Some(v) = prop.get("propagation_stamp_throttle") {
+            if let Some(minutes) = parse_float(v) {
+                config.propagation_stamp_throttle = (minutes * 60.0).max(PN_STAMP_THROTTLE as f64);
             }
         }
         if let Some(v) = prop.get("peering_cost") {
-            if let Ok(n) = v.parse() {
-                config.peering_cost = n;
+            if let Some(n) = parse_float(v) {
+                config.peering_cost = n.max(0.0);
             }
         }
         if let Some(v) = prop.get("remote_peering_cost_max") {
-            if let Ok(n) = v.parse() {
-                config.remote_peering_cost_max = n;
+            if let Some(n) = parse_float(v) {
+                config.remote_peering_cost_max = n.max(0.0);
             }
         }
         if let Some(v) = prop.get("prioritise_destinations") {
@@ -595,6 +609,11 @@ fn parse_hex_hash(s: &str) -> Option<[u8; 16]> {
     Some(result)
 }
 
+/// Format a stamp cost from a status value (`RNS.prettycost`).
+fn pretty_cost(value: &Value) -> String {
+    lxmf_core::stamp::rns_pretty_cost(value.as_number().unwrap_or(0.0))
+}
+
 fn pretty_size(bytes: u64) -> String {
     if bytes >= 1_000_000_000 {
         format!("{:.2} GB", bytes as f64 / 1_000_000_000.0)
@@ -686,13 +705,13 @@ fn display_status(stats: &rns_core::msgpack::Value) {
         println!();
         println!("Stamp Configuration");
         println!("-------------------");
-        println!("  Target cost    : {}", v.as_uint().unwrap_or(0));
+        println!("  Target cost    : {}", pretty_cost(v));
     }
     if let Some(v) = find("stamp_cost_flexibility") {
-        println!("  Flexibility    : {}", v.as_uint().unwrap_or(0));
+        println!("  Flexibility    : {}", pretty_cost(v));
     }
     if let Some(v) = find("peering_cost") {
-        println!("  Peering cost   : {}", v.as_uint().unwrap_or(0));
+        println!("  Peering cost   : {}", pretty_cost(v));
     }
 
     // Peers
@@ -866,14 +885,17 @@ fn build_router_config(config: &LxmdConfig, paths: &LxmdPaths) -> RouterConfig {
         max_peers: config.max_peers.unwrap_or(MAX_PEERS),
         from_static_only: config.from_static_only,
         sync_strategy: DEFAULT_SYNC_STRATEGY,
-        propagation_cost: config.propagation_stamp_cost_target,
-        propagation_cost_flexibility: config.propagation_stamp_cost_flexibility,
-        peering_cost: config.peering_cost,
-        max_peering_cost: config.remote_peering_cost_max,
+        propagation_cost: StampCost::from_f64(config.propagation_stamp_cost_target),
+        propagation_cost_flexibility: StampCost::from_f64(
+            config.propagation_stamp_cost_flexibility,
+        ),
+        peering_cost: StampCost::from_f64(config.peering_cost),
+        max_peering_cost: StampCost::from_f64(config.remote_peering_cost_max),
         max_inbound_syncs: config.max_inbound_syncs,
         sequential_validation: config.sequential_pn_stamp_validation,
         static_sequential: !config.static_peers_bypass_sequential,
         name: config.node_name.clone(),
+        pn_stamp_throttle: config.propagation_stamp_throttle,
     }
 }
 
@@ -981,19 +1003,19 @@ fn build_status_payload(
         ),
         (
             Value::Str("target_stamp_cost".to_string()),
-            Value::UInt(router.config.propagation_cost as u64),
+            Value::Float(router.config.propagation_cost.as_f64()),
         ),
         (
             Value::Str("stamp_cost_flexibility".to_string()),
-            Value::UInt(router.config.propagation_cost_flexibility as u64),
+            Value::Float(router.config.propagation_cost_flexibility.as_f64()),
         ),
         (
             Value::Str("peering_cost".to_string()),
-            Value::UInt(router.config.peering_cost as u64),
+            Value::Float(router.config.peering_cost.as_f64()),
         ),
         (
             Value::Str("max_peering_cost".to_string()),
-            Value::UInt(router.config.max_peering_cost as u64),
+            Value::Float(router.config.max_peering_cost.as_f64()),
         ),
         (
             Value::Str("messagestore".to_string()),
@@ -1729,17 +1751,24 @@ autopeer_maxdepth = 6
 
 # You can configure the target stamp cost
 # required to deliver messages via this node.
-# propagation_stamp_cost_target = 16
+# Costs may be fractional.
+# propagation_stamp_cost_target = 16.0
 
 # Stamp cost flexibility for messages from
 # other propagation nodes.
-# propagation_stamp_cost_flexibility = 3
+# propagation_stamp_cost_flexibility = 3.0
+
+# If a peer delivers messages with stamp costs
+# not conforming to this node's targets, it'll
+# be throttled, by default for 5 minutes. You
+# can configure the throttle period in minutes.
+# propagation_stamp_throttle = 5
 
 # Peering cost for remote nodes.
-# peering_cost = 18
+# peering_cost = 18.0
 
 # Maximum peering cost accepted from remote nodes.
-# remote_peering_cost_max = 26
+# remote_peering_cost_max = 26.0
 
 # Prioritise storage for specific destinations.
 # prioritise_destinations = 41d20c727598a3fbbdf9106133a3a0ed
@@ -1827,7 +1856,7 @@ mod tests {
     fn new_upstream_controls_have_safe_defaults() {
         let config = LxmdConfig::default();
 
-        assert_eq!(config.peer_stamp_cost, 12);
+        assert_eq!(config.peer_stamp_cost, 12.0);
         assert!(config.sequential_pn_stamp_validation);
         assert!(config.static_peers_bypass_sequential);
         assert_eq!(config.max_inbound_syncs, 3);
@@ -1876,7 +1905,7 @@ max_inbound_syncs = 0
         let mut config = LxmdConfig::default();
         apply_config(&ini, &mut config);
 
-        assert_eq!(config.peer_stamp_cost, 1);
+        assert_eq!(config.peer_stamp_cost, 1.0);
         assert!(!config.sequential_pn_stamp_validation);
         assert!(!config.static_peers_bypass_sequential);
         assert_eq!(config.max_inbound_syncs, 1);
@@ -1896,8 +1925,8 @@ propagation_stamp_cost_target = 19
         let mut config = LxmdConfig::default();
         apply_config(&ini, &mut config);
 
-        assert_eq!(config.peer_stamp_cost, 7);
-        assert_eq!(config.propagation_stamp_cost_target, 19);
+        assert_eq!(config.peer_stamp_cost, 7.0);
+        assert_eq!(config.propagation_stamp_cost_target, 19.0);
     }
 
     #[test]

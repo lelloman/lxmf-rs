@@ -225,6 +225,49 @@ pub fn unpack(data: &[u8], verify_fn: Option<&VerifyFn<'_>>) -> Result<UnpackRes
     })
 }
 
+/// Content size of a packed message as `LXMessage.pack` measures it:
+/// the packed payload minus its timestamp and msgpack structure overhead.
+pub fn content_size(packed_len: usize) -> usize {
+    packed_len.saturating_sub(LXMF_OVERHEAD)
+}
+
+/// Resolve the delivery method and representation for a packed message, as
+/// `LXMessage.pack` does for a SINGLE destination:
+///
+/// - Opportunistic delivery falls back to direct (link) delivery when the
+///   content exceeds `ENCRYPTED_PACKET_MAX_CONTENT`.
+/// - Direct delivery uses a link packet up to `LINK_PACKET_MAX_CONTENT`,
+///   otherwise a resource.
+/// - Propagated delivery measures the propagation-packed container against
+///   `LINK_PACKET_MAX_CONTENT` to choose packet or resource.
+pub fn resolve_delivery(
+    desired: DeliveryMethod,
+    packed_len: usize,
+    propagation_packed_len: Option<usize>,
+) -> (DeliveryMethod, Representation) {
+    let content_size = content_size(packed_len);
+    let link_representation = |size: usize| {
+        if size <= LINK_PACKET_MAX_CONTENT {
+            Representation::Packet
+        } else {
+            Representation::Resource
+        }
+    };
+    match desired {
+        DeliveryMethod::Opportunistic if content_size > ENCRYPTED_PACKET_MAX_CONTENT => {
+            (DeliveryMethod::Direct, link_representation(content_size))
+        }
+        DeliveryMethod::Opportunistic => (DeliveryMethod::Opportunistic, Representation::Packet),
+        DeliveryMethod::Direct => (DeliveryMethod::Direct, link_representation(content_size)),
+        DeliveryMethod::Propagated => (
+            DeliveryMethod::Propagated,
+            link_representation(propagation_packed_len.unwrap_or(packed_len)),
+        ),
+        // Paper limits apply to the encrypted paper form, see `paper_pack`.
+        DeliveryMethod::Paper => (DeliveryMethod::Paper, Representation::Unknown),
+    }
+}
+
 /// Create propagation-packed data from a packed message.
 ///
 /// Returns (propagation_packed, transient_id).

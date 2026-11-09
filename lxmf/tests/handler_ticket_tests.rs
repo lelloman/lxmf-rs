@@ -1,4 +1,5 @@
 use lxmf_core::constants::*;
+use lxmf_core::stamp::StampCost;
 use lxmf_rs::handlers::{
     decide_propagation_action, handle_delivery_announce, parse_propagation_announce,
     PropagationAnnounceResult,
@@ -79,7 +80,7 @@ fn test_delivery_announce_with_stamp_cost() {
 
     let result = handle_delivery_announce([0xAA; 16], Some(&app_data));
     assert_eq!(result.destination_hash, [0xAA; 16]);
-    assert_eq!(result.stamp_cost, Some(16));
+    assert_eq!(result.stamp_cost, Some(StampCost::from_whole(16)));
 }
 
 #[test]
@@ -122,9 +123,12 @@ fn test_propagation_announce_parse() {
     assert!(info.propagation_enabled);
     assert_eq!(info.propagation_transfer_limit, 256);
     assert_eq!(info.propagation_sync_limit, 10240);
-    assert_eq!(info.propagation_stamp_cost, 16);
-    assert_eq!(info.propagation_stamp_cost_flexibility, 3);
-    assert_eq!(info.peering_cost, 18);
+    assert_eq!(info.propagation_stamp_cost, StampCost::from_whole(16));
+    assert_eq!(
+        info.propagation_stamp_cost_flexibility,
+        StampCost::from_whole(3)
+    );
+    assert_eq!(info.peering_cost, StampCost::from_whole(18));
 }
 
 #[test]

@@ -342,12 +342,14 @@ fn peer_to_json(peer: &lxmf_rs::peer::LxmPeer) -> Value {
         "next_sync_attempt": peer.next_sync_attempt,
         "last_sync_attempt": peer.last_sync_attempt,
         "sync_backoff": peer.sync_backoff,
-        "peering_cost": peer.peering_cost,
-        "peering_key_value": peer.peering_key_value(),
+        "peering_cost": peer.peering_cost.map(|cost| cost.as_f64()),
+        "peering_key_value": peer.peering_key_value().map(|value| value.as_f64()),
         "propagation_transfer_limit": peer.propagation_transfer_limit,
         "propagation_sync_limit": peer.propagation_sync_limit,
-        "propagation_stamp_cost": peer.propagation_stamp_cost,
-        "propagation_stamp_cost_flexibility": peer.propagation_stamp_cost_flexibility,
+        "propagation_stamp_cost": peer.propagation_stamp_cost.map(|cost| cost.as_f64()),
+        "propagation_stamp_cost_flexibility": peer
+            .propagation_stamp_cost_flexibility
+            .map(|cost| cost.as_f64()),
         "link_id": peer.link_id.map(|id| hex(&id)),
         "handled_ids": peer.handled_ids.len(),
         "unhandled_ids": peer.unhandled_ids.len(),
@@ -651,7 +653,7 @@ fn handle_get(path: &str, query: Option<&str>, ctx: &AppContext, stream: &mut Tc
                     json!({
                         "dest_hash": hex(dest),
                         "timestamp": timestamp,
-                        "cost": cost,
+                        "cost": cost.as_f64(),
                     })
                 })
                 .collect();
@@ -941,7 +943,8 @@ fn handle_post(
                     "recipient identity is not cached; announce the recipient before propagated send"
                         .to_string()
                 })?;
-                let recipient = Identity::from_public_key(&recipient_public_key);
+                let recipient = Identity::from_public_key(&recipient_public_key)
+                    .map_err(|e| format!("invalid recipient key: {e:?}"))?;
                 let mut rng = rns_crypto::OsRng;
                 let (propagation_packed, transient_id) =
                     message::propagation_pack(&packed.packed, now_timestamp(), None, |data| {
@@ -977,6 +980,7 @@ fn handle_post(
                     progress_callback: None,
                     link_id: None,
                     packet_hash: None,
+                    tracking: Default::default(),
                 })
                 .map_err(|e| e.to_string())?;
             router.jobs();
@@ -1115,6 +1119,11 @@ fn main() {
                     }),
                     mode: rns_core::constants::MODE_FULL,
                     ingress_control: rns_core::transport::types::IngressControlConfig::enabled(),
+                    gravity: 0,
+                    recursive_prs: false,
+                    announces_from_internal: true,
+                    announces_to_internal: None,
+                    stamp_costs: Default::default(),
                     ifac: None,
                     discovery: None,
                 }],

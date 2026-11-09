@@ -245,6 +245,11 @@ fn main() {
             }),
             mode: rns_core::constants::MODE_FULL,
             ingress_control: rns_core::transport::types::IngressControlConfig::enabled(),
+            gravity: 0,
+            recursive_prs: false,
+            announces_from_internal: true,
+            announces_to_internal: None,
+            stamp_costs: Default::default(),
             ifac: None,
             discovery: None,
         }],
@@ -322,9 +327,12 @@ fn main() {
 
         let dest = Destination::single_out(APP_NAME, &["delivery"], &announced);
         let lxmf_payload = &small_msg.packed[DESTINATION_LENGTH..];
-        match node.send_packet(&dest, lxmf_payload) {
-            Ok(ph) => println!("[SEND] small opportunistic (packet {})", hex(&ph.0)),
-            Err(e) => println!("[SEND] small failed: {}", e),
+        match node.try_send_packet(&dest, lxmf_payload) {
+            Ok(receipt) => println!(
+                "[SEND] small opportunistic (packet {})",
+                hex(&receipt.packet_hash().0)
+            ),
+            Err(e) => println!("[SEND] small failed: {:?}", e),
         }
 
         // 2) Big message via direct link delivery
@@ -373,6 +381,7 @@ fn main() {
                 progress_callback: None,
                 link_id: None,
                 packet_hash: None,
+                tracking: Default::default(),
             };
             let _ = r.handle_outbound(msg);
         }

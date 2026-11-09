@@ -3,6 +3,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use lxmf_core::constants::*;
+use lxmf_core::stamp::{format_cost, quantize_value, StampValue};
 use rns_core::msgpack::Value;
 use rns_crypto::sha256::sha256;
 
@@ -18,7 +19,8 @@ pub struct PropagationEntry {
     pub handled_peers: Vec<[u8; 16]>,
     pub unhandled_peers: Vec<[u8; 16]>,
     pub has_stamp: bool,
-    pub stamp_value: u32,
+    /// Stamp value, quantized onto the cost grid as upstream stores it.
+    pub stamp_value: StampValue,
 }
 
 /// Peer distribution queue entry.
@@ -97,12 +99,14 @@ impl PropagationStore {
                 Err(_) => continue,
             };
 
-            let stamp_value: u32 = if parts.len() >= 3 {
-                parts[2].parse().unwrap_or(0)
+            // Since LXMF 1.3 the value component is a quantized float
+            // (`_17.25`); older stores wrote integers (`_17`).
+            let stamp_value = if parts.len() >= 3 {
+                parse_stored_value(parts[2])
             } else {
-                0
+                StampValue::ZERO
             };
-            let has_stamp = stamp_value > 0;
+            let has_stamp = stamp_value > StampValue::ZERO;
 
             // Read destination hash from first 16 bytes of file
             let file_data = match fs::read(&path) {
@@ -144,7 +148,7 @@ impl PropagationStore {
         &mut self,
         lxm_data: &[u8],
         stamp_data: Option<&[u8]>,
-        stamp_value: u32,
+        stamp_value: StampValue,
         from_peer: Option<[u8; 16]>,
     ) -> Option<[u8; 32]> {
         if lxm_data.len() < LXMF_OVERHEAD {
@@ -173,8 +177,10 @@ impl PropagationStore {
 
         // Build filename
         let hex_id = bytes_to_hex(&transient_id);
-        let value_component = if stamp_value > 0 {
-            format!("_{}", stamp_value)
+        let quantized = quantize_value(stamp_value);
+        let stamp_value = StampValue::from_fp(quantized.fp());
+        let value_component = if stamp_value > StampValue::ZERO {
+            format!("_{}", format_cost(quantized))
         } else {
             String::new()
         };
@@ -539,6 +545,15 @@ fn get_weight(entry: &PropagationEntry, now: f64, prioritised_list: &[[u8; 16]])
 // ============================================================
 // Hex conversion helpers
 // ============================================================
+
+/// Parse the value component of a message store filename
+/// (`quantize_cost(components[2])` upstream).
+fn parse_stored_value(component: &str) -> StampValue {
+    match component.parse::<f64>() {
+        Ok(value) => StampValue::from_fp(lxmf_core::stamp::StampCost::from_f64(value).fp()),
+        Err(_) => StampValue::ZERO,
+    }
+}
 
 fn hex_to_bytes32(hex: &str) -> Option<[u8; 32]> {
     if hex.len() != 64 {

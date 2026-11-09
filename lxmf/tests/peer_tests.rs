@@ -1,6 +1,15 @@
 use lxmf_core::constants::*;
+use lxmf_core::stamp::{StampCost, StampValue};
 use lxmf_rs::peer::{LxmPeer, OfferEntry, SyncAction, SyncPostponeReason};
 use rns_core::msgpack::{pack, unpack_exact, Value};
+
+fn cost(n: u32) -> StampCost {
+    StampCost::from_whole(n)
+}
+
+fn value(n: u32) -> StampValue {
+    StampValue::from_whole(n)
+}
 
 // Simple base64 decoder
 mod base64_impl {
@@ -130,10 +139,16 @@ fn test_peer_deserialize_full() {
     assert_eq!(peer.unhandled_ids.len(), v.unhandled_count.unwrap());
     assert_eq!(
         peer.propagation_stamp_cost,
-        Some(v.propagation_stamp_cost.unwrap())
+        Some(cost(v.propagation_stamp_cost.unwrap().into()))
     );
-    assert_eq!(peer.peering_cost, Some(v.peering_cost.unwrap()));
-    assert_eq!(peer.peering_key_value(), Some(v.peering_key_value.unwrap()));
+    assert_eq!(
+        peer.peering_cost,
+        Some(cost(v.peering_cost.unwrap().into()))
+    );
+    assert_eq!(
+        peer.peering_key_value(),
+        Some(value(v.peering_key_value.unwrap() as u32))
+    );
 }
 
 #[test]
@@ -143,10 +158,10 @@ fn test_peer_serialize_roundtrip() {
     peer.last_heard = 1700000000.0;
     peer.peering_timebase = 1700000000.0;
     peer.sync_strategy = SyncStrategy::Persistent;
-    peer.peering_key = Some((vec![0x42; 32], 20));
-    peer.peering_cost = Some(18);
-    peer.propagation_stamp_cost = Some(16);
-    peer.propagation_stamp_cost_flexibility = Some(3);
+    peer.peering_key = Some((vec![0x42; 32], value(20)));
+    peer.peering_cost = Some(cost(18));
+    peer.propagation_stamp_cost = Some(cost(16));
+    peer.propagation_stamp_cost_flexibility = Some(cost(3));
     peer.propagation_transfer_limit = Some(256.0);
     peer.propagation_sync_limit = Some(10240);
     peer.offered = 100;
@@ -164,10 +179,10 @@ fn test_peer_serialize_roundtrip() {
     assert_eq!(loaded.destination_hash, [0xAA; 16]);
     assert!(loaded.alive);
     assert!((loaded.last_heard - 1700000000.0).abs() < 0.01);
-    assert_eq!(loaded.peering_cost, Some(18));
-    assert_eq!(loaded.peering_key_value(), Some(20));
-    assert_eq!(loaded.propagation_stamp_cost, Some(16));
-    assert_eq!(loaded.propagation_stamp_cost_flexibility, Some(3));
+    assert_eq!(loaded.peering_cost, Some(cost(18)));
+    assert_eq!(loaded.peering_key_value(), Some(value(20)));
+    assert_eq!(loaded.propagation_stamp_cost, Some(cost(16)));
+    assert_eq!(loaded.propagation_stamp_cost_flexibility, Some(cost(3)));
     assert_eq!(loaded.offered, 100);
     assert_eq!(loaded.outgoing, 80);
     assert_eq!(loaded.handled_ids.len(), 1);
@@ -222,9 +237,9 @@ fn offer_ids(peer: &mut LxmPeer, entries: &[OfferEntry]) -> Vec<[u8; 32]> {
 
 fn offer_peer(target: u8, flexibility: u8) -> LxmPeer {
     let mut peer = LxmPeer::new([0xA5; 16]);
-    peer.peering_key = Some((vec![0x5A; 32], 18));
-    peer.propagation_stamp_cost = Some(target);
-    peer.propagation_stamp_cost_flexibility = Some(flexibility);
+    peer.peering_key = Some((vec![0x5A; 32], value(18)));
+    peer.propagation_stamp_cost = Some(cost(target.into()));
+    peer.propagation_stamp_cost_flexibility = Some(cost(flexibility.into()));
     peer.propagation_transfer_limit = Some(256.0);
     peer.propagation_sync_limit = Some(10_240);
     peer
@@ -238,19 +253,19 @@ fn peer_offer_enforces_target_minus_flexibility_stamp_floor() {
             transient_id: [0x0C; 32],
             weight: 1.0,
             size: 128,
-            stamp_value: 12,
+            stamp_value: value(12),
         },
         OfferEntry {
             transient_id: [0x0D; 32],
             weight: 2.0,
             size: 128,
-            stamp_value: 13,
+            stamp_value: value(13),
         },
         OfferEntry {
             transient_id: [0x10; 32],
             weight: 3.0,
             size: 128,
-            stamp_value: 16,
+            stamp_value: value(16),
         },
     ];
 
@@ -265,13 +280,13 @@ fn peer_offer_stamp_floor_saturates_at_zero() {
             transient_id: [0x00; 32],
             weight: 1.0,
             size: 128,
-            stamp_value: 0,
+            stamp_value: value(0),
         },
         OfferEntry {
             transient_id: [0x01; 32],
             weight: 2.0,
             size: 128,
-            stamp_value: 1,
+            stamp_value: value(1),
         },
     ];
 
@@ -286,13 +301,13 @@ fn peer_offer_without_flexibility_requires_full_target_cost() {
             transient_id: [0x08; 32],
             weight: 1.0,
             size: 128,
-            stamp_value: 8,
+            stamp_value: value(8),
         },
         OfferEntry {
             transient_id: [0x09; 32],
             weight: 2.0,
             size: 128,
-            stamp_value: 9,
+            stamp_value: value(9),
         },
     ];
 
@@ -318,7 +333,7 @@ fn peer_offer_stops_when_stamp_filter_removes_every_message() {
             transient_id: [0x0C; 32],
             weight: 1.0,
             size: 128,
-            stamp_value: 12,
+            stamp_value: value(12),
         }],
     );
 }
@@ -333,7 +348,7 @@ fn peer_offer_stops_when_transfer_limit_removes_every_message() {
             transient_id: [0x10; 32],
             weight: 1.0,
             size: 101,
-            stamp_value: 16,
+            stamp_value: value(16),
         }],
     );
 }
@@ -348,7 +363,7 @@ fn peer_offer_stops_when_sync_limit_cannot_fit_first_message() {
             transient_id: [0x10; 32],
             weight: 1.0,
             size: 961,
-            stamp_value: 16,
+            stamp_value: value(16),
         }],
     );
 }
@@ -392,14 +407,14 @@ fn test_peer_sync_checks() {
     assert!(!ok);
     assert_eq!(reason, SyncPostponeReason::StampCostsUnknown);
 
-    peer.propagation_stamp_cost = Some(16);
-    peer.propagation_stamp_cost_flexibility = Some(3);
-    peer.peering_cost = Some(18);
+    peer.propagation_stamp_cost = Some(cost(16));
+    peer.propagation_stamp_cost_flexibility = Some(cost(3));
+    peer.peering_cost = Some(cost(18));
     let (ok, reason) = peer.sync_checks();
     assert!(!ok);
     assert_eq!(reason, SyncPostponeReason::PeeringKeyNotReady);
 
-    peer.peering_key = Some((vec![0; 32], 20));
+    peer.peering_key = Some((vec![0; 32], value(20)));
     let (ok, _) = peer.sync_checks();
     assert!(ok);
 }

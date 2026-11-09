@@ -492,10 +492,12 @@ fn test_lxmf_overhead_calculation() {
 fn test_content_size_limits() {
     use lxmf_core::constants::*;
     // These must match the Python values
-    assert_eq!(ENCRYPTED_PACKET_MDU, 399);
+    // Upstream 3fc60af: ENCRYPTED_PACKET_MDU is Packet.ENCRYPTED_MDU (383),
+    // without the stray TIMESTAMP_SIZE that made it 391 (and 399 here).
+    assert_eq!(ENCRYPTED_PACKET_MDU, 383);
     assert_eq!(LINK_PACKET_MDU, 431);
     assert_eq!(PLAIN_PACKET_MDU, 464);
-    assert_eq!(ENCRYPTED_PACKET_MAX_CONTENT, 303);
+    assert_eq!(ENCRYPTED_PACKET_MAX_CONTENT, 287);
     assert_eq!(LINK_PACKET_MAX_CONTENT, 319);
     assert_eq!(PLAIN_PACKET_MAX_CONTENT, 368);
 }
@@ -778,7 +780,7 @@ fn test_message_unpack_basic() {
 
     let mut src_pub = [0u8; 64];
     src_pub.copy_from_slice(&src_pub_bytes);
-    let src_identity = Identity::from_public_key(&src_pub);
+    let src_identity = Identity::from_public_key(&src_pub).unwrap();
 
     let result = message::unpack(
         &packed,
@@ -805,7 +807,7 @@ fn test_message_unpack_with_fields() {
 
     let mut src_pub = [0u8; 64];
     src_pub.copy_from_slice(&src_pub_bytes);
-    let src_identity = Identity::from_public_key(&src_pub);
+    let src_identity = Identity::from_public_key(&src_pub).unwrap();
 
     let result = message::unpack(
         &packed,
@@ -831,7 +833,7 @@ fn test_message_unpack_with_stamp() {
 
     let mut src_pub = [0u8; 64];
     src_pub.copy_from_slice(&src_pub_bytes);
-    let src_identity = Identity::from_public_key(&src_pub);
+    let src_identity = Identity::from_public_key(&src_pub).unwrap();
 
     let result = message::unpack(
         &packed,
@@ -877,7 +879,7 @@ fn test_message_pack_unpack_roundtrip() {
     .expect("pack failed");
 
     let src_pub = src_identity.get_public_key().unwrap();
-    let src_pub_id = Identity::from_public_key(&src_pub);
+    let src_pub_id = Identity::from_public_key(&src_pub).unwrap();
 
     let unpacked = message::unpack(
         &result.packed,
@@ -923,7 +925,7 @@ fn test_message_pack_with_stamp_roundtrip() {
     .expect("pack failed");
 
     let src_pub = src_identity.get_public_key().unwrap();
-    let src_pub_id = Identity::from_public_key(&src_pub);
+    let src_pub_id = Identity::from_public_key(&src_pub).unwrap();
 
     let unpacked = message::unpack(
         &result.packed,
@@ -1079,7 +1081,7 @@ fn test_signature_invalid_detection() {
 
     // Verify with wrong identity
     let other_pub = other_identity.get_public_key().unwrap();
-    let other_pub_id = Identity::from_public_key(&other_pub);
+    let other_pub_id = Identity::from_public_key(&other_pub).unwrap();
 
     let unpacked = message::unpack(
         &result.packed,
@@ -1095,6 +1097,7 @@ fn test_signature_invalid_detection() {
 // ============================================================
 
 use lxmf_core::stamp;
+use lxmf_core::stamp::StampCost;
 
 #[allow(dead_code)] // mirrors the JSON test-vector schema
 #[derive(Deserialize)]
@@ -1220,11 +1223,17 @@ fn test_stamp_validation() {
     let expected_valid = v.stamp_valid.unwrap();
     let expected_value = v.stamp_value.unwrap();
 
-    let valid = stamp::stamp_valid(&stamp_bytes, target_cost, &workblock);
+    let valid = stamp::stamp_valid(
+        &stamp_bytes,
+        StampCost::from_whole(target_cost.into()),
+        &workblock,
+    );
     assert_eq!(valid, expected_valid, "stamp_valid mismatch");
 
+    // These vectors predate fractional values; the whole part of a value is
+    // the legacy leading-zero value.
     let value = stamp::stamp_value(&workblock, &stamp_bytes);
-    assert_eq!(value, expected_value, "stamp_value mismatch");
+    assert_eq!(value.whole(), expected_value, "stamp_value mismatch");
 }
 
 #[test]
@@ -1245,7 +1254,11 @@ fn test_peering_key_validation() {
     );
     assert_eq!(workblock, expected_workblock, "Peering workblock mismatch");
 
-    let valid = stamp::validate_peering_key(&peering_id, &peering_key, target_cost);
+    let valid = stamp::validate_peering_key(
+        &peering_id,
+        &peering_key,
+        StampCost::from_whole(target_cost.into()),
+    );
     assert_eq!(valid, expected_valid, "Peering key validation mismatch");
 }
 
@@ -1276,7 +1289,7 @@ fn test_stamp_value_edge_cases() {
         // Verify value
         let value = stamp::stamp_value(&workblock, &stamp_bytes);
         assert_eq!(
-            value,
+            value.whole(),
             case.value,
             "Value mismatch for stamp {:?}",
             &stamp_bytes[..4]
@@ -1326,11 +1339,11 @@ fn test_leading_zeros() {
 fn test_pn_stamp_validation_size_check() {
     // Data too short should return None
     let short_data = vec![0u8; 100]; // less than LXMF_OVERHEAD + STAMP_SIZE = 144
-    assert!(stamp::validate_pn_stamp(&short_data, 2).is_none());
+    assert!(stamp::validate_pn_stamp(&short_data, StampCost::from_whole(2)).is_none());
 
     // Exact boundary
     let boundary_data = vec![0u8; 144]; // exactly LXMF_OVERHEAD + STAMP_SIZE
-    assert!(stamp::validate_pn_stamp(&boundary_data, 2).is_none());
+    assert!(stamp::validate_pn_stamp(&boundary_data, StampCost::from_whole(2)).is_none());
 }
 
 #[test]
@@ -1688,7 +1701,7 @@ fn test_delivery_announce_v050() {
     assert_eq!(name.as_deref(), Some("TestNode"));
 
     let cost = announce::stamp_cost_from_app_data(&data);
-    assert_eq!(cost, Some(16));
+    assert_eq!(cost, Some(StampCost::from_whole(16)));
 }
 
 #[test]
@@ -1808,15 +1821,18 @@ fn test_pn_announce_valid() {
     assert!(parsed.propagation_enabled);
     assert_eq!(parsed.propagation_transfer_limit, 256);
     assert_eq!(parsed.propagation_sync_limit, 10240);
-    assert_eq!(parsed.propagation_stamp_cost, 16);
-    assert_eq!(parsed.propagation_stamp_cost_flexibility, 3);
-    assert_eq!(parsed.peering_cost, 18);
+    assert_eq!(parsed.propagation_stamp_cost, StampCost::from_whole(16));
+    assert_eq!(
+        parsed.propagation_stamp_cost_flexibility,
+        StampCost::from_whole(3)
+    );
+    assert_eq!(parsed.peering_cost, StampCost::from_whole(18));
 
     let pn_name = announce::pn_name_from_app_data(&data);
     assert_eq!(pn_name.as_deref(), Some("MyNode"));
 
     let pn_cost = announce::pn_stamp_cost_from_app_data(&data);
-    assert_eq!(pn_cost, Some(16));
+    assert_eq!(pn_cost, Some(StampCost::from_whole(16)));
 }
 
 #[test]

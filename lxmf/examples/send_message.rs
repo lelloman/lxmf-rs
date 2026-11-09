@@ -216,6 +216,11 @@ fn main() {
                     }),
                     mode: rns_core::constants::MODE_FULL,
                     ingress_control: rns_core::transport::types::IngressControlConfig::enabled(),
+                    gravity: 0,
+                    recursive_prs: false,
+                    announces_from_internal: true,
+                    announces_to_internal: None,
+                    stamp_costs: Default::default(),
                     ifac: None,
                     discovery: None,
                 }],
@@ -286,6 +291,7 @@ fn main() {
             progress_callback: None,
             link_id: None,
             packet_hash: None,
+            tracking: Default::default(),
         });
     }
     println!("Waiting...");
