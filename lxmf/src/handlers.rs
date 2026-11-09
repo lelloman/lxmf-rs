@@ -1,9 +1,10 @@
 use lxmf_core::announce;
+use lxmf_core::stamp::StampCost;
 
 /// Result of processing a delivery announce.
 pub struct DeliveryAnnounceResult {
     pub destination_hash: [u8; 16],
-    pub stamp_cost: Option<u8>,
+    pub stamp_cost: Option<StampCost>,
 }
 
 /// Process a delivery announce event.
@@ -43,9 +44,9 @@ pub struct PropagationPeerInfo {
     pub propagation_enabled: bool,
     pub propagation_transfer_limit: u64,
     pub propagation_sync_limit: u64,
-    pub propagation_stamp_cost: u8,
-    pub propagation_stamp_cost_flexibility: u8,
-    pub peering_cost: u8,
+    pub propagation_stamp_cost: StampCost,
+    pub propagation_stamp_cost_flexibility: StampCost,
+    pub peering_cost: StampCost,
     pub metadata: Vec<(rns_core::msgpack::Value, rns_core::msgpack::Value)>,
 }
 

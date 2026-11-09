@@ -9,12 +9,17 @@ use lxmf_core::constants::{
     STAMP_SIZE,
 };
 use lxmf_core::message;
+use lxmf_core::stamp::{StampCost, StampValue};
 use lxmf_rs::router::{
     InboundOfferState, InboundResourceControl, InboundResourceControlError, LxmRouter,
     LxmfCallbacks, OutboundError, OutboundMessage, PeerOfferResponseResult, PeerSyncTransport,
     PeerSyncTransportError, RouterConfig,
 };
 use rns_core::msgpack::{pack, unpack_exact, Value};
+
+fn cost(n: u32) -> StampCost {
+    StampCost::from_whole(n)
+}
 use rns_core::types::{DestHash, IdentityHash, LinkId};
 use rns_crypto::identity::Identity;
 use rns_net::destination::AnnouncedIdentity;
@@ -136,15 +141,15 @@ fn prepared_peer_sync_router(
     let stamp = [0x42u8; STAMP_SIZE];
     let transient_id = router
         .propagation_store
-        .store_message(&lxm_data, Some(&stamp), 16, None)
+        .store_message(&lxm_data, Some(&stamp), StampValue::from_whole(16), None)
         .expect("test message should store");
 
     let mut peer = lxmf_rs::peer::LxmPeer::new(peer_hash);
     peer.handle_link_established(link_id, 0.1);
-    peer.peering_key = Some((vec![0x99; 32], 20));
-    peer.peering_cost = Some(18);
-    peer.propagation_stamp_cost = Some(16);
-    peer.propagation_stamp_cost_flexibility = Some(3);
+    peer.peering_key = Some((vec![0x99; 32], StampValue::from_whole(20)));
+    peer.peering_cost = Some(cost(18));
+    peer.propagation_stamp_cost = Some(cost(16));
+    peer.propagation_stamp_cost_flexibility = Some(cost(3));
     peer.propagation_transfer_limit = Some(256.0);
     peer.propagation_sync_limit = Some(10_240);
     peer.unhandled_ids.push(transient_id);
@@ -174,6 +179,7 @@ fn outbound(method: DeliveryMethod) -> OutboundMessage {
         progress_callback: None,
         link_id: None,
         packet_hash: None,
+        tracking: Default::default(),
     }
 }
 
@@ -340,16 +346,28 @@ fn propagation_node_announce_wakes_matching_propagated_outbound() {
     let target = [0x42; DESTINATION_LENGTH];
     router.set_propagation_dest_hash(target);
 
-    let mut msg = outbound(DeliveryMethod::Propagated);
-    msg.last_attempt = 123_456.0;
-    router.handle_outbound(msg).unwrap();
+    // Since LXMF 1.3 only messages waiting for a path are woken.
+    let mut waiting = outbound(DeliveryMethod::Propagated);
+    waiting.tracking.awaiting_path = true;
+    waiting.tracking.next_delivery_attempt = Some(f64::MAX);
+    router.handle_outbound(waiting).unwrap();
+    let mut scheduled = outbound(DeliveryMethod::Propagated);
+    scheduled.tracking.next_delivery_attempt = Some(f64::MAX);
+    router.handle_outbound(scheduled).unwrap();
 
     let router = Arc::new(Mutex::new(router));
     let mut callbacks = LxmfCallbacks::new(router.clone());
     callbacks.on_announce(pn_announce(target, true));
 
     let router_guard = router.lock().unwrap();
-    assert_eq!(router_guard.outbound[0].last_attempt, 0.0);
+    assert_eq!(
+        router_guard.outbound[0].tracking.next_delivery_attempt,
+        None
+    );
+    assert_eq!(
+        router_guard.outbound[1].tracking.next_delivery_attempt,
+        Some(f64::MAX)
+    );
     drop(router_guard);
     let _ = fs::remove_dir_all(dir);
 }
@@ -408,9 +426,9 @@ fn propagation_node_announce_records_autopeer() {
     assert!(peer.alive);
     assert_eq!(peer.propagation_transfer_limit, Some(256.0));
     assert_eq!(peer.propagation_sync_limit, Some(10_240));
-    assert_eq!(peer.propagation_stamp_cost, Some(16));
-    assert_eq!(peer.propagation_stamp_cost_flexibility, Some(3));
-    assert_eq!(peer.peering_cost, Some(18));
+    assert_eq!(peer.propagation_stamp_cost, Some(cost(16)));
+    assert_eq!(peer.propagation_stamp_cost_flexibility, Some(cost(3)));
+    assert_eq!(peer.peering_cost, Some(cost(18)));
     drop(router_guard);
     let _ = fs::remove_dir_all(dir);
 }
@@ -457,7 +475,7 @@ fn propagation_node_announce_unpeers_existing_autopeer_when_disabled() {
 fn propagation_node_announce_ignores_peer_above_max_peering_cost() {
     let (mut router, dir) = test_router("pn_announce_high_cost");
     let peer_hash = [0x47; DESTINATION_LENGTH];
-    router.config.max_peering_cost = 10;
+    router.config.max_peering_cost = cost(10);
     router.enable_propagation();
 
     let router = Arc::new(Mutex::new(router));
@@ -481,7 +499,7 @@ fn propagation_node_announce_ignores_peer_above_max_peering_cost() {
 fn propagation_node_announce_unpeers_existing_peer_above_max_peering_cost() {
     let (mut router, dir) = test_router("pn_announce_high_cost_existing");
     let peer_hash = [0x48; DESTINATION_LENGTH];
-    router.config.max_peering_cost = 10;
+    router.config.max_peering_cost = cost(10);
     router.enable_propagation();
     router
         .peers
@@ -528,7 +546,7 @@ fn propagation_node_announce_ignores_stale_peer_update_and_unpeer() {
     router.enable_propagation();
     let mut peer = lxmf_rs::peer::LxmPeer::new(peer_hash);
     peer.peering_timebase = 2_000_000_000.0;
-    peer.peering_cost = Some(7);
+    peer.peering_cost = Some(cost(7));
     router.peers.insert(peer_hash, peer);
 
     let router = Arc::new(Mutex::new(router));
@@ -556,7 +574,7 @@ fn propagation_node_announce_ignores_stale_peer_update_and_unpeer() {
         .get(&peer_hash)
         .expect("stale announce should not remove peer");
     assert_eq!(peer.peering_timebase, 2_000_000_000.0);
-    assert_eq!(peer.peering_cost, Some(7));
+    assert_eq!(peer.peering_cost, Some(cost(7)));
     drop(router_guard);
     let _ = fs::remove_dir_all(dir);
 }
@@ -769,7 +787,7 @@ fn inbound_offer_admission_honors_active_but_not_expired_stamp_throttle() {
 #[test]
 fn valid_inbound_offer_records_link_and_returns_wanted_ids() {
     let (mut router, dir) = test_router("inbound_offer");
-    router.config.peering_cost = 0;
+    router.config.peering_cost = cost(0);
     let link_id = [0x71; 16];
     let remote_identity = [0x72; 16];
     let remote_hash = remote_propagation_hash(remote_identity);
@@ -806,7 +824,7 @@ fn inbound_offer_rejects_invalid_shape_and_invalid_peering_key() {
         vec![PeerError::InvalidData as u8]
     );
 
-    router.config.peering_cost = 255;
+    router.config.peering_cost = cost(255);
     let offer = pack(&Value::Array(vec![
         Value::Bin(vec![0; STAMP_SIZE]),
         Value::Array(vec![Value::Bin(vec![0x83; 32])]),
@@ -829,7 +847,7 @@ fn inbound_resource_admission_tracks_state_and_cleans_on_link_close() {
         .insert(link_id, InboundOfferState::Accepted);
     router.inbound_offer_peers.insert(link_id, remote_hash);
 
-    assert!(router.accept_inbound_propagation_resource(link_id, 1024));
+    assert!(router.accept_inbound_propagation_resource(link_id, 1024, false));
     assert_eq!(
         router.accepted_offer_links.get(&link_id),
         Some(&InboundOfferState::Transferring)
@@ -855,12 +873,12 @@ fn inbound_resource_admission_rejects_unknown_and_oversized_resources() {
     let link_id = [0xA1; 16];
     router.config.sync_limit = 1;
 
-    assert!(!router.accept_inbound_propagation_resource(link_id, 10));
+    assert!(!router.accept_inbound_propagation_resource(link_id, 10, false));
 
     router
         .accepted_offer_links
         .insert(link_id, InboundOfferState::Accepted);
-    assert!(!router.accept_inbound_propagation_resource(link_id, 1001));
+    assert!(!router.accept_inbound_propagation_resource(link_id, 1001, false));
     assert_eq!(
         router.accepted_offer_links.get(&link_id),
         Some(&InboundOfferState::Accepted)
@@ -907,8 +925,9 @@ fn inbound_propagation_resource_validates_stores_and_cleans_accounting() {
     let (mut router, dir) = test_router("inbound_resource_processing");
     let link_id = [0xC1; 16];
     let remote_hash = [0xC2; 16];
-    router.config.propagation_cost = 0;
-    router.config.propagation_cost_flexibility = 0;
+    router.propagation_node = true;
+    router.config.propagation_cost = cost(0);
+    router.config.propagation_cost_flexibility = cost(0);
     router
         .accepted_offer_links
         .insert(link_id, InboundOfferState::Transferring);
@@ -1174,14 +1193,18 @@ fn stamp_cost_update_replaces_cache_and_persists_all_destinations() {
     let first = [0xA1; 16];
     let second = [0xA2; 16];
 
-    router.update_stamp_cost(first, 7);
-    router.update_stamp_cost(second, 11);
+    router.update_stamp_cost(first, Some(cost(7)));
+    router.update_stamp_cost(second, Some(cost(11)));
     let first_timestamp = router.outbound_stamp_costs[&first].0;
-    router.update_stamp_cost(first, 13);
+    router.update_stamp_cost(first, Some(cost(13)));
 
-    assert_eq!(router.get_stamp_cost(&first), Some(13));
-    assert_eq!(router.get_stamp_cost(&second), Some(11));
+    assert_eq!(router.get_stamp_cost(&first), Some(cost(13)));
+    assert_eq!(router.get_stamp_cost(&second), Some(cost(11)));
     assert!(router.outbound_stamp_costs[&first].0 >= first_timestamp);
+
+    // Costs are persisted in batches (upstream d845503), not per announce.
+    assert!(lxmf_rs::storage::load_stamp_costs(&router.paths.outbound_stamp_costs).is_empty());
+    router.save_stamp_costs_if_dirty();
     assert_eq!(
         lxmf_rs::storage::load_stamp_costs(&router.paths.outbound_stamp_costs),
         router.outbound_stamp_costs
@@ -1197,12 +1220,12 @@ fn expired_stamp_cost_is_not_returned_but_remains_persistable() {
         destination,
         (
             lxmf_rs::router::now_timestamp() - STAMP_COST_EXPIRY as f64 - 1.0,
-            17,
+            cost(17),
         ),
     );
 
     assert_eq!(router.get_stamp_cost(&destination), None);
-    router.update_stamp_cost(destination, 19);
-    assert_eq!(router.get_stamp_cost(&destination), Some(19));
+    router.update_stamp_cost(destination, Some(cost(19)));
+    assert_eq!(router.get_stamp_cost(&destination), Some(cost(19)));
     let _ = fs::remove_dir_all(dir);
 }

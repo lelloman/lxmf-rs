@@ -5,9 +5,10 @@ use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use lxmf_core::constants::*;
+use lxmf_core::stamp::{min_accepted_cost, StampCost};
 use lxmf_core::{announce, message};
 use rns_core::msgpack::{self, Value};
-use rns_core::types::{DestHash, IdentityHash, LinkId, PacketHash};
+use rns_core::types::{DestHash, IdentityHash, LinkId, PacketHash, ProofStrategy};
 use rns_crypto::identity::Identity;
 
 use rns_net::destination::{AnnouncedIdentity, Destination};
@@ -18,9 +19,17 @@ use rns_net::node::RnsNode;
 use crate::handlers::{
     decide_propagation_action, parse_propagation_announce, PropagationAnnounceResult,
 };
-use crate::peer::{LxmPeer, OfferEntry, SyncAction};
+use crate::outbound::{
+    destination_round_trip, retry_jitter, schedule_attempt, DeliveryTracking, LinkCreation,
+    MediumInfo, OutboundNetwork,
+};
+use crate::peer::{LxmPeer, OfferEntry, SyncAction, SyncPostponeReason};
 use crate::propagation::{PropagationEntry, PropagationStore};
 use crate::storage::{self, StoragePaths};
+
+/// A background peering key generation result: the peer and its key, if
+/// generation succeeded.
+type PeeringKeyResult = ([u8; 16], Option<(Vec<u8>, lxmf_core::stamp::StampValue)>);
 
 /// Callback function types for the router.
 pub type DeliveryCallback = Box<dyn Fn(&LxmDelivery) + Send>;
@@ -28,11 +37,6 @@ pub type ProgressCallback = Box<dyn Fn(&[u8; 32], f64) + Send>;
 /// Per-message callback types stored on an [`OutboundMessage`].
 pub type OutboundCallback = Box<dyn Fn(&OutboundMessage) + Send>;
 pub type OutboundProgressCallback = Box<dyn Fn(&OutboundMessage, f64) + Send>;
-
-struct DirectLinkResult {
-    dest_hash: [u8; 16],
-    link_id: Option<[u8; 16]>,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PeerSyncTransportError {
@@ -184,7 +188,7 @@ pub struct OutboundMessage {
     pub attempts: u32,
     pub last_attempt: f64,
     pub stamp: Option<Vec<u8>>,
-    pub stamp_cost: Option<u8>,
+    pub stamp_cost: Option<StampCost>,
     pub propagation_packed: Option<Vec<u8>>,
     pub propagation_stamp: Option<Vec<u8>>,
     pub transient_id: Option<[u8; 32]>,
@@ -195,6 +199,72 @@ pub struct OutboundMessage {
     pub link_id: Option<[u8; 16]>,
     /// Tracking packet_hash for opportunistic delivery
     pub packet_hash: Option<[u8; 32]>,
+    /// Retry timing and slow-path bookkeeping used by outbound processing.
+    pub tracking: DeliveryTracking,
+}
+
+impl OutboundMessage {
+    /// A message queued for delivery with no callbacks or tracking state.
+    pub fn new(
+        destination_hash: [u8; DESTINATION_LENGTH],
+        source_hash: [u8; DESTINATION_LENGTH],
+        packed: Vec<u8>,
+        message_hash: [u8; 32],
+        method: DeliveryMethod,
+    ) -> Self {
+        Self {
+            destination_hash,
+            source_hash,
+            packed,
+            message_hash,
+            method,
+            state: MessageState::Outbound,
+            representation: Representation::Unknown,
+            attempts: 0,
+            last_attempt: 0.0,
+            stamp: None,
+            stamp_cost: None,
+            propagation_packed: None,
+            propagation_stamp: None,
+            transient_id: None,
+            delivery_callback: None,
+            failed_callback: None,
+            progress_callback: None,
+            link_id: None,
+            packet_hash: None,
+            tracking: DeliveryTracking::default(),
+        }
+    }
+
+    /// Attempt limit for this message (`attempt_limit`).
+    pub fn attempt_limit(&self) -> u32 {
+        self.tracking
+            .max_delivery_attempts
+            .unwrap_or(MAX_DELIVERY_ATTEMPTS)
+    }
+
+    fn is_concluded(&self) -> bool {
+        matches!(
+            self.state,
+            MessageState::Delivered
+                | MessageState::Failed
+                | MessageState::Cancelled
+                | MessageState::Rejected
+        ) || (self.method == DeliveryMethod::Propagated && self.state == MessageState::Sent)
+    }
+
+    /// Whether this message is on a slow path and still awaiting conclusion
+    /// (`slow_path_in_flight`).
+    fn slow_path_in_flight(&self) -> bool {
+        if !self.tracking.sent_on_slow_path {
+            return false;
+        }
+        if self.method == DeliveryMethod::Opportunistic {
+            self.state == MessageState::Sent
+        } else {
+            self.state == MessageState::Sending
+        }
+    }
 }
 
 /// Errors returned while accepting an outbound message into the router queue.
@@ -229,14 +299,17 @@ pub struct RouterConfig {
     pub max_peers: usize,
     pub from_static_only: bool,
     pub sync_strategy: SyncStrategy,
-    pub propagation_cost: u8,
-    pub propagation_cost_flexibility: u8,
-    pub peering_cost: u8,
-    pub max_peering_cost: u8,
+    pub propagation_cost: StampCost,
+    pub propagation_cost_flexibility: StampCost,
+    pub peering_cost: StampCost,
+    pub max_peering_cost: StampCost,
     pub max_inbound_syncs: usize,
     pub sequential_validation: bool,
     pub static_sequential: bool,
     pub name: Option<String>,
+    /// How long a peer delivering messages with invalid stamps is throttled,
+    /// in seconds (`pn_stamp_throttle`).
+    pub pn_stamp_throttle: f64,
 }
 
 impl Default for RouterConfig {
@@ -262,6 +335,7 @@ impl Default for RouterConfig {
             sequential_validation: SEQUENTIAL_VALIDATION,
             static_sequential: STATIC_SEQUENTIAL,
             name: None,
+            pn_stamp_throttle: PN_STAMP_THROTTLE as f64,
         }
     }
 }
@@ -289,17 +363,29 @@ pub struct LxmRouter {
     pub direct_links: HashMap<[u8; 16], [u8; 16]>, // dest_hash -> link_id
     pub pending_direct_links: HashMap<[u8; 16], [u8; 16]>, // dest_hash -> link_id (being established)
     pending_direct_link_creations: HashMap<[u8; 16], f64>, // dest_hash -> requested_at
-    direct_link_tx: mpsc::Sender<DirectLinkResult>,
-    direct_link_rx: mpsc::Receiver<DirectLinkResult>,
+    direct_link_tx: mpsc::Sender<LinkCreation>,
+    direct_link_rx: mpsc::Receiver<LinkCreation>,
     pub backchannel_links: HashMap<[u8; 16], [u8; 16]>, // dest_hash -> link_id
     pub link_destinations: HashMap<[u8; 16], [u8; 16]>, // link_id -> dest_hash
+    /// Identity hashes remotes identified as on inbound links.
+    pub link_remote_identities: HashMap<[u8; 16], [u8; 16]>, // link_id -> identity_hash
     pub active_propagation_links: Vec<[u8; 16]>,
     pub propagation_link: Option<[u8; 16]>,
 
     // Caches
     pub locally_delivered_transient_ids: HashMap<[u8; 32], f64>,
     pub locally_processed_transient_ids: HashMap<[u8; 32], f64>,
-    pub outbound_stamp_costs: HashMap<[u8; 16], (f64, u8)>,
+    pub outbound_stamp_costs: HashMap<[u8; 16], (f64, StampCost)>,
+    stamp_costs_dirty: bool,
+    path_request_times: HashMap<[u8; 16], f64>,
+    slow_path_cache: HashMap<[u8; 16], (bool, f64)>,
+    peer_path_requests: HashMap<[u8; 16], f64>,
+    peering_keys_generating: HashSet<[u8; 16]>,
+    peering_key_tx: mpsc::Sender<PeeringKeyResult>,
+    peering_key_rx: mpsc::Receiver<PeeringKeyResult>,
+    /// Validation outcome of the last client propagation packet, consumed by
+    /// the proof request that follows it on the same driver pass.
+    propagation_packet_proof: Option<bool>,
 
     // State
     pub propagation_node: bool,
@@ -350,7 +436,7 @@ pub struct LxmRouter {
 
     // Display name for delivery announces
     pub display_name: Option<String>,
-    pub delivery_stamp_cost: Option<u8>,
+    pub delivery_stamp_cost: Option<StampCost>,
 }
 
 impl LxmRouter {
@@ -380,6 +466,7 @@ impl LxmRouter {
         }
 
         let (direct_link_tx, direct_link_rx) = mpsc::channel();
+        let (peering_key_tx, peering_key_rx) = mpsc::channel();
 
         Self {
             identity,
@@ -396,11 +483,20 @@ impl LxmRouter {
             direct_link_rx,
             backchannel_links: HashMap::new(),
             link_destinations: HashMap::new(),
+            link_remote_identities: HashMap::new(),
             active_propagation_links: Vec::new(),
             propagation_link: None,
             locally_delivered_transient_ids,
             locally_processed_transient_ids,
             outbound_stamp_costs,
+            stamp_costs_dirty: false,
+            path_request_times: HashMap::new(),
+            slow_path_cache: HashMap::new(),
+            peer_path_requests: HashMap::new(),
+            peering_keys_generating: HashSet::new(),
+            peering_key_tx,
+            peering_key_rx,
+            propagation_packet_proof: None,
             propagation_node: false,
             processing_count: 0,
             exit_handler_running: false,
@@ -437,8 +533,47 @@ impl LxmRouter {
     }
 
     /// Set the RNS node reference. Called after starting the node.
+    ///
+    /// Also registers the destination types the router needs announces for
+    /// (`REQUIRED_DESTINATION_TYPES`), so a shared instance filtering
+    /// announces keeps forwarding them. Registration queries the driver, so it
+    /// runs off the caller's thread, which usually holds the router lock.
     pub fn set_node(&mut self, node: Arc<RnsNode>) {
+        let filter_node = node.clone();
+        thread::spawn(move || {
+            for destination_type in [ASPECT_DELIVERY, ASPECT_PROPAGATION] {
+                if !filter_node.wants_destination_type(destination_type) {
+                    log::debug!("Destination type {} was not registered", destination_type);
+                }
+            }
+        });
         self.node = Some(node);
+    }
+
+    /// Register a destination for incoming links and packets, with the
+    /// application deciding which packets are proven (`ProveApp`).
+    fn register_inbound_destination(
+        node: &RnsNode,
+        identity: &Identity,
+        aspects: &[&str],
+        link_cost: Option<f64>,
+    ) -> [u8; 16] {
+        let dest = Destination::single_in(APP_NAME, aspects, IdentityHash(*identity.hash()))
+            .set_proof_strategy(ProofStrategy::ProveApp);
+        let dest_hash = dest.hash.0;
+        let prv = identity.get_private_key().unwrap();
+        let sig_pub = identity.get_public_key().unwrap();
+        let _ = node.register_link_destination(
+            dest_hash,
+            prv[32..].try_into().unwrap(),
+            sig_pub[32..].try_into().unwrap(),
+            1, // AcceptAll
+        );
+        if let Some(cost) = link_cost {
+            node.set_link_cost(dest_hash, cost);
+        }
+        let _ = node.register_destination_with_proof(&dest, Some(prv));
+        dest_hash
     }
 
     pub fn register_propagation_request_handlers(
@@ -477,8 +612,8 @@ impl LxmRouter {
             return false;
         };
 
-        match node.query(QueryRequest::GetBlackholed) {
-            Ok(QueryResponse::Blackholed(entries)) => {
+        match crate::outbound::bounded_query(node, QueryRequest::GetBlackholed) {
+            Some(QueryResponse::Blackholed(entries)) => {
                 self.blackholed_identities = entries
                     .into_iter()
                     .map(|entry| entry.identity_hash)
@@ -533,53 +668,44 @@ impl LxmRouter {
         }
     }
 
+    /// Collect results of asynchronous link creations started by outbound
+    /// processing. A created link is pending until `on_link_established`; a
+    /// failed creation leaves the messages queued for their next attempt.
     fn drain_direct_link_results(&mut self) {
         while let Ok(result) = self.direct_link_rx.try_recv() {
             self.pending_direct_link_creations.remove(&result.dest_hash);
-            match result.link_id {
-                Some(link_id) => {
-                    if !self.direct_links.contains_key(&result.dest_hash) {
-                        self.pending_direct_links.insert(result.dest_hash, link_id);
-                    }
-                    for msg in &mut self.outbound {
-                        if msg.destination_hash == result.dest_hash
-                            && msg.method == DeliveryMethod::Direct
-                            && msg.link_id.is_none()
-                            && msg.state == MessageState::Sending
-                        {
-                            msg.link_id = Some(link_id);
-                            if self.direct_links.contains_key(&result.dest_hash) {
-                                msg.state = MessageState::Outbound;
-                                msg.last_attempt = 0.0;
-                            }
-                        }
+            if result.link_id.is_none() {
+                if let Some(peer) = self.peers.get_mut(&result.dest_hash) {
+                    if peer.state == PeerState::LinkEstablishing {
+                        peer.state = PeerState::Idle;
                     }
                 }
-                None => {
-                    for msg in &mut self.outbound {
-                        if msg.destination_hash == result.dest_hash
-                            && msg.method == DeliveryMethod::Direct
-                            && msg.state == MessageState::Sending
-                            && msg.link_id.is_none()
-                        {
-                            msg.state = MessageState::Outbound;
-                        }
-                    }
+            }
+            if let Some(link_id) = result.link_id {
+                let established = self.direct_links.contains_key(&result.dest_hash)
+                    || (self.outbound_propagation_node == Some(result.dest_hash)
+                        && self.propagation_link.is_some());
+                if !established {
+                    self.pending_direct_links.insert(result.dest_hash, link_id);
                 }
             }
         }
     }
 
     /// Register a delivery identity for receiving direct messages.
+    ///
+    /// `stamp_cost` is the inbound stamp cost; costs below 1 disable stamps
+    /// and costs at or above `STAMP_COST_CAP` are ignored
+    /// (`set_inbound_stamp_cost`).
     pub fn register_delivery_identity(
         &mut self,
         delivery_identity: &Identity,
-        stamp_cost: Option<u8>,
+        stamp_cost: Option<f64>,
         display_name: Option<String>,
     ) {
         let dest_hash = compute_dest_hash(APP_NAME, &["delivery"], delivery_identity.hash());
         self.delivery_dest_hash = Some(dest_hash);
-        self.delivery_stamp_cost = stamp_cost;
+        self.set_inbound_stamp_cost(stamp_cost);
         self.display_name = display_name;
 
         if let Some(node) = &self.node {
@@ -587,15 +713,24 @@ impl LxmRouter {
             // Also register as SINGLE destination for opportunistic delivery.
             // When both are registered, rns-net routes link packets through
             // link_manager and falls back to on_local_delivery for non-link DATA.
-            let sig_prv = delivery_identity.get_private_key().unwrap();
-            let sig_pub = delivery_identity.get_public_key().unwrap();
-            let _ = node.register_link_destination(
-                dest_hash,
-                sig_prv[32..].try_into().unwrap(),
-                sig_pub[32..].try_into().unwrap(),
-                1, // AcceptAll
+            Self::register_inbound_destination(
+                node,
+                delivery_identity,
+                &["delivery"],
+                Some(DELIVERY_LINK_COST),
             );
-            let _ = node.register_destination(dest_hash, 1); // SINGLE type
+        }
+    }
+
+    /// Set the inbound stamp cost of the delivery destination. Returns false
+    /// (and keeps the current cost) for costs at or above `STAMP_COST_CAP`.
+    pub fn set_inbound_stamp_cost(&mut self, stamp_cost: Option<f64>) -> bool {
+        match announce::inbound_stamp_cost(stamp_cost) {
+            Ok(cost) => {
+                self.delivery_stamp_cost = cost;
+                true
+            }
+            Err(_) => false,
         }
     }
 
@@ -609,29 +744,22 @@ impl LxmRouter {
         self.propagation_node = true;
 
         if let Some(node) = &self.node {
-            let sig_prv = self.identity.get_private_key().unwrap();
-            let sig_pub = self.identity.get_public_key().unwrap();
-
             // Register propagation destination for incoming links
-            let _ = node.register_link_destination(
-                self.propagation_dest_hash,
-                sig_prv[32..].try_into().unwrap(),
-                sig_pub[32..].try_into().unwrap(),
-                1, // AcceptAll
+            Self::register_inbound_destination(
+                node,
+                &self.identity,
+                &["propagation"],
+                Some(PROPAGATION_LINK_COST),
             );
-            let _ = node.register_destination(self.propagation_dest_hash, 1);
 
             // Register control destination
-            let control_hash =
-                compute_dest_hash(APP_NAME, &["propagation", "control"], self.identity.hash());
-            self.control_dest_hash = Some(control_hash);
-            let _ = node.register_link_destination(
-                control_hash,
-                sig_prv[32..].try_into().unwrap(),
-                sig_pub[32..].try_into().unwrap(),
-                1, // AcceptAll
+            let control_hash = Self::register_inbound_destination(
+                node,
+                &self.identity,
+                &["propagation", "control"],
+                None,
             );
-            let _ = node.register_destination(control_hash, 1);
+            self.control_dest_hash = Some(control_hash);
         }
     }
 
@@ -680,7 +808,9 @@ impl LxmRouter {
                 &["delivery"],
                 IdentityHash(*delivery_identity.hash()),
             );
-            let _ = node.announce(&dest, delivery_identity, Some(&app_data));
+            if let Err(err) = node.announce_queued(&dest, delivery_identity, Some(&app_data)) {
+                log::warn!("Failed to queue delivery announce: {:?}", err);
+            }
         }
     }
 
@@ -693,7 +823,9 @@ impl LxmRouter {
                 &["propagation"],
                 IdentityHash(*self.identity.hash()),
             );
-            let _ = node.announce(&dest, &self.identity, Some(&app_data));
+            if let Err(err) = node.announce_queued(&dest, &self.identity, Some(&app_data)) {
+                log::warn!("Failed to queue propagation node announce: {:?}", err);
+            }
         }
     }
 
@@ -705,51 +837,42 @@ impl LxmRouter {
                 &["propagation", "control"],
                 IdentityHash(*self.identity.hash()),
             );
-            let _ = node.announce(&dest, &self.identity, None);
+            if let Err(err) = node.announce_queued(&dest, &self.identity, None) {
+                log::warn!("Failed to queue control destination announce: {:?}", err);
+            }
         }
     }
 
-    /// Build delivery announce app_data (v0.5.0+ format).
-    fn build_delivery_announce_data(&self) -> Vec<u8> {
-        let display_name_val = match &self.display_name {
-            Some(name) => Value::Bin(name.as_bytes().to_vec()),
-            None => Value::Nil,
-        };
-        let stamp_cost_val = match self.delivery_stamp_cost {
-            Some(cost) => Value::UInt(cost as u64),
-            None => Value::Nil,
-        };
-        let supported_functionality = Value::Array(vec![Value::UInt(SF_COMPRESSION as u64)]);
-        msgpack::pack(&Value::Array(vec![
-            display_name_val,
-            stamp_cost_val,
-            supported_functionality,
-        ]))
+    /// Build delivery announce app_data (LXMF 1.3 format).
+    pub fn build_delivery_announce_data(&self) -> Vec<u8> {
+        announce::build_delivery_announce_data(
+            self.display_name.as_deref(),
+            self.delivery_stamp_cost,
+        )
     }
 
-    /// Build propagation node announce data.
-    fn build_pn_announce_data(&self) -> Vec<u8> {
-        let now = now_timestamp();
-        let state = self.propagation_node && !self.config.from_static_only;
-        let metadata = Value::Map(vec![]);
-
-        let announce_data = Value::Array(vec![
-            Value::Bool(false), // Legacy flag
-            Value::UInt(now as u64),
-            Value::Bool(state),
-            Value::UInt(self.config.propagation_limit as u64),
-            Value::UInt(self.config.sync_limit as u64),
-            Value::Array(vec![
-                Value::UInt(self.config.propagation_cost as u64),
-                Value::UInt(self.config.propagation_cost_flexibility as u64),
-                Value::UInt(self.config.peering_cost as u64),
-            ]),
-            metadata,
-        ]);
-        msgpack::pack(&announce_data)
+    /// Build propagation node announce data (LXMF 1.3 format).
+    pub fn build_pn_announce_data(&self) -> Vec<u8> {
+        let name = self.config.name.as_deref();
+        announce::build_pn_announce_data(&announce::PnAnnounceParams {
+            node_timebase: now_timestamp() as u64,
+            propagation_enabled: self.propagation_node && !self.config.from_static_only,
+            propagation_transfer_limit: self.config.propagation_limit as u64,
+            propagation_sync_limit: self.config.sync_limit as u64,
+            propagation_stamp_cost: self.config.propagation_cost,
+            propagation_stamp_cost_flexibility: self.config.propagation_cost_flexibility,
+            peering_cost: self.config.peering_cost,
+            implementation: Some((IMPLEMENTATION_NAME, env!("CARGO_PKG_VERSION"))),
+            name,
+        })
     }
 
     /// Handle an outbound message for delivery.
+    ///
+    /// As `LXMessage.pack` does, an opportunistic message too large for a
+    /// single packet falls back to direct (link) delivery, and the
+    /// representation is chosen from the content size. A message without a
+    /// stamp cost takes the cost the destination last announced.
     pub fn handle_outbound(&mut self, mut msg: OutboundMessage) -> Result<(), OutboundError> {
         if msg.method == DeliveryMethod::Propagated && self.outbound_propagation_node.is_none() {
             msg.state = MessageState::Failed;
@@ -759,6 +882,25 @@ impl LxmRouter {
             return Err(OutboundError::MissingOutboundPropagationNode);
         }
 
+        let (method, representation) = message::resolve_delivery(
+            msg.method,
+            msg.packed.len(),
+            msg.propagation_packed.as_ref().map(Vec::len),
+        );
+        if method != msg.method {
+            log::debug!(
+                "Opportunistic delivery requested for {:02x?}, but content exceeds the packet \
+                 size limit; falling back to link-based delivery",
+                &msg.message_hash[..4]
+            );
+        }
+        msg.method = method;
+        msg.representation = representation;
+
+        if msg.stamp_cost.is_none() {
+            msg.stamp_cost = self.get_stamp_cost(&msg.destination_hash);
+        }
+        msg.state = MessageState::Outbound;
         self.outbound.push(msg);
         Ok(())
     }
@@ -876,6 +1018,7 @@ impl LxmRouter {
         // Outbound processing and link cleanup run every cycle.
         self.process_outbound();
         self.clean_links();
+        self.drain_peering_keys();
 
         // Transient ID cleanup (every 60 cycles = 4 min)
         if self.processing_count.is_multiple_of(JOB_TRANSIENT_INTERVAL) {
@@ -885,7 +1028,7 @@ impl LxmRouter {
         // Peer propagation sync (every 6 cycles = 24s)
         if self.processing_count.is_multiple_of(JOB_PEERSYNC_INTERVAL) {
             if let Some(node) = self.node.clone() {
-                self.ensure_peer_sync_links(node.as_ref());
+                self.ensure_peer_sync_links(&node);
                 self.process_peer_syncs_with_transport(node.as_ref());
             }
         }
@@ -895,184 +1038,543 @@ impl LxmRouter {
             self.propagation_store
                 .clean_messagestore(&self.prioritised_list);
             self.save_peers();
+            self.save_stamp_costs_if_dirty();
         }
     }
 
-    /// Process outbound message queue.
+    /// Process the outbound message queue against the attached RNS node.
+    pub fn process_outbound(&mut self) {
+        let Some(node) = self.node.clone() else {
+            return;
+        };
+        self.process_outbound_with(&node);
+    }
+
+    /// Process the outbound message queue (`process_outbound`).
     ///
-    /// Uses field-level borrows to avoid borrow checker issues:
-    /// we iterate `self.outbound` mutably while reading other fields.
-    fn process_outbound(&mut self) {
+    /// Concluded messages are removed from the queue: delivered messages and
+    /// propagated messages accepted by the propagation node have their
+    /// destination's announce data retained, and failed, cancelled or
+    /// rejected messages fire their failed callback.
+    pub fn process_outbound_with<N: OutboundNetwork + ?Sized>(&mut self, network: &N) {
         self.drain_direct_link_results();
 
+        let medium = MediumInfo::query(network);
         let now = now_timestamp();
-        let node = match &self.node {
-            Some(n) => n.clone(),
-            None => return,
+        let mut concluded: Vec<(usize, bool)> = Vec::new(); // (index, fire failed callback)
+
+        for idx in 0..self.outbound.len() {
+            let state = self.outbound[idx].state;
+            let method = self.outbound[idx].method;
+            let dest_hash = self.outbound[idx].destination_hash;
+
+            match state {
+                MessageState::Delivered => {
+                    network.retain_destination(dest_hash);
+                    concluded.push((idx, false));
+                    continue;
+                }
+                MessageState::Sent if method == DeliveryMethod::Propagated => {
+                    network.retain_destination(dest_hash);
+                    concluded.push((idx, false));
+                    continue;
+                }
+                MessageState::Cancelled | MessageState::Rejected | MessageState::Failed => {
+                    // Failed messages had their callback fired when they failed.
+                    concluded.push((idx, state != MessageState::Failed));
+                    continue;
+                }
+                _ => {}
+            }
+
+            let msg = &mut self.outbound[idx];
+            if msg.tracking.progress < 0.01 {
+                msg.tracking.progress = 0.01;
+            }
+
+            let failed = match method {
+                DeliveryMethod::Opportunistic => {
+                    self.process_opportunistic(idx, network, &medium, now)
+                }
+                DeliveryMethod::Direct => self.process_direct(idx, network, &medium, now),
+                DeliveryMethod::Propagated => self.process_propagated(idx, network, &medium, now),
+                DeliveryMethod::Paper => false,
+            };
+            if failed {
+                self.fail_message_at(idx);
+                concluded.push((idx, true));
+            }
+        }
+
+        // Remove concluded messages (reverse order keeps indices valid), then
+        // fire failed callbacks on the removed messages.
+        concluded.sort_by_key(|(idx, _)| *idx);
+        concluded.dedup_by_key(|(idx, _)| *idx);
+        for (idx, fire_failed) in concluded.into_iter().rev() {
+            let msg = self.outbound.remove(idx);
+            if fire_failed {
+                if let Some(cb) = &msg.failed_callback {
+                    cb(&msg);
+                }
+            }
+        }
+    }
+
+    /// Mark a queued message failed (`fail_message`). The caller removes it
+    /// and fires the failed callback.
+    fn fail_message_at(&mut self, idx: usize) {
+        let msg = &mut self.outbound[idx];
+        log::debug!("LXM {:02x?} failed to send", &msg.message_hash[..4]);
+        msg.tracking.progress = 0.0;
+        if msg.state != MessageState::Rejected {
+            msg.state = MessageState::Failed;
+        }
+    }
+
+    /// `path_request_pending`: a path request for the destination was sent
+    /// within the current path request wait.
+    fn path_request_pending(&self, dest_hash: &[u8; 16], medium: &MediumInfo) -> bool {
+        self.path_request_times
+            .get(dest_hash)
+            .is_some_and(|requested| now_timestamp() - requested < medium.path_request_wait())
+    }
+
+    /// Request a path, debounced per destination (`request_path`): requests
+    /// are not repeated within the path request wait, or within
+    /// `PATH_REQUEST_DEBOUNCE` while a slow interface is online.
+    fn request_path_debounced<N: OutboundNetwork + ?Sized>(
+        &mut self,
+        dest_hash: &[u8; 16],
+        network: &N,
+        medium: &MediumInfo,
+    ) -> bool {
+        let window = medium.path_request_window();
+        let now = now_timestamp();
+        if self
+            .path_request_times
+            .get(dest_hash)
+            .is_some_and(|requested| now - requested < window)
+        {
+            log::debug!(
+                "Path request for {:02x?} still pending, not repeating",
+                &dest_hash[..4]
+            );
+            return false;
+        }
+        self.path_request_times
+            .retain(|_, requested| now - *requested < window);
+        self.path_request_times.insert(*dest_hash, now);
+        network.request_path(dest_hash);
+        true
+    }
+
+    fn round_trip<N: OutboundNetwork + ?Sized>(
+        &self,
+        dest_hash: &[u8; 16],
+        network: &N,
+        medium: &MediumInfo,
+    ) -> f64 {
+        let has_path = network.has_path(dest_hash);
+        let first_hop = if has_path {
+            network.first_hop_timeout(dest_hash)
+        } else {
+            0.0
         };
-        let compression_cache = self.compression_cache.clone();
+        destination_round_trip(has_path, first_hop, medium)
+    }
 
-        let mut failed_indices = Vec::new();
-        let completed_indices: Vec<usize> = Vec::new();
+    /// `slow_path`: whether the round trip to a destination exceeds the
+    /// delivery retry wait. Cached per processing interval.
+    fn slow_path<N: OutboundNetwork + ?Sized>(
+        &mut self,
+        dest_hash: &[u8; 16],
+        network: &N,
+        medium: &MediumInfo,
+    ) -> bool {
+        let now = now_timestamp();
+        if let Some((slow, at)) = self.slow_path_cache.get(dest_hash) {
+            if now - at < PROCESSING_INTERVAL as f64 {
+                return *slow;
+            }
+        }
+        if self.slow_path_cache.len() > 256 {
+            self.slow_path_cache.clear();
+        }
+        let slow = self.round_trip(dest_hash, network, medium) > DELIVERY_RETRY_WAIT as f64;
+        self.slow_path_cache.insert(*dest_hash, (slow, now));
+        slow
+    }
 
-        for (idx, msg) in self.outbound.iter_mut().enumerate() {
-            // Timeout stale opportunistic messages stuck in Sent state (no proof received)
-            if msg.state == MessageState::Sent
-                && msg.method == DeliveryMethod::Opportunistic
-                && (now - msg.last_attempt) >= OPPORTUNISTIC_PROOF_TIMEOUT
+    /// The target an outbound message is delivered to over the network.
+    fn outbound_target(&self, msg: &OutboundMessage) -> Option<[u8; 16]> {
+        if msg.method == DeliveryMethod::Propagated {
+            self.outbound_propagation_node
+        } else {
+            Some(msg.destination_hash)
+        }
+    }
+
+    /// `slow_path_held`: on a slow path, only one message may be in flight,
+    /// and messages to the same target go out in queue order.
+    fn slow_path_held<N: OutboundNetwork + ?Sized>(
+        &mut self,
+        idx: usize,
+        target: &[u8; 16],
+        network: &N,
+        medium: &MediumInfo,
+    ) -> bool {
+        if self.outbound[idx].state != MessageState::Outbound {
+            return false;
+        }
+        if !self.slow_path(target, network, medium) {
+            return false;
+        }
+        let mut ahead = true;
+        for (other_idx, other) in self.outbound.iter().enumerate() {
+            if other_idx == idx {
+                ahead = false;
+            } else if other.is_concluded() {
+                continue;
+            } else if (ahead && self.outbound_target(other).as_ref() == Some(target))
+                || other.slow_path_in_flight()
             {
-                msg.state = MessageState::Failed;
-                failed_indices.push(idx);
-                continue;
+                // A message ahead to the same target, or any message in
+                // flight over a slow path, holds this one.
+                return true;
             }
+        }
+        false
+    }
 
-            if msg.state != MessageState::Outbound {
-                continue;
+    /// `attempt_due`: the retry wait elapsed, or a path the message was
+    /// waiting for became known.
+    fn attempt_due<N: OutboundNetwork + ?Sized>(
+        &self,
+        idx: usize,
+        target: &[u8; 16],
+        network: &N,
+        now: f64,
+    ) -> bool {
+        let tracking = &self.outbound[idx].tracking;
+        match tracking.next_delivery_attempt {
+            None => true,
+            Some(next) if now > next => true,
+            Some(_) => tracking.awaiting_path && network.has_path(target),
+        }
+    }
+
+    fn schedule_attempt_for<N: OutboundNetwork + ?Sized>(
+        &mut self,
+        idx: usize,
+        target: &[u8; 16],
+        path_request: bool,
+        network: &N,
+        medium: &MediumInfo,
+    ) {
+        let round_trip = if path_request {
+            medium.medium_path_timeout
+        } else {
+            self.round_trip(target, network, medium)
+        };
+        let schedule = schedule_attempt(now_timestamp(), round_trip, path_request, retry_jitter());
+        let tracking = &mut self.outbound[idx].tracking;
+        tracking.next_delivery_attempt = Some(schedule.next_delivery_attempt);
+        tracking.max_delivery_attempts = Some(schedule.max_delivery_attempts);
+        if schedule.awaiting_path {
+            tracking.awaiting_path = true;
+        }
+    }
+
+    /// Public key for a destination, from announces seen by this router or
+    /// recalled from the transport's known destinations.
+    fn destination_public_key<N: OutboundNetwork + ?Sized>(
+        &self,
+        dest_hash: &[u8; 16],
+        network: &N,
+    ) -> Option<[u8; 64]> {
+        self.identity_cache
+            .get(dest_hash)
+            .copied()
+            .or_else(|| network.recall_public_key(dest_hash))
+    }
+
+    /// Opportunistic outbound handling. Returns true when the message failed.
+    fn process_opportunistic<N: OutboundNetwork + ?Sized>(
+        &mut self,
+        idx: usize,
+        network: &N,
+        medium: &MediumInfo,
+        now: f64,
+    ) -> bool {
+        let dest_hash = self.outbound[idx].destination_hash;
+        let held = self.slow_path_held(idx, &dest_hash, network, medium);
+        if held {
+            return false;
+        }
+        let attempts = self.outbound[idx].attempts;
+        if attempts > self.outbound[idx].attempt_limit() {
+            return self.attempt_due(idx, &dest_hash, network, now);
+        }
+        if !self.attempt_due(idx, &dest_hash, network, now) {
+            return false;
+        }
+
+        let public_key = self.destination_public_key(&dest_hash, network);
+        let path_known = network.has_path(&dest_hash) && public_key.is_some();
+        self.outbound[idx].tracking.awaiting_path = false;
+
+        if attempts >= MAX_PATHLESS_TRIES && !path_known {
+            log::debug!(
+                "Requesting path to {:02x?} after {} pathless tries",
+                &dest_hash[..4],
+                attempts
+            );
+            let msg = &mut self.outbound[idx];
+            msg.attempts += 1;
+            msg.tracking.sent_on_path = false;
+            msg.tracking.progress = 0.01;
+            self.request_path_debounced(&dest_hash, network, medium);
+            self.schedule_attempt_for(idx, &dest_hash, true, network, medium);
+        } else if attempts == MAX_PATHLESS_TRIES + 1
+            && path_known
+            && self.outbound[idx].tracking.sent_on_path
+        {
+            // Only rediscover when the previous attempt actually went out
+            // over the same, apparently stale, path.
+            let pending = self.path_request_pending(&dest_hash, medium);
+            let msg = &mut self.outbound[idx];
+            msg.attempts += 1;
+            msg.tracking.sent_on_path = false;
+            msg.tracking.awaiting_path = true;
+            msg.tracking.progress = 0.01;
+            msg.tracking.next_delivery_attempt = Some(now + medium.path_request_wait());
+            if !pending {
+                log::debug!(
+                    "Opportunistic delivery to {:02x?} still unsuccessful, rediscovering path",
+                    &dest_hash[..4]
+                );
+                self.path_request_times.insert(dest_hash, now);
+                network.drop_path(&dest_hash);
+                network.request_path(&dest_hash);
             }
-
-            // Check retry timing
-            if now - msg.last_attempt < DELIVERY_RETRY_WAIT as f64 {
-                continue;
+        } else {
+            let Some(public_key) = public_key else {
+                // Path without a recallable identity: wait for an announce.
+                self.schedule_attempt_for(idx, &dest_hash, true, network, medium);
+                return false;
+            };
+            let slow = self.slow_path(&dest_hash, network, medium);
+            {
+                let msg = &mut self.outbound[idx];
+                msg.attempts += 1;
+                msg.last_attempt = now;
+                msg.tracking.sent_on_path = path_known;
+                msg.tracking.sent_on_slow_path = slow;
             }
-
-            // Check max attempts
-            if msg.attempts >= MAX_DELIVERY_ATTEMPTS {
-                msg.state = MessageState::Failed;
-                failed_indices.push(idx);
-                continue;
+            self.schedule_attempt_for(idx, &dest_hash, false, network, medium);
+            let msg = &mut self.outbound[idx];
+            log::debug!(
+                "Opportunistic delivery attempt {} for {:02x?}",
+                msg.attempts,
+                &msg.message_hash[..4]
+            );
+            match network.send_opportunistic(
+                &dest_hash,
+                &public_key,
+                &msg.packed[DESTINATION_LENGTH..],
+            ) {
+                Ok(packet_hash) => {
+                    msg.packet_hash = Some(packet_hash);
+                    msg.representation = Representation::Packet;
+                    msg.state = MessageState::Sent;
+                    msg.tracking.progress = 0.5;
+                }
+                Err(_) => {
+                    log::error!("Error while sending {:02x?}", &msg.message_hash[..4]);
+                    return true;
+                }
             }
+        }
+        false
+    }
 
+    /// Start establishing a link to `target` for a delivery attempt, or
+    /// request a path when none is known. Returns true when the message
+    /// failed because its attempts are exhausted.
+    fn attempt_link<N: OutboundNetwork + ?Sized>(
+        &mut self,
+        idx: usize,
+        target: [u8; 16],
+        network: &N,
+        medium: &MediumInfo,
+        now: f64,
+    ) -> bool {
+        if !self.attempt_due(idx, &target, network, now) {
+            return false;
+        }
+        {
+            let msg = &mut self.outbound[idx];
             msg.attempts += 1;
             msg.last_attempt = now;
+            msg.tracking.awaiting_path = false;
+        }
+        self.schedule_attempt_for(idx, &target, false, network, medium);
 
-            match msg.method {
-                DeliveryMethod::Opportunistic => {
-                    if node
-                        .has_path(&DestHash(msg.destination_hash))
-                        .unwrap_or(false)
-                    {
-                        if let Ok(Some(announced)) =
-                            node.recall_identity(&DestHash(msg.destination_hash))
-                        {
-                            let dest = Destination::single_out(APP_NAME, &["delivery"], &announced);
-                            let data = &msg.packed[DESTINATION_LENGTH..];
-                            match node.send_packet(&dest, data) {
-                                Ok(packet_hash) => {
-                                    msg.packet_hash = Some(packet_hash.0);
-                                    msg.state = MessageState::Sent;
-                                }
-                                Err(_) => {
-                                    log::warn!("Failed to send opportunistic packet");
-                                }
-                            }
-                        }
-                    } else if msg.attempts <= MAX_PATHLESS_TRIES + 1 {
-                        let _ = node.request_path(&DestHash(msg.destination_hash));
-                    }
-                }
-                DeliveryMethod::Direct => {
-                    if let Some(&link_id) = self.direct_links.get(&msg.destination_hash) {
-                        let retain_node = node.clone();
-                        let auto_compress = compression_cache
-                            .get(&msg.destination_hash)
-                            .copied()
-                            .unwrap_or(true);
-                        send_on_link(
-                            &node,
-                            msg,
-                            link_id,
-                            move |dest_hash| {
-                                retain_destination_data(&retain_node, dest_hash);
-                            },
-                            auto_compress,
-                        );
-                    } else if self
-                        .pending_direct_links
-                        .contains_key(&msg.destination_hash)
-                        || self
-                            .pending_direct_link_creations
-                            .contains_key(&msg.destination_hash)
-                    {
-                        // Link is being established, wait for it
-                    } else if let Some(public_key) = self.identity_cache.get(&msg.destination_hash)
-                    {
-                        let dest_hash = msg.destination_hash;
-                        let sig_pub: [u8; 32] = public_key[32..].try_into().unwrap();
-                        let tx = self.direct_link_tx.clone();
-                        let node = node.clone();
-                        self.pending_direct_link_creations.insert(dest_hash, now);
-                        msg.state = MessageState::Sending;
-                        thread::spawn(move || {
-                            let link_id = node.create_link(dest_hash, sig_pub).ok();
-                            let _ = tx.send(DirectLinkResult { dest_hash, link_id });
-                        });
-                    } else if msg.attempts <= MAX_PATHLESS_TRIES + 1 {
-                        let node = node.clone();
-                        let dest_hash = msg.destination_hash;
-                        thread::spawn(move || {
-                            let _ = node.request_path(&DestHash(dest_hash));
-                        });
-                    }
-                }
-                DeliveryMethod::Propagated => {
-                    let Some(propagation_dest_hash) = self.outbound_propagation_node else {
-                        msg.state = MessageState::Failed;
-                        failed_indices.push(idx);
-                        continue;
-                    };
+        let msg = &self.outbound[idx];
+        if msg.attempts >= msg.attempt_limit() {
+            log::debug!(
+                "Max delivery attempts reached for {:02x?}",
+                &msg.message_hash[..4]
+            );
+            return true;
+        }
 
-                    if let Some(link_id) = self.propagation_link {
-                        if let Some(ref prop_packed) = msg.propagation_packed {
-                            if prop_packed.len() <= LINK_PACKET_MDU {
-                                msg.representation = Representation::Packet;
-                                let _ = node.send_on_link(link_id, prop_packed.clone(), 0);
-                            } else {
-                                msg.representation = Representation::Resource;
-                                let _ = node.send_resource(link_id, prop_packed.clone(), None);
-                            }
-                            msg.state = MessageState::Sending;
-                        }
-                    } else if self
-                        .pending_direct_links
-                        .contains_key(&propagation_dest_hash)
-                        || self
-                            .pending_direct_link_creations
-                            .contains_key(&propagation_dest_hash)
-                    {
-                        // Propagation link is being established.
-                    } else if let Some(public_key) = self.identity_cache.get(&propagation_dest_hash)
-                    {
-                        let dest_hash = propagation_dest_hash;
-                        let sig_pub: [u8; 32] = public_key[32..].try_into().unwrap();
-                        let tx = self.direct_link_tx.clone();
-                        let node = node.clone();
-                        self.pending_direct_link_creations.insert(dest_hash, now);
-                        thread::spawn(move || {
-                            let link_id = node.create_link(dest_hash, sig_pub).ok();
-                            let _ = tx.send(DirectLinkResult { dest_hash, link_id });
-                        });
-                    } else {
-                        let _ = node.request_path(&DestHash(propagation_dest_hash));
-                    }
-                }
-                DeliveryMethod::Paper => {
-                    // Paper messages don't need outbound processing
-                }
+        let public_key = self.destination_public_key(&target, network);
+        match public_key {
+            Some(public_key) if network.has_path(&target) => {
+                let sig_pub: [u8; 32] = public_key[32..].try_into().unwrap();
+                self.pending_direct_link_creations.insert(target, now);
+                network.begin_link(target, sig_pub, self.direct_link_tx.clone());
+                self.outbound[idx].tracking.progress = 0.03;
+            }
+            _ => {
+                log::debug!(
+                    "No path known for delivery attempt to {:02x?}, requesting path",
+                    &target[..4]
+                );
+                self.request_path_debounced(&target, network, medium);
+                self.schedule_attempt_for(idx, &target, true, network, medium);
+                self.outbound[idx].tracking.progress = 0.01;
             }
         }
+        false
+    }
 
-        // Fire callbacks for failed messages
-        for &idx in failed_indices.iter().rev() {
-            let msg = &self.outbound[idx];
-            if let Some(cb) = &msg.failed_callback {
-                cb(msg);
+    /// Handle a closed link for a message that was using it.
+    fn handle_closed_link<N: OutboundNetwork + ?Sized>(
+        &mut self,
+        idx: usize,
+        target: [u8; 16],
+        network: &N,
+        medium: &MediumInfo,
+    ) {
+        let Some(was_established) = self.outbound[idx].tracking.link_closed.take() else {
+            return;
+        };
+        if was_established {
+            log::debug!(
+                "The link to {:02x?} was closed unexpectedly, retrying path request",
+                &target[..4]
+            );
+            self.request_path_debounced(&target, network, medium);
+        } else if !self.outbound[idx].tracking.path_request_retried {
+            log::debug!(
+                "The link to {:02x?} was never activated, retrying path request",
+                &target[..4]
+            );
+            self.request_path_debounced(&target, network, medium);
+            self.outbound[idx].tracking.path_request_retried = true;
+        }
+        let msg = &self.outbound[idx];
+        if msg.attempts + 1 < msg.attempt_limit() {
+            self.schedule_attempt_for(idx, &target, false, network, medium);
+        }
+    }
+
+    /// Direct (link) outbound handling. Returns true when the message failed.
+    fn process_direct<N: OutboundNetwork + ?Sized>(
+        &mut self,
+        idx: usize,
+        network: &N,
+        medium: &MediumInfo,
+        now: f64,
+    ) -> bool {
+        let dest_hash = self.outbound[idx].destination_hash;
+        self.handle_closed_link(idx, dest_hash, network, medium);
+
+        if self.slow_path_held(idx, &dest_hash, network, medium) {
+            return false;
+        }
+        let msg = &self.outbound[idx];
+        if msg.attempts > msg.attempt_limit() {
+            return self.attempt_due(idx, &dest_hash, network, now);
+        }
+
+        let active_link = self
+            .direct_links
+            .get(&dest_hash)
+            .or_else(|| self.backchannel_links.get(&dest_hash))
+            .copied();
+        if let Some(link_id) = active_link {
+            if self.outbound[idx].state == MessageState::Outbound {
+                let slow = self.slow_path(&dest_hash, network, medium);
+                let auto_compress = self
+                    .compression_cache
+                    .get(&dest_hash)
+                    .copied()
+                    .unwrap_or(true);
+                let msg = &mut self.outbound[idx];
+                msg.tracking.sent_on_slow_path = slow;
+                if msg.tracking.progress < 0.05 {
+                    msg.tracking.progress = 0.05;
+                }
+                return send_direct_on_link(network, msg, link_id, auto_compress).is_err();
             }
+            // Transfer in progress; wait for it to conclude.
+            return false;
         }
 
-        // Remove completed messages (reverse order to preserve indices)
-        for &idx in completed_indices.iter().rev() {
-            self.outbound.remove(idx);
+        let link_pending = self.pending_direct_links.contains_key(&dest_hash)
+            || self.pending_direct_link_creations.contains_key(&dest_hash);
+        if link_pending {
+            // Wait for the link to become active or close.
+            return false;
         }
+
+        self.attempt_link(idx, dest_hash, network, medium, now)
+    }
+
+    /// Propagated outbound handling. Returns true when the message failed.
+    fn process_propagated<N: OutboundNetwork + ?Sized>(
+        &mut self,
+        idx: usize,
+        network: &N,
+        medium: &MediumInfo,
+        now: f64,
+    ) -> bool {
+        let Some(propagation_node) = self.outbound_propagation_node else {
+            log::error!("No outbound propagation node specified for propagated message");
+            return true;
+        };
+        self.handle_closed_link(idx, propagation_node, network, medium);
+
+        if self.slow_path_held(idx, &propagation_node, network, medium) {
+            return false;
+        }
+        let msg = &self.outbound[idx];
+        if msg.attempts > msg.attempt_limit() {
+            return self.attempt_due(idx, &propagation_node, network, now);
+        }
+
+        if let Some(link_id) = self.propagation_link {
+            if self.outbound[idx].state == MessageState::Outbound {
+                let slow = self.slow_path(&propagation_node, network, medium);
+                let msg = &mut self.outbound[idx];
+                msg.tracking.sent_on_slow_path = slow;
+                return send_propagated_on_link(network, msg, link_id).is_err();
+            }
+            return false;
+        }
+
+        let link_pending = self.pending_direct_links.contains_key(&propagation_node)
+            || self
+                .pending_direct_link_creations
+                .contains_key(&propagation_node);
+        if link_pending {
+            return false;
+        }
+
+        self.attempt_link(idx, propagation_node, network, medium, now)
     }
 
     /// Clean up inactive links.
@@ -1083,7 +1585,9 @@ impl LxmRouter {
     /// Clean expired transient ID caches.
     fn clean_transient_id_caches(&mut self) {
         let now = now_timestamp();
-        let expiry = MESSAGE_EXPIRY as f64;
+        // Transient IDs outlive the messages themselves so that copies
+        // re-synced from other propagation nodes stay suppressed.
+        let expiry = TRANSIENT_ID_EXPIRY as f64;
 
         self.locally_delivered_transient_ids
             .retain(|_, ts| now - *ts < expiry);
@@ -1115,11 +1619,10 @@ impl LxmRouter {
         // a synchronous RPC to the driver thread — causing a self-deadlock.
         let cache = self.identity_cache.clone();
         let verify_fn = |src_hash: &[u8; 16], sig: &[u8; 64], data: &[u8]| -> bool {
-            if let Some(public_key) = cache.get(src_hash) {
-                let id = Identity::from_public_key(public_key);
-                return id.verify(sig, data);
-            }
-            false
+            cache
+                .get(src_hash)
+                .and_then(|public_key| Identity::from_public_key(public_key).ok())
+                .is_some_and(|id| id.verify(sig, data))
         };
 
         let result = match message::unpack(lxmf_bytes, Some(&verify_fn)) {
@@ -1157,7 +1660,7 @@ impl LxmRouter {
             if let Some(dest_hash) = self.delivery_dest_hash {
                 if dest_hash == result.destination_hash {
                     if let Some(stamp_cost) = self.delivery_stamp_cost {
-                        if stamp_cost > 0 {
+                        if stamp_cost > StampCost::ZERO {
                             let valid_stamp = if let Some(ref stamp) = result.stamp {
                                 let workblock = lxmf_core::stamp::stamp_workblock(
                                     &result.message_hash,
@@ -1201,28 +1704,53 @@ impl LxmRouter {
         }
     }
 
-    /// Update outbound stamp cost for a destination.
-    pub fn update_stamp_cost(&mut self, dest_hash: [u8; 16], cost: u8) {
+    /// Update the outbound stamp cost for a destination from its latest
+    /// announce; `None` clears it. Costs are persisted periodically and on
+    /// exit rather than on every announce (upstream d845503).
+    pub fn update_stamp_cost(&mut self, dest_hash: [u8; 16], cost: Option<StampCost>) {
         log::trace!(
-            "Updating outbound stamp cost for {:02x?} to {}",
+            "Updating outbound stamp cost for {:02x?} to {:?}",
             &dest_hash[..4],
-            cost
+            cost.map(StampCost::as_f64)
         );
-        let now = now_timestamp();
-        self.outbound_stamp_costs.insert(dest_hash, (now, cost));
-        let _ =
-            storage::save_stamp_costs(&self.paths.outbound_stamp_costs, &self.outbound_stamp_costs);
+        let changed = match cost {
+            Some(cost) => {
+                let previous = self
+                    .outbound_stamp_costs
+                    .insert(dest_hash, (now_timestamp(), cost));
+                previous.map(|(_, previous)| previous) != Some(cost)
+            }
+            None => self.outbound_stamp_costs.remove(&dest_hash).is_some(),
+        };
+        if changed {
+            self.stamp_costs_dirty = true;
+        }
     }
 
     /// Get the known stamp cost for a destination.
-    pub fn get_stamp_cost(&self, dest_hash: &[u8; 16]) -> Option<u8> {
+    pub fn get_stamp_cost(&self, dest_hash: &[u8; 16]) -> Option<StampCost> {
         let now = now_timestamp();
-        if let Some(&(ts, cost)) = self.outbound_stamp_costs.get(dest_hash) {
-            if now - ts < STAMP_COST_EXPIRY as f64 {
-                return Some(cost);
-            }
+        self.outbound_stamp_costs
+            .get(dest_hash)
+            .filter(|(ts, _)| now - ts < STAMP_COST_EXPIRY as f64)
+            .map(|(_, cost)| *cost)
+    }
+
+    /// Persist outbound stamp costs if they changed since the last save.
+    pub fn save_stamp_costs_if_dirty(&mut self) {
+        if !self.stamp_costs_dirty {
+            return;
         }
-        None
+        let now = now_timestamp();
+        self.outbound_stamp_costs
+            .retain(|_, (ts, _)| now - *ts < STAMP_COST_EXPIRY as f64);
+        match storage::save_stamp_costs(
+            &self.paths.outbound_stamp_costs,
+            &self.outbound_stamp_costs,
+        ) {
+            Ok(()) => self.stamp_costs_dirty = false,
+            Err(err) => log::error!("Could not save outbound stamp costs: {}", err),
+        }
     }
 
     fn process_peer_distribution_queue(&mut self) {
@@ -1392,29 +1920,73 @@ impl LxmRouter {
         msgpack::pack(&response)
     }
 
+    /// Propagation destination hash of a remote identified on a link.
+    fn link_remote_pn_hash(&self, link_id: &[u8; 16]) -> Option<[u8; 16]> {
+        self.link_remote_identities
+            .get(link_id)
+            .map(|identity_hash| compute_dest_hash(APP_NAME, &["propagation"], identity_hash))
+    }
+
+    /// Decide whether to accept an inbound propagation resource
+    /// (`propagation_resource_advertised`).
+    ///
+    /// Peers transfer messages they offered, and clients upload their own
+    /// messages; both arrive as resources on propagation links. When only
+    /// static peers are accepted, resources must come from an identified
+    /// static peer, unless they carry the application flag clients set.
     pub fn accept_inbound_propagation_resource(
         &mut self,
         link_id: [u8; 16],
         transfer_size: u64,
+        app_flag: bool,
     ) -> bool {
-        if !matches!(
-            self.accepted_offer_links.get(&link_id),
-            Some(InboundOfferState::Accepted)
-        ) {
-            return false;
-        }
-        let limit = self.config.sync_limit as u64 * 1000;
-        if transfer_size > limit {
+        let offered = self.accepted_offer_links.contains_key(&link_id);
+        if !offered && !self.active_propagation_links.contains(&link_id) {
             return false;
         }
 
-        self.accepted_offer_links
-            .insert(link_id, InboundOfferState::Transferring);
+        if self.config.from_static_only && !app_flag {
+            match self.link_remote_pn_hash(&link_id) {
+                None => {
+                    log::debug!("Rejecting propagation resource from unidentified peer");
+                    return false;
+                }
+                Some(remote_hash) if !self.config.static_peers.contains(&remote_hash) => {
+                    log::debug!(
+                        "Rejecting propagation resource from {:02x?} not in static peers list",
+                        &remote_hash[..4]
+                    );
+                    return false;
+                }
+                Some(_) => {}
+            }
+        }
+
+        let limit = self.config.sync_limit as u64 * 1000;
+        if transfer_size > limit {
+            log::debug!(
+                "Rejecting {} byte propagation resource exceeding the {} byte limit",
+                transfer_size,
+                limit
+            );
+            return false;
+        }
+
+        if offered {
+            self.accepted_offer_links
+                .insert(link_id, InboundOfferState::Transferring);
+        }
         true
     }
 
+    /// Begin validating a received propagation transfer. Returns the
+    /// remote's propagation destination hash when it identified.
     pub fn begin_inbound_validation(&mut self, link_id: [u8; 16]) -> Option<[u8; 16]> {
-        let remote_hash = *self.inbound_offer_peers.get(&link_id)?;
+        let remote_hash = self
+            .inbound_offer_peers
+            .get(&link_id)
+            .copied()
+            .or_else(|| self.link_remote_pn_hash(&link_id))?;
         self.accepted_offer_links
             .insert(link_id, InboundOfferState::Validating);
         self.validating_pn_stamps_from
@@ -1423,7 +1995,11 @@ impl LxmRouter {
     }
 
     pub fn finish_inbound_sync(&mut self, link_id: [u8; 16]) {
-        if let Some(remote_hash) = self.inbound_offer_peers.remove(&link_id) {
+        let remote_hash = self
+            .inbound_offer_peers
+            .remove(&link_id)
+            .or_else(|| self.link_remote_pn_hash(&link_id));
+        if let Some(remote_hash) = remote_hash {
             self.validating_pn_stamps_from.remove(&remote_hash);
         }
         self.accepted_offer_links.remove(&link_id);
@@ -1434,49 +2010,169 @@ impl LxmRouter {
         self.validated_peer_links.remove(&link_id);
     }
 
+    /// Minimum stamp cost accepted for propagated messages.
+    pub fn min_accepted_propagation_cost(&self) -> StampCost {
+        min_accepted_cost(
+            self.config.propagation_cost,
+            self.config.propagation_cost_flexibility,
+        )
+    }
+
+    /// Ingest a propagated message (`lxmf_propagation`): deliver it locally
+    /// when addressed to this router's delivery destination, otherwise store
+    /// it for distribution when running a propagation node. Returns the
+    /// transient ID when the message was new.
+    pub fn lxmf_propagation(
+        &mut self,
+        lxmf_data: &[u8],
+        stamp_value: lxmf_core::stamp::StampValue,
+        stamp_data: Option<&[u8]>,
+        from_peer: Option<[u8; 16]>,
+    ) -> Option<[u8; 32]> {
+        if lxmf_data.len() < LXMF_OVERHEAD {
+            return None;
+        }
+        let transient_id = rns_crypto::sha256::sha256(lxmf_data);
+        if self.propagation_store.entries.contains_key(&transient_id)
+            || self
+                .locally_processed_transient_ids
+                .contains_key(&transient_id)
+        {
+            return None;
+        }
+        let now = now_timestamp();
+        self.locally_processed_transient_ids
+            .insert(transient_id, now);
+
+        let mut destination_hash = [0u8; DESTINATION_LENGTH];
+        destination_hash.copy_from_slice(&lxmf_data[..DESTINATION_LENGTH]);
+
+        if self.delivery_dest_hash == Some(destination_hash) {
+            match self.identity.decrypt(&lxmf_data[DESTINATION_LENGTH..]) {
+                Ok(decrypted) => {
+                    let mut delivery_data =
+                        Vec::with_capacity(DESTINATION_LENGTH + decrypted.len());
+                    delivery_data.extend_from_slice(&destination_hash);
+                    delivery_data.extend_from_slice(&decrypted);
+                    self.lxmf_delivery(
+                        &delivery_data,
+                        true,
+                        ENCRYPTION_DESCRIPTION_EC,
+                        DeliveryMethod::Propagated,
+                    );
+                    self.locally_delivered_transient_ids
+                        .insert(transient_id, now_timestamp());
+                }
+                Err(_) => log::debug!("Could not decrypt propagated message for local delivery"),
+            }
+            return Some(transient_id);
+        }
+
+        if !self.propagation_node {
+            log::debug!("Received propagated LXM, but not hosting a propagation node, discarding");
+            return Some(transient_id);
+        }
+        if stamp_value == lxmf_core::stamp::StampValue::ZERO {
+            return None;
+        }
+        self.propagation_store
+            .store_message(lxmf_data, stamp_data, stamp_value, from_peer)
+    }
+
+    /// Store messages from a validated propagation transfer and update
+    /// peer, unpeered and client accounting (`propagation_resource_concluded`).
     fn store_validated_inbound_messages(
         &mut self,
         link_id: [u8; 16],
-        remote_hash: [u8; 16],
+        remote_hash: Option<[u8; 16]>,
         validated: Vec<lxmf_core::stamp::PnStampResult>,
         invalid_count: usize,
     ) {
         for result in validated {
             let message_len = result.lxm_data.len() as u64;
-            let stored = self.propagation_store.store_message(
-                &result.lxm_data,
-                Some(&result.stamp),
-                result.value,
-                Some(remote_hash),
-            );
-            if let Some(peer) = self.peers.get_mut(&remote_hash) {
-                peer.incoming = peer.incoming.saturating_add(1);
-                peer.rx_bytes = peer.rx_bytes.saturating_add(message_len);
-                if let Some(transient_id) = stored {
-                    peer.queue_handled_message(transient_id);
+            let peer_hash = remote_hash.filter(|hash| self.peers.contains_key(hash));
+            match (peer_hash, remote_hash) {
+                (Some(peer_hash), _) => {
+                    if let Some(peer) = self.peers.get_mut(&peer_hash) {
+                        peer.incoming = peer.incoming.saturating_add(1);
+                        peer.rx_bytes = peer.rx_bytes.saturating_add(message_len);
+                    }
                 }
-            } else {
-                self.propagation_store.unpeered_propagation_incoming = self
-                    .propagation_store
-                    .unpeered_propagation_incoming
-                    .saturating_add(1);
-                self.propagation_store.unpeered_propagation_rx_bytes = self
-                    .propagation_store
-                    .unpeered_propagation_rx_bytes
-                    .saturating_add(message_len);
+                (None, Some(_)) => {
+                    let store = &mut self.propagation_store;
+                    store.unpeered_propagation_incoming =
+                        store.unpeered_propagation_incoming.saturating_add(1);
+                    store.unpeered_propagation_rx_bytes = store
+                        .unpeered_propagation_rx_bytes
+                        .saturating_add(message_len);
+                }
+                (None, None) => {
+                    let store = &mut self.propagation_store;
+                    store.client_propagation_messages_received =
+                        store.client_propagation_messages_received.saturating_add(1);
+                }
+            }
+            self.lxmf_propagation(
+                &result.lxm_data,
+                result.value,
+                Some(&result.stamp),
+                peer_hash,
+            );
+            if let Some(peer) = peer_hash.and_then(|hash| self.peers.get_mut(&hash)) {
+                peer.queue_handled_message(result.transient_id);
             }
         }
 
         if invalid_count > 0 {
-            self.throttled_peers
-                .insert(remote_hash, now_timestamp() + PN_STAMP_THROTTLE as f64);
-            log::warn!(
-                "Inbound propagation sync from {:02x?} contained {} invalid stamp(s)",
-                &remote_hash[..4],
-                invalid_count
-            );
+            if let Some(node) = &self.node {
+                let _ = node.teardown_link(link_id);
+            }
+            if let Some(remote_hash) = remote_hash {
+                self.throttled_peers
+                    .insert(remote_hash, now_timestamp() + self.config.pn_stamp_throttle);
+                log::warn!(
+                    "Propagation transfer from {:02x?} contained {} invalid stamp(s), throttled",
+                    &remote_hash[..4],
+                    invalid_count
+                );
+            } else {
+                log::warn!(
+                    "Propagation transfer from client contained {} invalid stamp(s)",
+                    invalid_count
+                );
+            }
         }
         self.finish_inbound_sync(link_id);
+    }
+
+    /// Handle a client propagation upload sent as a link packet
+    /// (`propagation_packet`). Returns whether every message validated, in
+    /// which case the packet is proven.
+    pub fn handle_propagation_packet(&mut self, link_id: [u8; 16], data: &[u8]) -> bool {
+        let Some(messages) = unpack_propagation_batch(data) else {
+            return false;
+        };
+        let validated =
+            crate::stamper::validate_pn_stamps(&messages, self.min_accepted_propagation_cost());
+        let all_valid = validated.len() == messages.len();
+        for result in validated {
+            self.propagation_store.client_propagation_messages_received = self
+                .propagation_store
+                .client_propagation_messages_received
+                .saturating_add(1);
+            self.lxmf_propagation(&result.lxm_data, result.value, Some(&result.stamp), None);
+        }
+        if !all_valid {
+            log::info!("Propagation transfer from client contained messages with invalid stamps");
+            if let Some(node) = &self.node {
+                let reject = msgpack::pack(&Value::Array(vec![Value::UInt(
+                    PeerError::InvalidStamp as u64,
+                )]));
+                let _ = node.try_send_on_link(link_id, reject, 0);
+                let _ = node.teardown_link(link_id);
+            }
+        }
+        all_valid
     }
 
     pub fn send_peer_sync_offer_with_transport<T: PeerSyncTransport + ?Sized>(
@@ -1584,50 +2280,168 @@ impl LxmRouter {
         }
     }
 
-    fn ensure_peer_sync_links(&mut self, node: &RnsNode) {
+    /// Prepare peers with unhandled messages for sync (`LXMPeer.sync`):
+    /// postpone peers whose costs or peering key are not ready (generating
+    /// the key in the background), request paths and back off when none is
+    /// found (upstream c939e25), and start link establishment.
+    fn ensure_peer_sync_links<N: OutboundNetwork + ?Sized>(&mut self, network: &N) {
         let now = now_timestamp();
+        let medium = MediumInfo::query(network);
         let peer_hashes: Vec<[u8; 16]> = self.peers.keys().copied().collect();
         for peer_hash in peer_hashes {
-            let should_establish = match self.peers.get_mut(&peer_hash) {
-                Some(peer) => {
-                    peer.process_queues();
-                    let (checks_ok, _) = peer.sync_checks();
-                    peer.state == PeerState::Idle
-                        && checks_ok
-                        && !peer.unhandled_ids.is_empty()
-                        && peer.next_sync_attempt <= now
-                }
-                None => false,
+            let Some(peer) = self.peers.get_mut(&peer_hash) else {
+                continue;
             };
-
-            if !should_establish {
+            peer.process_queues();
+            if peer.state != PeerState::Idle || peer.unhandled_ids.is_empty() {
+                continue;
+            }
+            peer.last_sync_attempt = now;
+            let (checks_ok, reason) = peer.sync_checks();
+            if !checks_ok {
+                match reason {
+                    SyncPostponeReason::BackoffActive => {
+                        if peer.last_sync_attempt > peer.last_heard {
+                            peer.alive = false;
+                        }
+                    }
+                    SyncPostponeReason::PeeringKeyNotReady => {
+                        self.start_peering_key_generation(peer_hash, network);
+                    }
+                    _ => {}
+                }
                 continue;
             }
 
-            if let Some(peer) = self.peers.get_mut(&peer_hash) {
-                if peer.link_id.is_some() {
+            if let Some(link_id) = peer.link_id {
+                let pending = self.pending_direct_links.values().any(|id| *id == link_id);
+                if let Some(peer) = self.peers.get_mut(&peer_hash).filter(|_| !pending) {
                     peer.state = PeerState::LinkReady;
-                    continue;
                 }
+                continue;
             }
 
-            if let Some(public_key) = self.identity_cache.get(&peer_hash) {
-                let sig_pub: [u8; 32] = public_key[32..].try_into().unwrap();
-                match node.create_link(peer_hash, sig_pub) {
-                    Ok(link_id) => {
-                        if let Some(peer) = self.peers.get_mut(&peer_hash) {
-                            peer.handle_link_established(link_id, 0.0);
-                        }
-                    }
-                    Err(_) => {
+            let public_key = self.destination_public_key(&peer_hash, network);
+            let path_known = public_key.is_some() && network.has_path(&peer_hash);
+            if !path_known {
+                match self.peer_path_requests.get(&peer_hash).copied() {
+                    Some(requested) if now - requested >= PATH_REQUEST_GRACE => {
+                        self.peer_path_requests.remove(&peer_hash);
                         if let Some(peer) = self.peers.get_mut(&peer_hash) {
                             peer.apply_backoff();
+                            peer.alive = false;
                         }
+                        log::debug!(
+                            "Path request was not answered, retrying sync with peer {:02x?} later",
+                            &peer_hash[..4]
+                        );
+                    }
+                    Some(_) => {}
+                    None => {
+                        log::debug!("No path to peer {:02x?}, requesting", &peer_hash[..4]);
+                        self.request_path_debounced(&peer_hash, network, &medium);
+                        self.peer_path_requests.insert(peer_hash, now);
                     }
                 }
-            } else {
-                let _ = node.request_path(&DestHash(peer_hash));
+                continue;
             }
+            self.peer_path_requests.remove(&peer_hash);
+
+            let link_pending = self.pending_direct_links.contains_key(&peer_hash)
+                || self.pending_direct_link_creations.contains_key(&peer_hash);
+            if link_pending {
+                continue;
+            }
+            let Some(public_key) = public_key else {
+                continue;
+            };
+            log::debug!(
+                "Establishing link for sync to peer {:02x?}",
+                &peer_hash[..4]
+            );
+            if let Some(peer) = self.peers.get_mut(&peer_hash) {
+                peer.apply_backoff();
+                peer.state = PeerState::LinkEstablishing;
+            }
+            let sig_pub: [u8; 32] = public_key[32..].try_into().unwrap();
+            self.pending_direct_link_creations.insert(peer_hash, now);
+            network.begin_link(peer_hash, sig_pub, self.direct_link_tx.clone());
+        }
+    }
+
+    /// Generate a peering key for a peer in the background
+    /// (`generate_peering_key`). The key is a stamp over the peer's identity
+    /// hash followed by ours, at the peer's peering cost.
+    fn start_peering_key_generation<N: OutboundNetwork + ?Sized>(
+        &mut self,
+        peer_hash: [u8; 16],
+        network: &N,
+    ) {
+        if self.peering_keys_generating.contains(&peer_hash) {
+            return;
+        }
+        let Some(cost) = self
+            .peers
+            .get(&peer_hash)
+            .and_then(|peer| peer.peering_cost)
+        else {
+            return;
+        };
+        let identity_hash = self
+            .identity_hash_cache
+            .get(&peer_hash)
+            .copied()
+            .or_else(|| {
+                self.destination_public_key(&peer_hash, network)
+                    .map(|key| crate::outbound::announced_from_public_key(peer_hash, &key))
+                    .map(|announced| announced.identity_hash.0)
+            });
+        let Some(identity_hash) = identity_hash else {
+            log::debug!(
+                "Could not generate peering key for {:02x?}, identity unknown",
+                &peer_hash[..4]
+            );
+            return;
+        };
+
+        let mut key_material = Vec::with_capacity(32);
+        key_material.extend_from_slice(&identity_hash);
+        key_material.extend_from_slice(self.identity.hash());
+        self.peering_keys_generating.insert(peer_hash);
+        let results = self.peering_key_tx.clone();
+        log::info!("Generating peering key for {:02x?}", &peer_hash[..4]);
+        thread::spawn(move || {
+            let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let key = crate::stamper::generate_stamp(
+                &key_material,
+                cost,
+                WORKBLOCK_EXPAND_ROUNDS_PEERING,
+                cancel,
+            )
+            .map(|(stamp, value)| (stamp.to_vec(), value));
+            let _ = results.send((peer_hash, key));
+        });
+    }
+
+    /// Install peering keys generated in the background.
+    fn drain_peering_keys(&mut self) {
+        let mut updated = false;
+        while let Ok((peer_hash, key)) = self.peering_key_rx.try_recv() {
+            self.peering_keys_generating.remove(&peer_hash);
+            let Some(peer) = self.peers.get_mut(&peer_hash) else {
+                continue;
+            };
+            match (key, peer.peering_cost) {
+                (Some((key, value)), Some(cost)) if value.meets(cost) => {
+                    log::info!("Peering key generated for {:02x?}", &peer_hash[..4]);
+                    peer.peering_key = Some((key, value));
+                    updated = true;
+                }
+                _ => log::warn!("Peering key generation failed for {:02x?}", &peer_hash[..4]),
+            }
+        }
+        if updated {
+            self.save_peers();
         }
     }
 
@@ -1704,8 +2518,8 @@ impl LxmRouter {
             &self.paths.locally_processed,
             &self.locally_processed_transient_ids,
         );
-        let _ =
-            storage::save_stamp_costs(&self.paths.outbound_stamp_costs, &self.outbound_stamp_costs);
+        self.stamp_costs_dirty = true;
+        self.save_stamp_costs_if_dirty();
 
         // Save peers
         self.save_peers();
@@ -1715,8 +2529,7 @@ impl LxmRouter {
     }
 }
 
-/// Ask the RNS node to retain announce data for a destination that was
-/// actually used for successful LXMF delivery.
+/// Offer weight of a stored message for peer sync ordering.
 fn peer_offer_weight(entry: &PropagationEntry, now: f64, prioritised_list: &[[u8; 16]]) -> f64 {
     let age_days = (now - entry.received) / 60.0 / 60.0 / 24.0 / 4.0;
     let age_weight = if age_days > 1.0 { age_days } else { 1.0 };
@@ -1729,57 +2542,92 @@ fn peer_offer_weight(entry: &PropagationEntry, now: f64, prioritised_list: &[[u8
     priority_weight * age_weight * entry.size as f64
 }
 
-fn retain_destination_data(node: &RnsNode, dest_hash: [u8; 16]) {
-    if let Err(err) = node.retain_known_destination(&DestHash(dest_hash)) {
-        log::warn!("Failed to retain destination announce data: {:?}", err);
+/// Mark a message delivered once (`__mark_delivered`); returns true if the
+/// state changed.
+fn mark_delivered(msg: &mut OutboundMessage) -> bool {
+    if msg.state == MessageState::Delivered {
+        return false;
     }
+    msg.state = MessageState::Delivered;
+    msg.tracking.progress = 1.0;
+    if let Some(cb) = &msg.delivery_callback {
+        cb(msg);
+    }
+    true
 }
 
-fn retain_destination_data_async(node: Arc<RnsNode>, dest_hash: [u8; 16]) {
-    thread::spawn(move || retain_destination_data(&node, dest_hash));
+/// Mark a propagated message accepted by the propagation node once
+/// (`__mark_propagated`); returns true if the state changed.
+fn mark_propagated(msg: &mut OutboundMessage) -> bool {
+    if msg.state == MessageState::Sent {
+        return false;
+    }
+    msg.state = MessageState::Sent;
+    msg.tracking.progress = 1.0;
+    if let Some(cb) = &msg.delivery_callback {
+        cb(msg);
+    }
+    true
 }
 
-/// Send a message on an established link (as packet or resource).
-fn send_on_link(
-    node: &RnsNode,
+/// Send a direct message on an established link, as a packet or resource.
+///
+/// Link packets carry no completion callback here, so a dispatched packet on
+/// the encrypted link is treated as delivered.
+fn send_direct_on_link<N: OutboundNetwork + ?Sized>(
+    network: &N,
     msg: &mut OutboundMessage,
     link_id: [u8; 16],
-    retain_after_success: impl FnOnce([u8; 16]),
     auto_compress: bool,
-) {
-    if msg.packed.len() <= LINK_PACKET_MDU {
-        msg.representation = Representation::Packet;
-        match node.send_on_link(link_id, msg.packed.clone(), 0) {
-            Ok(()) => {
-                // Link packets have no completion callback (unlike resources).
-                // Since the link is an encrypted, confirmed channel, treat
-                // successful dispatch as delivered.
-                msg.state = MessageState::Delivered;
-                retain_after_success(msg.destination_hash);
-                if let Some(cb) = &msg.delivery_callback {
-                    cb(msg);
-                }
-            }
-            Err(_) => {
-                log::warn!("Failed to send on direct link");
-            }
-        }
+) -> Result<(), crate::outbound::SendFailed> {
+    msg.link_id = Some(link_id);
+    if msg.representation == Representation::Unknown {
+        msg.representation =
+            message::resolve_delivery(DeliveryMethod::Direct, msg.packed.len(), None).1;
+    }
+    if msg.representation == Representation::Packet {
+        network.send_link_packet(link_id, msg.packed.clone())?;
+        msg.tracking.progress = 0.5;
+        mark_delivered(msg);
     } else {
         msg.representation = Representation::Resource;
-        match node.send_resource_with_auto_compress(
-            link_id,
-            msg.packed.clone(),
-            None,
-            auto_compress,
-        ) {
-            Ok(()) => {
-                msg.state = MessageState::Sending;
-            }
-            Err(_) => {
-                log::warn!("Failed to send resource on direct link");
-            }
-        }
+        network.send_link_resource(link_id, msg.packed.clone(), auto_compress, false)?;
+        msg.state = MessageState::Sending;
     }
+    Ok(())
+}
+
+/// Send a propagated message to the outbound propagation node.
+///
+/// Propagation resources carry the application flag (LXMF 1.3), which lets
+/// a node accepting only static peers still take client deliveries.
+fn send_propagated_on_link<N: OutboundNetwork + ?Sized>(
+    network: &N,
+    msg: &mut OutboundMessage,
+    link_id: [u8; 16],
+) -> Result<(), crate::outbound::SendFailed> {
+    let Some(prop_packed) = msg.propagation_packed.clone() else {
+        log::error!("Propagated message has no propagation-packed data");
+        return Err(crate::outbound::SendFailed);
+    };
+    msg.link_id = Some(link_id);
+    if msg.representation == Representation::Unknown {
+        msg.representation = message::resolve_delivery(
+            DeliveryMethod::Propagated,
+            msg.packed.len(),
+            Some(prop_packed.len()),
+        )
+        .1;
+    }
+    if msg.representation == Representation::Packet {
+        network.send_link_packet(link_id, prop_packed)?;
+        mark_propagated(msg);
+    } else {
+        msg.representation = Representation::Resource;
+        network.send_link_resource(link_id, prop_packed, false, true)?;
+        msg.state = MessageState::Sending;
+    }
+    Ok(())
 }
 
 /// Callbacks implementation for the LXMF router.
@@ -1817,179 +2665,204 @@ impl LxmfCallbacks {
 
     fn is_delivery_link(&self, link_id: LinkId) -> bool {
         let router = self.router.lock().unwrap();
-        router
-            .link_destinations
-            .get(&link_id.0)
-            .is_some_and(|dh| router.delivery_dest_hash == Some(*dh))
+        router.is_delivery_link(&link_id.0)
+    }
+
+    /// Run outbound processing off the driver thread (`outbound_trigger`).
+    fn kick_outbound(&self) {
+        let router = self.router.clone();
+        thread::spawn(move || {
+            router.lock().unwrap().process_outbound();
+        });
+    }
+}
+
+impl LxmRouter {
+    fn is_delivery_link(&self, link_id: &[u8; 16]) -> bool {
+        self.link_destinations
+            .get(link_id)
+            .is_some_and(|dest| self.delivery_dest_hash == Some(*dest))
+    }
+
+    fn is_inbound_propagation_link(&self, link_id: &[u8; 16]) -> bool {
+        self.active_propagation_links.contains(link_id)
+            || self.accepted_offer_links.contains_key(link_id)
+    }
+
+    /// Make queued messages waiting for a path to `target` due now. Returns
+    /// whether any message was waiting.
+    fn wake_messages_awaiting_path(&mut self, target: &[u8; 16]) -> bool {
+        let propagation_node = self.outbound_propagation_node;
+        let mut woke = false;
+        for msg in &mut self.outbound {
+            let msg_target = if msg.method == DeliveryMethod::Propagated {
+                propagation_node
+            } else {
+                Some(msg.destination_hash)
+            };
+            if msg_target.as_ref() == Some(target) && msg.tracking.awaiting_path {
+                msg.tracking.next_delivery_attempt = None;
+                woke = true;
+            }
+        }
+        woke
+    }
+
+    /// Apply a propagation node announce to the peer table.
+    fn handle_peer_announce(&mut self, announced: &AnnouncedIdentity, app_data: &[u8]) {
+        if !self.propagation_node || announced.dest_hash.0 == self.propagation_dest_hash {
+            return;
+        }
+        let Some(info) = parse_propagation_announce(announced.dest_hash.0, Some(app_data)) else {
+            return;
+        };
+        let is_static_peer = self.config.static_peers.contains(&announced.dest_hash.0);
+        let is_existing_peer = self.peers.contains_key(&announced.dest_hash.0);
+        let last_heard = self
+            .peers
+            .get(&announced.dest_hash.0)
+            .map(|peer| peer.last_heard)
+            .unwrap_or(0.0);
+
+        match decide_propagation_action(
+            &info,
+            false,
+            is_static_peer,
+            is_existing_peer,
+            last_heard,
+            self.config.autopeer,
+            Some(announced.hops),
+            self.config.autopeer_maxdepth,
+        ) {
+            PropagationAnnounceResult::Peer(info) => self.peer(info),
+            PropagationAnnounceResult::Unpeer {
+                destination_hash,
+                node_timebase,
+            } => {
+                if self
+                    .peers
+                    .get(&destination_hash)
+                    .is_some_and(|peer| node_timebase as f64 >= peer.peering_timebase)
+                {
+                    self.peers.remove(&destination_hash);
+                    self.save_peers();
+                }
+            }
+            PropagationAnnounceResult::Ignore => {}
+        }
+    }
+
+    /// Peer with a propagation node, or refresh an existing peer (`peer`).
+    fn peer(&mut self, info: crate::handlers::PropagationPeerInfo) {
+        let announced_timebase = info.node_timebase as f64;
+        let sync_strategy = self.config.sync_strategy;
+
+        if info.peering_cost > self.config.max_peering_cost {
+            if self
+                .peers
+                .get(&info.destination_hash)
+                .is_some_and(|peer| announced_timebase >= peer.peering_timebase)
+            {
+                self.peers.remove(&info.destination_hash);
+                self.save_peers();
+            }
+            log::info!(
+                "Not peering with {:02x?}, its peering cost of {} exceeds the local maximum of {}",
+                &info.destination_hash[..4],
+                info.peering_cost,
+                self.config.max_peering_cost
+            );
+            return;
+        }
+
+        let apply = |peer: &mut LxmPeer| {
+            peer.alive = true;
+            peer.last_heard = now_timestamp();
+            peer.sync_strategy = sync_strategy;
+            peer.peering_timebase = announced_timebase;
+            peer.propagation_transfer_limit = Some(info.propagation_transfer_limit as f64);
+            peer.propagation_sync_limit = Some(info.propagation_sync_limit);
+            peer.propagation_stamp_cost = Some(info.propagation_stamp_cost);
+            peer.propagation_stamp_cost_flexibility = Some(info.propagation_stamp_cost_flexibility);
+            peer.peering_cost = Some(info.peering_cost);
+            peer.metadata = Some(info.metadata.clone());
+        };
+
+        if let Some(peer) = self.peers.get_mut(&info.destination_hash) {
+            if announced_timebase > peer.peering_timebase {
+                apply(peer);
+                peer.next_sync_attempt = 0.0;
+                peer.sync_backoff = 0.0;
+                self.save_peers();
+            }
+        } else if self.peers.len() < self.config.max_peers {
+            let mut peer = LxmPeer::new(info.destination_hash);
+            apply(&mut peer);
+            self.peers.insert(info.destination_hash, peer);
+            self.save_peers();
+        }
     }
 }
 
 impl Callbacks for LxmfCallbacks {
     fn on_announce(&mut self, announced: AnnouncedIdentity) {
         let mut router = self.router.lock().unwrap();
-        let mut trigger_outbound = false;
+        let dest_hash = announced.dest_hash.0;
 
-        // Check if this is our own delivery announce
-        if let Some(delivery_hash) = router.delivery_dest_hash {
-            if announced.dest_hash.0 == delivery_hash {
-                return;
-            }
+        // Ignore our own delivery announce
+        if router.delivery_dest_hash == Some(dest_hash) {
+            return;
         }
 
         // Cache the public key for signature verification in lxmf_delivery
         router
             .identity_cache
-            .insert(announced.dest_hash.0, announced.public_key);
+            .insert(dest_hash, announced.public_key);
         router
             .identity_hash_cache
-            .insert(announced.dest_hash.0, announced.identity_hash.0);
+            .insert(dest_hash, announced.identity_hash.0);
 
-        // Propagation node announces can make queued propagated messages
-        // immediately actionable when they are from our configured outbound PN.
-        if let Some(ref app_data) = announced.app_data {
-            if announce::pn_announce_data_is_valid(app_data) {
-                if router.propagation_node && announced.dest_hash.0 != router.propagation_dest_hash
-                {
-                    if let Some(info) =
-                        parse_propagation_announce(announced.dest_hash.0, Some(app_data))
-                    {
-                        let is_static_peer =
-                            router.config.static_peers.contains(&announced.dest_hash.0);
-                        let is_existing_peer = router.peers.contains_key(&announced.dest_hash.0);
-                        let last_heard = router
-                            .peers
-                            .get(&announced.dest_hash.0)
-                            .map(|peer| peer.last_heard)
-                            .unwrap_or(0.0);
+        let is_pn_announce = announced
+            .app_data
+            .as_deref()
+            .is_some_and(announce::pn_announce_data_is_valid);
 
-                        match decide_propagation_action(
-                            &info,
-                            false,
-                            is_static_peer,
-                            is_existing_peer,
-                            last_heard,
-                            router.config.autopeer,
-                            Some(announced.hops),
-                            router.config.autopeer_maxdepth,
-                        ) {
-                            PropagationAnnounceResult::Peer(info) => {
-                                let announced_timebase = info.node_timebase as f64;
-                                let sync_strategy = router.config.sync_strategy;
-
-                                if info.peering_cost > router.config.max_peering_cost {
-                                    if router.peers.get(&info.destination_hash).is_some_and(
-                                        |peer| announced_timebase >= peer.peering_timebase,
-                                    ) {
-                                        router.peers.remove(&info.destination_hash);
-                                        router.save_peers();
-                                    }
-                                } else if let Some(peer) =
-                                    router.peers.get_mut(&info.destination_hash)
-                                {
-                                    if announced_timebase > peer.peering_timebase {
-                                        peer.alive = true;
-                                        peer.last_heard = now_timestamp();
-                                        peer.sync_strategy = sync_strategy;
-                                        peer.peering_timebase = announced_timebase;
-                                        peer.next_sync_attempt = 0.0;
-                                        peer.sync_backoff = 0.0;
-                                        peer.propagation_transfer_limit =
-                                            Some(info.propagation_transfer_limit as f64);
-                                        peer.propagation_sync_limit =
-                                            Some(info.propagation_sync_limit);
-                                        peer.propagation_stamp_cost =
-                                            Some(info.propagation_stamp_cost);
-                                        peer.propagation_stamp_cost_flexibility =
-                                            Some(info.propagation_stamp_cost_flexibility);
-                                        peer.peering_cost = Some(info.peering_cost);
-                                        peer.metadata = Some(info.metadata);
-                                        router.save_peers();
-                                    }
-                                } else if router.peers.len() < router.config.max_peers {
-                                    let mut peer = LxmPeer::new(info.destination_hash);
-                                    peer.alive = true;
-                                    peer.last_heard = now_timestamp();
-                                    peer.sync_strategy = sync_strategy;
-                                    peer.peering_timebase = announced_timebase;
-                                    peer.next_sync_attempt = 0.0;
-                                    peer.sync_backoff = 0.0;
-                                    peer.propagation_transfer_limit =
-                                        Some(info.propagation_transfer_limit as f64);
-                                    peer.propagation_sync_limit = Some(info.propagation_sync_limit);
-                                    peer.propagation_stamp_cost = Some(info.propagation_stamp_cost);
-                                    peer.propagation_stamp_cost_flexibility =
-                                        Some(info.propagation_stamp_cost_flexibility);
-                                    peer.peering_cost = Some(info.peering_cost);
-                                    peer.metadata = Some(info.metadata);
-                                    router.peers.insert(info.destination_hash, peer);
-                                    router.save_peers();
-                                }
-                            }
-                            PropagationAnnounceResult::Unpeer {
-                                destination_hash,
-                                node_timebase,
-                            } => {
-                                if router.peers.get(&destination_hash).is_some_and(|peer| {
-                                    node_timebase as f64 >= peer.peering_timebase
-                                }) {
-                                    router.peers.remove(&destination_hash);
-                                    router.save_peers();
-                                }
-                            }
-                            PropagationAnnounceResult::Ignore => {}
-                        }
-                    }
-                }
-
-                if router.outbound_propagation_node == Some(announced.dest_hash.0) {
-                    for msg in &mut router.outbound {
-                        if msg.method == DeliveryMethod::Propagated
-                            && msg.state == MessageState::Outbound
-                        {
-                            msg.last_attempt = 0.0;
-                            trigger_outbound = true;
-                        }
-                    }
-                }
-            } else {
+        let trigger_outbound = if is_pn_announce {
+            let app_data = announced.app_data.as_deref().unwrap_or_default();
+            router.handle_peer_announce(&announced, app_data);
+            // An announce from our outbound propagation node makes propagated
+            // messages waiting for its path actionable.
+            router.outbound_propagation_node == Some(dest_hash)
+                && router.wake_messages_awaiting_path(&dest_hash)
+        } else {
+            if let Some(app_data) = announced.app_data.as_deref() {
                 if let Some(supports_compression) =
                     announce::compression_support_from_app_data(app_data)
                 {
                     router
                         .compression_cache
-                        .insert(announced.dest_hash.0, supports_compression);
+                        .insert(dest_hash, supports_compression);
                 }
-                if !app_data.is_empty() {
-                    let first = app_data[0];
-                    // Check for msgpack array header (v0.5.0+ format)
-                    if (0x90..=0x9F).contains(&first) || first == 0xDC {
-                        if let Ok(val) = msgpack::unpack_exact(app_data) {
-                            if let Some(arr) = val.as_array() {
-                                if arr.len() >= 2 {
-                                    if let Some(cost) = arr[1].as_uint() {
-                                        router.update_stamp_cost(announced.dest_hash.0, cost as u8);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
+                router.update_stamp_cost(dest_hash, announce::stamp_cost_from_app_data(app_data));
             }
-        }
+            router.wake_messages_awaiting_path(&dest_hash)
+        };
 
         drop(router);
-
         if trigger_outbound {
-            let router = self.router.clone();
-            thread::spawn(move || {
-                let mut router = router.lock().unwrap();
-                router.process_outbound();
-            });
+            self.kick_outbound();
         }
     }
 
-    fn on_path_updated(&mut self, _dest_hash: DestHash, _hops: u8) {
-        // Could trigger outbound processing for waiting messages
+    fn on_path_updated(&mut self, dest_hash: DestHash, _hops: u8) {
+        let woke = self
+            .router
+            .lock()
+            .unwrap()
+            .wake_messages_awaiting_path(&dest_hash.0);
+        if woke {
+            self.kick_outbound();
+        }
     }
 
     fn on_local_delivery(&mut self, dest_hash: DestHash, raw: Vec<u8>, _packet_hash: PacketHash) {
@@ -2011,7 +2884,7 @@ impl Callbacks for LxmfCallbacks {
                     }
                 };
                 // Decrypt the data payload (encrypted with our public key by sender)
-                let plaintext = match router.identity.decrypt(&packet.data) {
+                let plaintext = match router.identity.decrypt(packet.data()) {
                     Ok(p) => p,
                     Err(e) => {
                         log::warn!("on_local_delivery: decrypt failed: {:?}", e);
@@ -2037,7 +2910,7 @@ impl Callbacks for LxmfCallbacks {
         &mut self,
         link_id: LinkId,
         dest_hash: DestHash,
-        _rtt: f64,
+        rtt: f64,
         is_initiator: bool,
     ) {
         let mut router = self.router.lock().unwrap();
@@ -2046,25 +2919,27 @@ impl Callbacks for LxmfCallbacks {
             router
                 .pending_direct_links
                 .retain(|_, lid| *lid != link_id.0);
+            router.pending_direct_link_creations.remove(&dest_hash.0);
             let is_propagation_link = router.outbound_propagation_node == Some(dest_hash.0);
             if is_propagation_link {
                 router.propagation_link = Some(link_id.0);
             } else if let Some(peer) = router.peers.get_mut(&dest_hash.0) {
-                peer.handle_link_established(link_id.0, _rtt);
+                peer.handle_link_established(link_id.0, rtt);
             } else {
                 router.direct_links.insert(dest_hash.0, link_id.0);
             }
 
-            // We initiated this link. Mark queued direct messages ready; the
-            // next jobs() cycle will send them outside the driver callback.
-            for msg in &mut router.outbound {
-                let should_retry_now = (msg.link_id == Some(link_id.0)
-                    && msg.state == MessageState::Sending)
-                    || (msg.method == DeliveryMethod::Propagated && is_propagation_link);
-                if should_retry_now {
-                    msg.state = MessageState::Outbound;
-                    msg.last_attempt = 0.0;
-                }
+            // We initiated this link for queued messages; send them now
+            // (upstream passes `process_outbound` as the established callback).
+            let has_waiting = router.outbound.iter().any(|msg| {
+                !msg.is_concluded()
+                    && ((msg.method == DeliveryMethod::Propagated && is_propagation_link)
+                        || (msg.method == DeliveryMethod::Direct
+                            && msg.destination_hash == dest_hash.0))
+            });
+            drop(router);
+            if has_waiting {
+                self.kick_outbound();
             }
         } else {
             // Incoming link — map link_id to its destination for delivery routing
@@ -2079,35 +2954,72 @@ impl Callbacks for LxmfCallbacks {
 
     fn on_link_closed(&mut self, link_id: LinkId, _reason: Option<rns_core::link::TeardownReason>) {
         let mut router = self.router.lock().unwrap();
+        let link = link_id.0;
+
+        // The delivery target this link served, and whether it had been
+        // established, so waiting messages can retry (`Link.CLOSED`).
+        let closed_target = router
+            .direct_links
+            .iter()
+            .find_map(|(dest, id)| (*id == link).then_some((*dest, true)))
+            .or_else(|| {
+                router
+                    .pending_direct_links
+                    .iter()
+                    .find_map(|(dest, id)| (*id == link).then_some((*dest, false)))
+            })
+            .or_else(|| {
+                (router.propagation_link == Some(link))
+                    .then_some(router.outbound_propagation_node)
+                    .flatten()
+                    .map(|dest| (dest, true))
+            });
 
         // Remove from link tracking
-        router.direct_links.retain(|_, v| *v != link_id.0);
-        router.pending_direct_links.retain(|_, v| *v != link_id.0);
-        router.backchannel_links.retain(|_, v| *v != link_id.0);
-        router.link_destinations.remove(&link_id.0);
-        router
-            .active_propagation_links
-            .retain(|&id| id != link_id.0);
+        router.direct_links.retain(|_, v| *v != link);
+        router.pending_direct_links.retain(|_, v| *v != link);
+        router.backchannel_links.retain(|_, v| *v != link);
+        router.link_destinations.remove(&link);
+        router.link_remote_identities.remove(&link);
+        router.active_propagation_links.retain(|&id| id != link);
 
-        if router.propagation_link == Some(link_id.0) {
+        if router.propagation_link == Some(link) {
             router.propagation_link = None;
         }
 
-        router.peer_sync_response_links.remove(&link_id.0);
-        router.peer_sync_transfer_sizes.remove(&link_id.0);
-        router.cleanup_inbound_link(link_id.0);
-        router.finish_inbound_delivery_resources(link_id.0);
+        router.peer_sync_response_links.remove(&link);
+        router.peer_sync_transfer_sizes.remove(&link);
+        router.cleanup_inbound_link(link);
+        router.finish_inbound_delivery_resources(link);
         for peer in router.peers.values_mut() {
-            if peer.link_id == Some(link_id.0) {
+            if peer.link_id == Some(link) {
                 peer.handle_link_closed();
             }
         }
 
-        // Reset any outbound messages waiting on this link
+        let propagation_node = router.outbound_propagation_node;
         for msg in &mut router.outbound {
-            if msg.link_id == Some(link_id.0) && msg.state == MessageState::Sending {
+            if msg.is_concluded() {
+                continue;
+            }
+            let on_this_link = msg.link_id == Some(link);
+            if on_this_link && msg.state == MessageState::Sending {
                 msg.state = MessageState::Outbound;
+            }
+            if on_this_link {
                 msg.link_id = None;
+            }
+            let msg_target = if msg.method == DeliveryMethod::Propagated {
+                propagation_node
+            } else if msg.method == DeliveryMethod::Direct {
+                Some(msg.destination_hash)
+            } else {
+                None
+            };
+            if let Some((target, established)) = closed_target {
+                if msg_target == Some(target) {
+                    msg.tracking.link_closed = Some(established);
+                }
             }
         }
     }
@@ -2116,10 +3028,22 @@ impl Callbacks for LxmfCallbacks {
         &mut self,
         link_id: LinkId,
         identity_hash: IdentityHash,
-        _public_key: [u8; 64],
+        public_key: [u8; 64],
     ) {
         let mut router = self.router.lock().unwrap();
-        router.backchannel_links.insert(identity_hash.0, link_id.0);
+        router
+            .link_remote_identities
+            .insert(link_id.0, identity_hash.0);
+        if router.is_delivery_link(&link_id.0) {
+            // Prepare a backchannel for replies to the identified sender
+            // (`delivery_remote_identified`).
+            let backchannel_dest = compute_dest_hash(APP_NAME, &["delivery"], &identity_hash.0);
+            router.backchannel_links.insert(backchannel_dest, link_id.0);
+            router.identity_cache.insert(backchannel_dest, public_key);
+            router
+                .identity_hash_cache
+                .insert(backchannel_dest, identity_hash.0);
+        }
     }
 
     fn on_resource_received(&mut self, link_id: LinkId, data: Vec<u8>, _metadata: Option<Vec<u8>>) {
@@ -2137,26 +3061,36 @@ impl Callbacks for LxmfCallbacks {
             return;
         }
 
-        let messages = match unpack_propagation_batch(&data) {
-            Some(messages) => messages,
-            None => {
-                self.router.lock().unwrap().cleanup_inbound_link(link_id.0);
-                return;
+        let mut router = self.router.lock().unwrap();
+        if !router.is_inbound_propagation_link(&link_id.0) {
+            return;
+        }
+        let Some(messages) = unpack_propagation_batch(&data) else {
+            log::debug!("Invalid data structure received at propagation destination, ignoring");
+            router.cleanup_inbound_link(link_id.0);
+            return;
+        };
+
+        let identified = router.link_remote_identities.contains_key(&link_id.0)
+            || router.inbound_offer_peers.contains_key(&link_id.0);
+        let peering_key_valid = identified && router.validated_peer_links.contains(&link_id.0);
+        if !peering_key_valid && messages.len() > 1 {
+            log::warn!(
+                "Received {} propagation messages without valid peering key presentation, \
+                 ignoring; clients can only deliver one message per transfer",
+                messages.len()
+            );
+            if let Some(node) = &router.node {
+                let _ = node.teardown_link(link_id.0);
             }
-        };
-        let (remote_hash, minimum_cost) = {
-            let mut router = self.router.lock().unwrap();
-            let Some(remote_hash) = router.begin_inbound_validation(link_id.0) else {
-                return;
-            };
-            (
-                remote_hash,
-                router
-                    .config
-                    .propagation_cost
-                    .saturating_sub(router.config.propagation_cost_flexibility),
-            )
-        };
+            router.cleanup_inbound_link(link_id.0);
+            return;
+        }
+
+        let remote_hash = router.begin_inbound_validation(link_id.0);
+        let minimum_cost = router.min_accepted_propagation_cost();
+        drop(router);
+
         let router = self.router.clone();
         thread::spawn(move || {
             let offered_count = messages.len();
@@ -2176,14 +3110,27 @@ impl Callbacks for LxmfCallbacks {
         link_id: LinkId,
         resource_hash: Vec<u8>,
         transfer_size: u64,
+        has_metadata: bool,
+    ) -> bool {
+        self.on_resource_accept_query_with_app_flag(
+            link_id,
+            resource_hash,
+            transfer_size,
+            has_metadata,
+            false,
+        )
+    }
+
+    fn on_resource_accept_query_with_app_flag(
+        &mut self,
+        link_id: LinkId,
+        resource_hash: Vec<u8>,
+        transfer_size: u64,
         _has_metadata: bool,
+        app_flag: bool,
     ) -> bool {
         let mut router = self.router.lock().unwrap();
-        if router
-            .link_destinations
-            .get(&link_id.0)
-            .is_some_and(|dest| router.delivery_dest_hash == Some(*dest))
-        {
+        if router.is_delivery_link(&link_id.0) {
             let accepted = transfer_size <= (router.config.delivery_limit * 1000.0) as u64;
             log::debug!(
                 "{} {} byte inbound LXMF delivery resource on link {:02x?}",
@@ -2196,7 +3143,8 @@ impl Callbacks for LxmfCallbacks {
             }
             return accepted;
         }
-        let accepted = router.accept_inbound_propagation_resource(link_id.0, transfer_size);
+        let accepted =
+            router.accept_inbound_propagation_resource(link_id.0, transfer_size, app_flag);
         log::debug!(
             "{} {} byte inbound LXMF propagation resource on link {:02x?}",
             if accepted { "Accepting" } else { "Rejecting" },
@@ -2209,13 +3157,22 @@ impl Callbacks for LxmfCallbacks {
     fn on_resource_progress(&mut self, link_id: LinkId, received: usize, total: usize) {
         let mut router = self.router.lock().unwrap();
         router.update_inbound_resource_progress(link_id.0, received, total);
+        let fraction = if total == 0 {
+            0.0
+        } else {
+            received.min(total) as f64 / total as f64
+        };
         if router.propagation_link == Some(link_id.0) {
             router.propagation_transfer_size = Some(total as u64);
-            router.propagation_transfer_progress = if total == 0 {
-                0.0
-            } else {
-                received.min(total) as f64 / total as f64
-            };
+            router.propagation_transfer_progress = fraction;
+        }
+        for msg in &mut router.outbound {
+            if msg.link_id == Some(link_id.0) && msg.state == MessageState::Sending {
+                msg.tracking.progress = 0.10 + fraction * 0.90;
+                if let Some(cb) = &msg.progress_callback {
+                    cb(msg, msg.tracking.progress);
+                }
+            }
         }
     }
 
@@ -2251,24 +3208,22 @@ impl Callbacks for LxmfCallbacks {
             return;
         }
 
-        // Mark outbound messages as delivered
-        let mut retained_dest_hash = None;
+        // Mark the outbound message transferred on this link concluded.
+        let mut slow_path_concluded = false;
         for msg in &mut router.outbound {
             if msg.link_id == Some(link_id.0) && msg.state == MessageState::Sending {
-                if msg.method == DeliveryMethod::Propagated {
-                    msg.state = MessageState::Sent;
+                let changed = if msg.method == DeliveryMethod::Propagated {
+                    mark_propagated(msg)
                 } else {
-                    msg.state = MessageState::Delivered;
-                    retained_dest_hash = Some(msg.destination_hash);
-                }
-                if let Some(cb) = &msg.delivery_callback {
-                    cb(msg);
-                }
+                    mark_delivered(msg)
+                };
+                slow_path_concluded = changed && msg.tracking.sent_on_slow_path;
                 break;
             }
         }
-        if let (Some(node), Some(dest_hash)) = (router.node.clone(), retained_dest_hash) {
-            retain_destination_data_async(node, dest_hash);
+        drop(router);
+        if slow_path_concluded {
+            self.kick_outbound();
         }
     }
 
@@ -2287,11 +3242,20 @@ impl Callbacks for LxmfCallbacks {
             return;
         }
 
+        // A failed outbound transfer tears the link down and returns the
+        // message to the queue (`__resource_concluded`).
+        let mut failed_outbound = false;
         for msg in &mut router.outbound {
             if msg.link_id == Some(link_id.0) && msg.state == MessageState::Sending {
                 msg.state = MessageState::Outbound;
                 msg.link_id = None;
+                failed_outbound = true;
                 break;
+            }
+        }
+        if failed_outbound {
+            if let Some(node) = &router.node {
+                let _ = node.teardown_link(link_id.0);
             }
         }
     }
@@ -2308,26 +3272,31 @@ impl Callbacks for LxmfCallbacks {
         let mut router = self.router.lock().unwrap();
 
         // Check if this proof matches an outbound message
-        let mut retained_dest_hash = None;
+        let mut slow_path_concluded = false;
         for msg in &mut router.outbound {
             if msg.packet_hash == Some(packet_hash.0) {
-                msg.state = MessageState::Delivered;
-                retained_dest_hash = Some(msg.destination_hash);
-                if let Some(cb) = &msg.delivery_callback {
-                    cb(msg);
-                }
+                slow_path_concluded = mark_delivered(msg) && msg.tracking.sent_on_slow_path;
                 break;
             }
         }
-        if let (Some(node), Some(dest_hash)) = (router.node.clone(), retained_dest_hash) {
-            retain_destination_data_async(node, dest_hash);
+        drop(router);
+        if slow_path_concluded {
+            self.kick_outbound();
         }
     }
 
     fn on_proof_requested(&mut self, dest_hash: DestHash, _packet_hash: PacketHash) -> bool {
-        let router = self.router.lock().unwrap();
-        // Auto-prove delivery packets
-        router.delivery_dest_hash == Some(dest_hash.0)
+        let mut router = self.router.lock().unwrap();
+        if router.delivery_dest_hash == Some(dest_hash.0) {
+            // Delivery packets are always proven (`delivery_packet`).
+            true
+        } else if router.propagation_node && router.propagation_dest_hash == dest_hash.0 {
+            // Client propagation packets are proven once their stamps
+            // validated (`propagation_packet`).
+            router.propagation_packet_proof.take().unwrap_or(false)
+        } else {
+            false
+        }
     }
 
     fn on_link_data(&mut self, link_id: LinkId, _context: u8, data: Vec<u8>) {
@@ -2338,6 +3307,12 @@ impl Callbacks for LxmfCallbacks {
                 ENCRYPTION_DESCRIPTION_EC,
                 DeliveryMethod::Direct,
             );
+            return;
+        }
+        let mut router = self.router.lock().unwrap();
+        if router.propagation_node && router.active_propagation_links.contains(&link_id.0) {
+            let valid = router.handle_propagation_packet(link_id.0, &data);
+            router.propagation_packet_proof = Some(valid);
         }
     }
 }
@@ -2407,15 +3382,17 @@ mod tests {
             },
         );
         router.display_name = Some("Test Node".to_string());
-        router.delivery_stamp_cost = Some(16);
+        router.delivery_stamp_cost = Some(StampCost::from_f64(15.5));
 
         let app_data = router.build_delivery_announce_data();
         let unpacked = msgpack::unpack_exact(&app_data).unwrap();
         let fields = unpacked.as_array().unwrap();
 
-        assert_eq!(fields.len(), 3);
+        // LXMF 1.3: [name, ceil(cost), [functionality], exact cost]
+        assert_eq!(fields.len(), 4);
         assert_eq!(fields[0].as_bin(), Some(&b"Test Node"[..]));
         assert_eq!(fields[1].as_uint(), Some(16));
+        assert_eq!(fields[3].as_float(), Some(15.5));
         let supported = fields[2].as_array().unwrap();
         assert_eq!(supported.len(), 1);
         assert_eq!(supported[0].as_uint(), Some(SF_COMPRESSION as u64));
@@ -2437,7 +3414,7 @@ mod tests {
                 ..RouterConfig::default()
             },
         );
-        let expired_at = now_timestamp() - MESSAGE_EXPIRY as f64 - 1.0;
+        let expired_at = now_timestamp() - TRANSIENT_ID_EXPIRY as f64 - 1.0;
         for index in 0..32u8 {
             router
                 .locally_delivered_transient_ids

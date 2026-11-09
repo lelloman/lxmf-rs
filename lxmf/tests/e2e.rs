@@ -325,6 +325,11 @@ fn start_transport_node(port: u16) -> (RnsNode, PathBuf) {
             }),
             mode: rns_core::constants::MODE_FULL,
             ingress_control: rns_core::transport::types::IngressControlConfig::enabled(),
+            gravity: 0,
+            recursive_prs: false,
+            announces_from_internal: true,
+            announces_to_internal: None,
+            stamp_costs: Default::default(),
             ifac: None,
             discovery: None,
         }],
@@ -360,6 +365,11 @@ fn start_client_node(port: u16, callbacks: Box<dyn Callbacks>) -> RnsNode {
             }),
             mode: rns_core::constants::MODE_FULL,
             ingress_control: rns_core::transport::types::IngressControlConfig::enabled(),
+            gravity: 0,
+            recursive_prs: false,
+            announces_from_internal: true,
+            announces_to_internal: None,
+            stamp_costs: Default::default(),
             ifac: None,
             discovery: None,
         }],
@@ -415,7 +425,7 @@ fn setup_lxmf_node(port: u16, name: &str, stamp_cost: Option<u8>) -> LxmfNodeHan
     {
         let mut r = router.lock().unwrap();
         r.set_node(node.clone());
-        r.register_delivery_identity(&identity, stamp_cost, Some(name.to_string()));
+        r.register_delivery_identity(&identity, stamp_cost.map(f64::from), Some(name.to_string()));
     }
 
     LxmfNodeHandle {
@@ -595,7 +605,7 @@ fn test_delivery_announce_received() {
         let cost = r.get_stamp_cost(&alice.delivery_dest_hash);
         assert_eq!(
             cost,
-            Some(8),
+            Some(lxmf_core::stamp::StampCost::from_whole(8)),
             "Bob's router should store Alice's stamp cost of 8, got {:?}",
             cost
         );
@@ -885,7 +895,7 @@ fn test_opportunistic_delivery() {
     let _packet_hash = peers
         .alice
         .node
-        .send_packet(&dest, lxmf_payload)
+        .try_send_packet(&dest, lxmf_payload)
         .expect("send_packet should succeed");
 
     // --- Bob receives via real network transport ---
@@ -1007,7 +1017,7 @@ fn test_stamp_cost_propagation_via_announce() {
         let cost = r.get_stamp_cost(&peers.bob.delivery_dest_hash);
         assert_eq!(
             cost,
-            Some(16),
+            Some(lxmf_core::stamp::StampCost::from_whole(16)),
             "Alice should store Bob's stamp cost of 16, got {:?}",
             cost
         );
@@ -1018,7 +1028,7 @@ fn test_stamp_cost_propagation_via_announce() {
         let cost = r.get_stamp_cost(&peers.alice.delivery_dest_hash);
         assert_eq!(
             cost,
-            Some(4),
+            Some(lxmf_core::stamp::StampCost::from_whole(4)),
             "Bob should store Alice's stamp cost of 4, got {:?}",
             cost
         );
@@ -1071,6 +1081,7 @@ fn test_direct_delivery_via_link() {
             progress_callback: None,
             link_id: None,
             packet_hash: None,
+            tracking: Default::default(),
         };
         r.handle_outbound(msg).unwrap();
     }
@@ -1112,6 +1123,11 @@ fn test_direct_delivery_via_link() {
         assert_eq!(title, b"Direct");
         assert_eq!(content, b"LinkMsg");
     }
+
+    // Delivered messages leave the queue, retaining the destination's
+    // announce data, on the next outbound pass (as upstream does).
+    peers.alice.router.lock().unwrap().jobs();
+    assert!(peers.alice.router.lock().unwrap().outbound.is_empty());
 
     assert!(
         wait_for_known_destination_retained(

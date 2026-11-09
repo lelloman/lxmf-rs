@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 
 use lxmf_core::constants::*;
+use lxmf_core::stamp::{min_accepted_cost, StampCost, StampValue};
 use rns_core::msgpack::{self, Value};
 
 use crate::router::now_timestamp;
@@ -25,8 +26,8 @@ pub struct LxmPeer {
     pub sync_backoff: f64,
 
     // Peering key: [key_bytes, value]
-    pub peering_key: Option<(Vec<u8>, u32)>,
-    pub peering_cost: Option<u8>,
+    pub peering_key: Option<(Vec<u8>, StampValue)>,
+    pub peering_cost: Option<StampCost>,
     pub metadata: Option<Vec<(Value, Value)>>,
 
     // Transfer rates
@@ -36,8 +37,8 @@ pub struct LxmPeer {
     // Propagation node limits
     pub propagation_transfer_limit: Option<f64>,
     pub propagation_sync_limit: Option<u64>,
-    pub propagation_stamp_cost: Option<u8>,
-    pub propagation_stamp_cost_flexibility: Option<u8>,
+    pub propagation_stamp_cost: Option<StampCost>,
+    pub propagation_stamp_cost_flexibility: Option<StampCost>,
 
     // Transfer tracking
     pub currently_transferring_messages: Option<Vec<[u8; 32]>>,
@@ -97,24 +98,31 @@ impl LxmPeer {
     }
 
     /// Check if the peering key is ready (sufficient value for peering cost).
-    pub fn peering_key_ready(&self) -> bool {
+    ///
+    /// A key whose value no longer meets the peer's (possibly raised)
+    /// peering cost is discarded so it gets regenerated, as upstream does.
+    pub fn peering_key_ready(&mut self) -> bool {
         let cost = match self.peering_cost {
-            Some(c) => c,
-            None => return false,
+            Some(c) if c > StampCost::ZERO => c,
+            _ => return false,
         };
         match &self.peering_key {
-            Some((_, value)) => *value >= cost as u32,
+            Some((_, value)) if value.meets(cost) => true,
+            Some(_) => {
+                self.peering_key = None;
+                false
+            }
             None => false,
         }
     }
 
     /// Get the peering key value, if available.
-    pub fn peering_key_value(&self) -> Option<u32> {
+    pub fn peering_key_value(&self) -> Option<StampValue> {
         self.peering_key.as_ref().map(|(_, v)| *v)
     }
 
     /// Check if sync prerequisites are met.
-    pub fn sync_checks(&self) -> (bool, SyncPostponeReason) {
+    pub fn sync_checks(&mut self) -> (bool, SyncPostponeReason) {
         let now = now_timestamp();
         let sync_time_reached = now > self.next_sync_attempt;
         let stamp_costs_known = self.propagation_stamp_cost.is_some()
@@ -192,7 +200,7 @@ impl LxmPeer {
         // Filter and sort by weight (ascending = lowest weight first)
         let mut entries: Vec<&OfferEntry> = available_messages
             .iter()
-            .filter(|e| e.stamp_value >= min_accepted_cost as u32)
+            .filter(|e| e.stamp_value.meets(min_accepted_cost))
             .filter(|e| e.size <= transfer_limit_bytes)
             .collect();
         entries.sort_by(|a, b| {
@@ -231,10 +239,12 @@ impl LxmPeer {
         Some(msgpack::pack(&offer))
     }
 
-    fn minimum_accepted_stamp_cost(&self) -> u8 {
-        self.propagation_stamp_cost
-            .unwrap_or(0)
-            .saturating_sub(self.propagation_stamp_cost_flexibility.unwrap_or(0))
+    fn minimum_accepted_stamp_cost(&self) -> StampCost {
+        min_accepted_cost(
+            self.propagation_stamp_cost.unwrap_or(StampCost::ZERO),
+            self.propagation_stamp_cost_flexibility
+                .unwrap_or(StampCost::ZERO),
+        )
     }
 
     /// Process the response from an offer request.
@@ -431,7 +441,7 @@ impl LxmPeer {
     pub fn to_bytes(&self) -> Vec<u8> {
         let peering_key_val = match &self.peering_key {
             Some((key, value)) => {
-                Value::Array(vec![Value::Bin(key.clone()), Value::UInt(*value as u64)])
+                Value::Array(vec![Value::Bin(key.clone()), Value::Float(value.as_f64())])
             }
             None => Value::Nil,
         };
@@ -490,15 +500,15 @@ impl LxmPeer {
             ),
             (
                 Value::Str("propagation_stamp_cost".to_string()),
-                opt_u8_val(self.propagation_stamp_cost),
+                opt_cost_val(self.propagation_stamp_cost),
             ),
             (
                 Value::Str("propagation_stamp_cost_flexibility".to_string()),
-                opt_u8_val(self.propagation_stamp_cost_flexibility),
+                opt_cost_val(self.propagation_stamp_cost_flexibility),
             ),
             (
                 Value::Str("peering_cost".to_string()),
-                opt_u8_val(self.peering_cost),
+                opt_cost_val(self.peering_cost),
             ),
             (
                 Value::Str("last_sync_attempt".to_string()),
@@ -568,8 +578,8 @@ impl LxmPeer {
         if let Some(pk_val) = map_get(map, "peering_key") {
             if let Some(arr) = pk_val.as_array() {
                 if arr.len() >= 2 {
-                    if let (Some(key_bytes), Some(value)) = (arr[0].as_bin(), arr[1].as_uint()) {
-                        peer.peering_key = Some((key_bytes.to_vec(), value as u32));
+                    if let (Some(key_bytes), Some(value)) = (arr[0].as_bin(), arr[1].as_number()) {
+                        peer.peering_key = Some((key_bytes.to_vec(), StampValue::from_f64(value)));
                     }
                 }
             }
@@ -582,10 +592,10 @@ impl LxmPeer {
         // Limits
         peer.propagation_transfer_limit = map_get_float(map, "propagation_transfer_limit");
         peer.propagation_sync_limit = map_get_uint(map, "propagation_sync_limit");
-        peer.propagation_stamp_cost = map_get_uint(map, "propagation_stamp_cost").map(|v| v as u8);
+        peer.propagation_stamp_cost = map_get_cost(map, "propagation_stamp_cost");
         peer.propagation_stamp_cost_flexibility =
-            map_get_uint(map, "propagation_stamp_cost_flexibility").map(|v| v as u8);
-        peer.peering_cost = map_get_uint(map, "peering_cost").map(|v| v as u8);
+            map_get_cost(map, "propagation_stamp_cost_flexibility");
+        peer.peering_cost = map_get_cost(map, "peering_cost");
 
         // Last sync
         peer.last_sync_attempt = map_get_float(map, "last_sync_attempt").unwrap_or(0.0);
@@ -610,7 +620,7 @@ pub struct OfferEntry {
     pub transient_id: [u8; 32],
     pub weight: f64,
     pub size: usize,
-    pub stamp_value: u32,
+    pub stamp_value: StampValue,
 }
 
 /// Reason why sync was postponed.
@@ -787,9 +797,15 @@ fn opt_uint_val(v: Option<u64>) -> Value {
     }
 }
 
-fn opt_u8_val(v: Option<u8>) -> Value {
+fn opt_cost_val(v: Option<StampCost>) -> Value {
     match v {
-        Some(n) => Value::UInt(n as u64),
+        Some(cost) => Value::Float(cost.as_f64()),
         None => Value::Nil,
     }
+}
+
+/// Read a stored cost, as upstream's `float(dictionary[key])` does: integer
+/// costs written by older versions read back as whole costs.
+fn map_get_cost(map: &[(Value, Value)], key: &str) -> Option<StampCost> {
+    map_get_float(map, key).map(StampCost::from_f64)
 }

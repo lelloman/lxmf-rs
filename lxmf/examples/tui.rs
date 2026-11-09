@@ -336,6 +336,8 @@ fn main() {
         speed: 115200,
         subinterfaces: vec![RNodeSubConfig {
             name: "LoRa".into(),
+            vport: 0,
+            outgoing: true,
             frequency,
             bandwidth: 125000,
             txpower: 14,
@@ -366,6 +368,11 @@ fn main() {
                     config_data: Box::new(rnode_config),
                     mode: rns_core::constants::MODE_FULL,
                     ingress_control: rns_core::transport::types::IngressControlConfig::disabled(),
+                    gravity: 0,
+                    recursive_prs: false,
+                    announces_from_internal: true,
+                    announces_to_internal: None,
+                    stamp_costs: Default::default(),
                     ifac: None,
                     discovery: None,
                 }],
@@ -512,6 +519,7 @@ fn main() {
                                             progress_callback: None,
                                             link_id: None,
                                             packet_hash: None,
+                                            tracking: Default::default(),
                                         });
                                         app.push_log(format!(
                                             "[{}] SEND to={} \"{}\"",

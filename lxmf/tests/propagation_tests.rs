@@ -1,5 +1,10 @@
 use lxmf_core::constants::*;
+use lxmf_core::stamp::StampValue;
 use lxmf_rs::propagation::{ConfigStats, PropagationStore};
+
+fn sv(n: u32) -> StampValue {
+    StampValue::from_whole(n)
+}
 use rns_crypto::sha256::sha256;
 use std::fs;
 use std::path::PathBuf;
@@ -41,7 +46,7 @@ fn test_store_message_basic() {
     let expected_tid = sha256(&lxm_data);
 
     let tid = store
-        .store_message(&lxm_data, Some(&stamp), 16, None)
+        .store_message(&lxm_data, Some(&stamp), sv(16), None)
         .expect("store should succeed");
 
     assert_eq!(tid, expected_tid);
@@ -49,7 +54,7 @@ fn test_store_message_basic() {
 
     let entry = store.entries.get(&tid).unwrap();
     assert_eq!(entry.destination_hash, dest);
-    assert_eq!(entry.stamp_value, 16);
+    assert_eq!(entry.stamp_value, sv(16));
     assert_eq!(entry.size, lxm_data.len() + STAMP_SIZE);
     assert!(entry.has_stamp);
     assert!(entry.filepath.exists());
@@ -70,7 +75,7 @@ fn test_store_message_leaves_no_atomic_temp_file() {
     let dest = [0xAB; 16];
     let lxm_data = make_lxm_data(&dest, b"atomic write payload");
 
-    let tid = store.store_message(&lxm_data, None, 0, None).unwrap();
+    let tid = store.store_message(&lxm_data, None, sv(0), None).unwrap();
     let entry = store.entries.get(&tid).unwrap();
 
     assert!(entry.filepath.exists());
@@ -115,7 +120,7 @@ fn test_store_message_no_stamp() {
     let dest = [0xBB; 16];
     let lxm_data = make_lxm_data(&dest, b"no stamp");
 
-    let tid = store.store_message(&lxm_data, None, 0, None).unwrap();
+    let tid = store.store_message(&lxm_data, None, sv(0), None).unwrap();
     let entry = store.entries.get(&tid).unwrap();
     assert_eq!(entry.size, lxm_data.len());
     assert!(!entry.has_stamp);
@@ -131,10 +136,10 @@ fn test_store_message_duplicate_rejected() {
     let dest = [0xCC; 16];
     let lxm_data = make_lxm_data(&dest, b"unique message");
 
-    let first = store.store_message(&lxm_data, None, 0, None);
+    let first = store.store_message(&lxm_data, None, sv(0), None);
     assert!(first.is_some());
 
-    let second = store.store_message(&lxm_data, None, 0, None);
+    let second = store.store_message(&lxm_data, None, sv(0), None);
     assert!(second.is_none());
     assert_eq!(store.message_count(), 1);
 
@@ -147,7 +152,7 @@ fn test_store_message_too_small() {
     let mut store = PropagationStore::new(dir.clone(), 1024);
 
     let small_data = vec![0u8; LXMF_OVERHEAD - 1];
-    let result = store.store_message(&small_data, None, 0, None);
+    let result = store.store_message(&small_data, None, sv(0), None);
     assert!(result.is_none());
     assert_eq!(store.message_count(), 0);
 
@@ -165,9 +170,9 @@ fn test_store_distribution_queue() {
     let from_peer = [0x01; 16];
 
     let tid1 = store
-        .store_message(&lxm1, None, 0, Some(from_peer))
+        .store_message(&lxm1, None, sv(0), Some(from_peer))
         .unwrap();
-    let tid2 = store.store_message(&lxm2, None, 0, None).unwrap();
+    let tid2 = store.store_message(&lxm2, None, sv(0), None).unwrap();
 
     let queue = store.flush_distribution_queue();
     assert_eq!(queue.len(), 2);
@@ -193,8 +198,12 @@ fn test_scan_messagestore() {
     let lxm2 = make_lxm_data(&dest, b"scan msg 2");
     let stamp = [0x55u8; STAMP_SIZE];
 
-    let tid1 = store.store_message(&lxm1, Some(&stamp), 10, None).unwrap();
-    let tid2 = store.store_message(&lxm2, Some(&stamp), 5, None).unwrap();
+    let tid1 = store
+        .store_message(&lxm1, Some(&stamp), sv(10), None)
+        .unwrap();
+    let tid2 = store
+        .store_message(&lxm2, Some(&stamp), sv(5), None)
+        .unwrap();
 
     // Create a new store and scan
     let mut store2 = PropagationStore::new(dir.clone(), 1024);
@@ -205,13 +214,13 @@ fn test_scan_messagestore() {
 
     let e1 = store2.entries.get(&tid1).unwrap();
     assert_eq!(e1.destination_hash, dest);
-    assert_eq!(e1.stamp_value, 10);
+    assert_eq!(e1.stamp_value, sv(10));
     assert_eq!(e1.size, lxm1.len() + STAMP_SIZE);
     assert!(e1.has_stamp);
 
     let e2 = store2.entries.get(&tid2).unwrap();
     assert_eq!(e2.destination_hash, dest);
-    assert_eq!(e2.stamp_value, 5);
+    assert_eq!(e2.stamp_value, sv(5));
     assert!(e2.has_stamp);
 
     cleanup(&dir);
@@ -245,7 +254,7 @@ fn test_handle_offer_has_all() {
 
     let dest = [0x11; 16];
     let lxm = make_lxm_data(&dest, b"existing");
-    let tid = store.store_message(&lxm, None, 0, None).unwrap();
+    let tid = store.store_message(&lxm, None, sv(0), None).unwrap();
 
     let response = store.handle_offer(&[tid]);
     match response {
@@ -280,7 +289,7 @@ fn test_handle_offer_wants_specific() {
 
     let dest = [0x22; 16];
     let lxm = make_lxm_data(&dest, b"known message");
-    let known_tid = store.store_message(&lxm, None, 0, None).unwrap();
+    let known_tid = store.store_message(&lxm, None, sv(0), None).unwrap();
 
     let unknown_tid = [0xFF; 32];
 
@@ -305,7 +314,9 @@ fn test_handle_get_wants() {
     let lxm = make_lxm_data(&dest, b"serve this message");
     let stamp = [0x77u8; STAMP_SIZE];
 
-    let tid = store.store_message(&lxm, Some(&stamp), 16, None).unwrap();
+    let tid = store
+        .store_message(&lxm, Some(&stamp), sv(16), None)
+        .unwrap();
 
     let messages = store.handle_get_wants(&dest, &[tid], None);
     assert_eq!(messages.len(), 1);
@@ -325,7 +336,7 @@ fn test_handle_get_wants_wrong_dest() {
     let wrong_dest = [0x55; 16];
     let lxm = make_lxm_data(&dest, b"for dest 0x44");
 
-    let tid = store.store_message(&lxm, None, 0, None).unwrap();
+    let tid = store.store_message(&lxm, None, sv(0), None).unwrap();
 
     // Request with wrong destination
     let messages = store.handle_get_wants(&wrong_dest, &[tid], None);
@@ -344,10 +355,10 @@ fn test_handle_get_wants_transfer_limit() {
     let lxm2 = make_lxm_data(&dest, b"message two with some more content here");
 
     let tid1 = store
-        .store_message(&lxm1, Some(&[0u8; STAMP_SIZE]), 8, None)
+        .store_message(&lxm1, Some(&[0u8; STAMP_SIZE]), sv(8), None)
         .unwrap();
     let tid2 = store
-        .store_message(&lxm2, Some(&[0u8; STAMP_SIZE]), 8, None)
+        .store_message(&lxm2, Some(&[0u8; STAMP_SIZE]), sv(8), None)
         .unwrap();
 
     // Set a tight transfer limit that fits only the first message
@@ -367,8 +378,8 @@ fn test_handle_get_haves() {
     let lxm1 = make_lxm_data(&dest, b"msg1 to delete");
     let lxm2 = make_lxm_data(&dest, b"msg2 to keep");
 
-    let tid1 = store.store_message(&lxm1, None, 0, None).unwrap();
-    let _tid2 = store.store_message(&lxm2, None, 0, None).unwrap();
+    let tid1 = store.store_message(&lxm1, None, sv(0), None).unwrap();
+    let _tid2 = store.store_message(&lxm2, None, sv(0), None).unwrap();
 
     assert_eq!(store.message_count(), 2);
 
@@ -388,7 +399,7 @@ fn test_handle_get_haves_wrong_dest() {
     let wrong_dest = [0x88; 16];
     let lxm = make_lxm_data(&dest, b"should not be deleted");
 
-    let tid = store.store_message(&lxm, None, 0, None).unwrap();
+    let tid = store.store_message(&lxm, None, sv(0), None).unwrap();
 
     store.handle_get_haves(&wrong_dest, &[tid]);
     assert_eq!(store.message_count(), 1); // Not deleted
@@ -407,9 +418,9 @@ fn test_list_messages_for_dest() {
     let lxm2 = make_lxm_data(&dest1, b"for dest1 b with more data");
     let lxm3 = make_lxm_data(&dest2, b"for dest2");
 
-    let tid1 = store.store_message(&lxm1, None, 0, None).unwrap();
-    let tid2 = store.store_message(&lxm2, None, 0, None).unwrap();
-    let _tid3 = store.store_message(&lxm3, None, 0, None).unwrap();
+    let tid1 = store.store_message(&lxm1, None, sv(0), None).unwrap();
+    let tid2 = store.store_message(&lxm2, None, sv(0), None).unwrap();
+    let _tid3 = store.store_message(&lxm3, None, sv(0), None).unwrap();
 
     let list = store.list_messages_for_dest(&dest1);
     assert_eq!(list.len(), 2);
@@ -433,7 +444,7 @@ fn test_clean_expired_messages() {
     let dest = [0xCC; 16];
     let lxm = make_lxm_data(&dest, b"will expire");
 
-    let tid = store.store_message(&lxm, None, 0, None).unwrap();
+    let tid = store.store_message(&lxm, None, sv(0), None).unwrap();
 
     // Manually backdate the entry past MESSAGE_EXPIRY
     let entry = store.entries.get_mut(&tid).unwrap();
@@ -453,7 +464,7 @@ fn test_clean_keeps_fresh_messages() {
     let dest = [0xDD; 16];
     let lxm = make_lxm_data(&dest, b"still fresh");
 
-    store.store_message(&lxm, None, 0, None).unwrap();
+    store.store_message(&lxm, None, sv(0), None).unwrap();
 
     store.clean_messagestore(&[]);
     assert_eq!(store.message_count(), 1);
@@ -472,7 +483,7 @@ fn test_clean_weight_culling() {
     for i in 0..20u8 {
         let payload = vec![i; 50];
         let lxm = make_lxm_data(&dest, &payload);
-        store.store_message(&lxm, None, 0, None);
+        store.store_message(&lxm, None, sv(0), None);
     }
 
     let count_before = store.message_count();
@@ -499,11 +510,11 @@ fn test_clean_weight_prioritised() {
     // Store messages for both destinations
     for i in 0..10u8 {
         let lxm = make_lxm_data(&priority_dest, &[i; 50]);
-        store.store_message(&lxm, None, 0, None);
+        store.store_message(&lxm, None, sv(0), None);
     }
     for i in 10..20u8 {
         let lxm = make_lxm_data(&normal_dest, &[i; 50]);
-        store.store_message(&lxm, None, 0, None);
+        store.store_message(&lxm, None, sv(0), None);
     }
 
     // Cull with priority_dest in prioritised list (0.1x weight)
@@ -539,7 +550,7 @@ fn test_peer_tracking() {
 
     let dest = [0xFF; 16];
     let lxm = make_lxm_data(&dest, b"peer tracked msg");
-    let tid = store.store_message(&lxm, None, 0, None).unwrap();
+    let tid = store.store_message(&lxm, None, sv(0), None).unwrap();
 
     let peer1 = [0x01; 16];
     let peer2 = [0x02; 16];
@@ -583,11 +594,11 @@ fn test_storage_size() {
     let lxm1 = make_lxm_data(&dest, b"first");
     let lxm2 = make_lxm_data(&dest, b"second message");
 
-    store.store_message(&lxm1, None, 0, None).unwrap();
+    store.store_message(&lxm1, None, sv(0), None).unwrap();
     let size1 = store.storage_size();
     assert_eq!(size1, lxm1.len());
 
-    store.store_message(&lxm2, None, 0, None).unwrap();
+    store.store_message(&lxm2, None, sv(0), None).unwrap();
     let size2 = store.storage_size();
     assert_eq!(size2, lxm1.len() + lxm2.len());
 
@@ -601,7 +612,7 @@ fn test_compile_stats() {
 
     let dest = [0xCD; 16];
     let lxm = make_lxm_data(&dest, b"stats message");
-    store.store_message(&lxm, None, 0, None).unwrap();
+    store.store_message(&lxm, None, sv(0), None).unwrap();
     store.client_propagation_messages_received = 10;
     store.client_propagation_messages_served = 5;
 
@@ -664,7 +675,7 @@ fn test_filename_format() {
     let lxm = make_lxm_data(&dest, b"filename test");
 
     let tid = store
-        .store_message(&lxm, Some(&[0u8; STAMP_SIZE]), 42, None)
+        .store_message(&lxm, Some(&[0u8; STAMP_SIZE]), sv(42), None)
         .unwrap();
     let entry = store.entries.get(&tid).unwrap();
     let filename = entry
@@ -693,7 +704,7 @@ fn test_filename_format_no_stamp_value() {
     let dest = [0xBB; 16];
     let lxm = make_lxm_data(&dest, b"no stamp value");
 
-    let tid = store.store_message(&lxm, None, 0, None).unwrap();
+    let tid = store.store_message(&lxm, None, sv(0), None).unwrap();
     let entry = store.entries.get(&tid).unwrap();
     let filename = entry
         .filepath
@@ -717,7 +728,7 @@ fn test_handle_get_wants_without_stamp_keeps_payload() {
 
     let dest = [0x34; 16];
     let lxm = make_lxm_data(&dest, b"unstamped payload");
-    let tid = store.store_message(&lxm, None, 0, None).unwrap();
+    let tid = store.store_message(&lxm, None, sv(0), None).unwrap();
 
     let messages = store.handle_get_wants(&dest, &[tid], None);
     assert_eq!(messages.len(), 1);
