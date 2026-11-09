@@ -636,7 +636,13 @@ fn test_delivery_announce_records_compression_unsupported() {
     let mut callbacks = LxmfCallbacks::new(router.clone());
 
     let peer_identity = Identity::new(&mut rns_crypto::OsRng);
-    let dest_hash = [0x42; DESTINATION_LENGTH];
+    // Only lxmf.delivery announces are read, so the destination hash must
+    // belong to the announced identity.
+    let dest_hash = rns_core::destination::destination_hash(
+        APP_NAME,
+        &["delivery"],
+        Some(peer_identity.hash()),
+    );
     let app_data = msgpack::pack(&Value::Array(vec![
         Value::Nil,
         Value::Nil,
@@ -644,7 +650,7 @@ fn test_delivery_announce_records_compression_unsupported() {
     ]));
     callbacks.on_announce(AnnouncedIdentity {
         dest_hash: DestHash(dest_hash),
-        identity_hash: IdentityHash([0x24; DESTINATION_LENGTH]),
+        identity_hash: IdentityHash(*peer_identity.hash()),
         public_key: peer_identity.get_public_key().unwrap(),
         app_data: Some(app_data),
         hops: 0,

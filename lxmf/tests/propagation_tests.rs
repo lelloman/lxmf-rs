@@ -38,7 +38,7 @@ fn make_lxm_data(dest_hash: &[u8; 16], payload: &[u8]) -> Vec<u8> {
 #[test]
 fn test_store_message_basic() {
     let dir = temp_dir("store_basic");
-    let mut store = PropagationStore::new(dir.clone(), 1024);
+    let mut store = PropagationStore::new(dir.clone(), Some(1024 * 1000));
 
     let dest = [0xAA; 16];
     let lxm_data = make_lxm_data(&dest, b"hello world");
@@ -70,7 +70,7 @@ fn test_store_message_basic() {
 #[test]
 fn test_store_message_leaves_no_atomic_temp_file() {
     let dir = temp_dir("store_atomic_cleanup");
-    let mut store = PropagationStore::new(dir.clone(), 1024);
+    let mut store = PropagationStore::new(dir.clone(), Some(1024 * 1000));
 
     let dest = [0xAB; 16];
     let lxm_data = make_lxm_data(&dest, b"atomic write payload");
@@ -104,7 +104,7 @@ fn test_scan_messagestore_ignores_atomic_temp_files() {
     let tmp_filename = format!(".tmp.{}.1.{}_12345_16", std::process::id(), hex_id);
     fs::write(dir.join(tmp_filename), &lxm_data).unwrap();
 
-    let mut store = PropagationStore::new(dir.clone(), 1024);
+    let mut store = PropagationStore::new(dir.clone(), Some(1024 * 1000));
     store.scan_messagestore();
 
     assert_eq!(store.message_count(), 0);
@@ -115,7 +115,7 @@ fn test_scan_messagestore_ignores_atomic_temp_files() {
 #[test]
 fn test_store_message_no_stamp() {
     let dir = temp_dir("store_no_stamp");
-    let mut store = PropagationStore::new(dir.clone(), 1024);
+    let mut store = PropagationStore::new(dir.clone(), Some(1024 * 1000));
 
     let dest = [0xBB; 16];
     let lxm_data = make_lxm_data(&dest, b"no stamp");
@@ -131,7 +131,7 @@ fn test_store_message_no_stamp() {
 #[test]
 fn test_store_message_duplicate_rejected() {
     let dir = temp_dir("store_dup");
-    let mut store = PropagationStore::new(dir.clone(), 1024);
+    let mut store = PropagationStore::new(dir.clone(), Some(1024 * 1000));
 
     let dest = [0xCC; 16];
     let lxm_data = make_lxm_data(&dest, b"unique message");
@@ -149,7 +149,7 @@ fn test_store_message_duplicate_rejected() {
 #[test]
 fn test_store_message_too_small() {
     let dir = temp_dir("store_small");
-    let mut store = PropagationStore::new(dir.clone(), 1024);
+    let mut store = PropagationStore::new(dir.clone(), Some(1024 * 1000));
 
     let small_data = vec![0u8; LXMF_OVERHEAD - 1];
     let result = store.store_message(&small_data, None, sv(0), None);
@@ -162,7 +162,7 @@ fn test_store_message_too_small() {
 #[test]
 fn test_store_distribution_queue() {
     let dir = temp_dir("store_distqueue");
-    let mut store = PropagationStore::new(dir.clone(), 1024);
+    let mut store = PropagationStore::new(dir.clone(), Some(1024 * 1000));
 
     let dest = [0xDD; 16];
     let lxm1 = make_lxm_data(&dest, b"msg1");
@@ -191,7 +191,7 @@ fn test_store_distribution_queue() {
 #[test]
 fn test_scan_messagestore() {
     let dir = temp_dir("scan");
-    let mut store = PropagationStore::new(dir.clone(), 1024);
+    let mut store = PropagationStore::new(dir.clone(), Some(1024 * 1000));
 
     let dest = [0xEE; 16];
     let lxm1 = make_lxm_data(&dest, b"scan msg 1");
@@ -206,7 +206,7 @@ fn test_scan_messagestore() {
         .unwrap();
 
     // Create a new store and scan
-    let mut store2 = PropagationStore::new(dir.clone(), 1024);
+    let mut store2 = PropagationStore::new(dir.clone(), Some(1024 * 1000));
     assert_eq!(store2.message_count(), 0);
 
     store2.scan_messagestore();
@@ -229,7 +229,7 @@ fn test_scan_messagestore() {
 #[test]
 fn test_scan_ignores_invalid_files() {
     let dir = temp_dir("scan_invalid");
-    let mut store = PropagationStore::new(dir.clone(), 1024);
+    let mut store = PropagationStore::new(dir.clone(), Some(1024 * 1000));
 
     // Create invalid files
     fs::write(dir.join("not_a_message.txt"), b"garbage").unwrap();
@@ -250,7 +250,7 @@ fn test_scan_ignores_invalid_files() {
 #[test]
 fn test_handle_offer_has_all() {
     let dir = temp_dir("offer_all");
-    let mut store = PropagationStore::new(dir.clone(), 1024);
+    let mut store = PropagationStore::new(dir.clone(), Some(1024 * 1000));
 
     let dest = [0x11; 16];
     let lxm = make_lxm_data(&dest, b"existing");
@@ -268,7 +268,7 @@ fn test_handle_offer_has_all() {
 #[test]
 fn test_handle_offer_wants_all() {
     let dir = temp_dir("offer_want_all");
-    let store = PropagationStore::new(dir.clone(), 1024);
+    let store = PropagationStore::new(dir.clone(), Some(1024 * 1000));
 
     let unknown1 = [0x11; 32];
     let unknown2 = [0x22; 32];
@@ -285,7 +285,7 @@ fn test_handle_offer_wants_all() {
 #[test]
 fn test_handle_offer_wants_specific() {
     let dir = temp_dir("offer_specific");
-    let mut store = PropagationStore::new(dir.clone(), 1024);
+    let mut store = PropagationStore::new(dir.clone(), Some(1024 * 1000));
 
     let dest = [0x22; 16];
     let lxm = make_lxm_data(&dest, b"known message");
@@ -308,7 +308,7 @@ fn test_handle_offer_wants_specific() {
 #[test]
 fn test_handle_get_wants() {
     let dir = temp_dir("get_wants");
-    let mut store = PropagationStore::new(dir.clone(), 1024);
+    let mut store = PropagationStore::new(dir.clone(), Some(1024 * 1000));
 
     let dest = [0x33; 16];
     let lxm = make_lxm_data(&dest, b"serve this message");
@@ -330,7 +330,7 @@ fn test_handle_get_wants() {
 #[test]
 fn test_handle_get_wants_wrong_dest() {
     let dir = temp_dir("get_wrong_dest");
-    let mut store = PropagationStore::new(dir.clone(), 1024);
+    let mut store = PropagationStore::new(dir.clone(), Some(1024 * 1000));
 
     let dest = [0x44; 16];
     let wrong_dest = [0x55; 16];
@@ -348,7 +348,7 @@ fn test_handle_get_wants_wrong_dest() {
 #[test]
 fn test_handle_get_wants_transfer_limit() {
     let dir = temp_dir("get_limit");
-    let mut store = PropagationStore::new(dir.clone(), 1024);
+    let mut store = PropagationStore::new(dir.clone(), Some(1024 * 1000));
 
     let dest = [0x55; 16];
     let lxm1 = make_lxm_data(&dest, b"message one with some content");
@@ -372,7 +372,7 @@ fn test_handle_get_wants_transfer_limit() {
 #[test]
 fn test_handle_get_haves() {
     let dir = temp_dir("get_haves");
-    let mut store = PropagationStore::new(dir.clone(), 1024);
+    let mut store = PropagationStore::new(dir.clone(), Some(1024 * 1000));
 
     let dest = [0x66; 16];
     let lxm1 = make_lxm_data(&dest, b"msg1 to delete");
@@ -393,7 +393,7 @@ fn test_handle_get_haves() {
 #[test]
 fn test_handle_get_haves_wrong_dest() {
     let dir = temp_dir("haves_wrong_dest");
-    let mut store = PropagationStore::new(dir.clone(), 1024);
+    let mut store = PropagationStore::new(dir.clone(), Some(1024 * 1000));
 
     let dest = [0x77; 16];
     let wrong_dest = [0x88; 16];
@@ -410,7 +410,7 @@ fn test_handle_get_haves_wrong_dest() {
 #[test]
 fn test_list_messages_for_dest() {
     let dir = temp_dir("list_dest");
-    let mut store = PropagationStore::new(dir.clone(), 1024);
+    let mut store = PropagationStore::new(dir.clone(), Some(1024 * 1000));
 
     let dest1 = [0xAA; 16];
     let dest2 = [0xBB; 16];
@@ -439,7 +439,7 @@ fn test_list_messages_for_dest() {
 #[test]
 fn test_clean_expired_messages() {
     let dir = temp_dir("clean_expired");
-    let mut store = PropagationStore::new(dir.clone(), 1024 * 1024);
+    let mut store = PropagationStore::new(dir.clone(), Some(1024 * 1024 * 1000));
 
     let dest = [0xCC; 16];
     let lxm = make_lxm_data(&dest, b"will expire");
@@ -459,7 +459,7 @@ fn test_clean_expired_messages() {
 #[test]
 fn test_clean_keeps_fresh_messages() {
     let dir = temp_dir("clean_fresh");
-    let mut store = PropagationStore::new(dir.clone(), 1024 * 1024);
+    let mut store = PropagationStore::new(dir.clone(), Some(1024 * 1024 * 1000));
 
     let dest = [0xDD; 16];
     let lxm = make_lxm_data(&dest, b"still fresh");
@@ -476,7 +476,7 @@ fn test_clean_keeps_fresh_messages() {
 fn test_clean_weight_culling() {
     // Use a very small storage limit to trigger culling
     let dir = temp_dir("clean_cull");
-    let mut store = PropagationStore::new(dir.clone(), 1); // 1 KB = 1000 bytes
+    let mut store = PropagationStore::new(dir.clone(), Some(1 * 1000)); // 1 KB = 1000 bytes
 
     let dest = [0xEE; 16];
     // Each message is ~112 bytes + payload, store several to exceed 1000 bytes
@@ -502,7 +502,7 @@ fn test_clean_weight_culling() {
 #[test]
 fn test_clean_weight_prioritised() {
     let dir = temp_dir("clean_priority");
-    let mut store = PropagationStore::new(dir.clone(), 1); // 1 KB limit
+    let mut store = PropagationStore::new(dir.clone(), Some(1 * 1000)); // 1 KB limit
 
     let priority_dest = [0x11; 16];
     let normal_dest = [0x22; 16];
@@ -546,7 +546,7 @@ fn test_clean_weight_prioritised() {
 #[test]
 fn test_peer_tracking() {
     let dir = temp_dir("peer_track");
-    let mut store = PropagationStore::new(dir.clone(), 1024);
+    let mut store = PropagationStore::new(dir.clone(), Some(1024 * 1000));
 
     let dest = [0xFF; 16];
     let lxm = make_lxm_data(&dest, b"peer tracked msg");
@@ -586,7 +586,7 @@ fn test_peer_tracking() {
 #[test]
 fn test_storage_size() {
     let dir = temp_dir("storage_size");
-    let mut store = PropagationStore::new(dir.clone(), 1024);
+    let mut store = PropagationStore::new(dir.clone(), Some(1024 * 1000));
 
     assert_eq!(store.storage_size(), 0);
 
@@ -608,7 +608,7 @@ fn test_storage_size() {
 #[test]
 fn test_compile_stats() {
     let dir = temp_dir("stats");
-    let mut store = PropagationStore::new(dir.clone(), 1024);
+    let mut store = PropagationStore::new(dir.clone(), Some(1024 * 1000));
 
     let dest = [0xCD; 16];
     let lxm = make_lxm_data(&dest, b"stats message");
@@ -669,7 +669,7 @@ fn test_compile_stats() {
 #[test]
 fn test_filename_format() {
     let dir = temp_dir("filename");
-    let mut store = PropagationStore::new(dir.clone(), 1024);
+    let mut store = PropagationStore::new(dir.clone(), Some(1024 * 1000));
 
     let dest = [0xAA; 16];
     let lxm = make_lxm_data(&dest, b"filename test");
@@ -699,7 +699,7 @@ fn test_filename_format() {
 #[test]
 fn test_filename_format_no_stamp_value() {
     let dir = temp_dir("filename_no_sv");
-    let mut store = PropagationStore::new(dir.clone(), 1024);
+    let mut store = PropagationStore::new(dir.clone(), Some(1024 * 1000));
 
     let dest = [0xBB; 16];
     let lxm = make_lxm_data(&dest, b"no stamp value");
@@ -724,7 +724,7 @@ fn test_filename_format_no_stamp_value() {
 #[test]
 fn test_handle_get_wants_without_stamp_keeps_payload() {
     let dir = temp_dir("get_wants_no_stamp");
-    let mut store = PropagationStore::new(dir.clone(), 1024);
+    let mut store = PropagationStore::new(dir.clone(), Some(1024 * 1000));
 
     let dest = [0x34; 16];
     let lxm = make_lxm_data(&dest, b"unstamped payload");

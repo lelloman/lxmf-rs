@@ -316,6 +316,9 @@ pub struct RouterConfig {
     /// How long a peer delivering messages with invalid stamps is throttled,
     /// in seconds (`pn_stamp_throttle`).
     pub pn_stamp_throttle: f64,
+    /// Propagation message store size limit in bytes; `None` for no limit
+    /// (`set_message_storage_limit`).
+    pub message_storage_limit: Option<usize>,
 }
 
 impl Default for RouterConfig {
@@ -342,6 +345,7 @@ impl Default for RouterConfig {
             static_sequential: STATIC_SEQUENTIAL,
             name: None,
             pn_stamp_throttle: PN_STAMP_THROTTLE as f64,
+            message_storage_limit: None,
         }
     }
 }
@@ -468,7 +472,7 @@ impl LxmRouter {
         let locally_processed_transient_ids = storage::load_transient_ids(&paths.locally_processed);
         let outbound_stamp_costs = storage::load_stamp_costs(&paths.outbound_stamp_costs);
         let mut propagation_store =
-            PropagationStore::new(paths.messagestore.clone(), config.propagation_limit);
+            PropagationStore::new(paths.messagestore.clone(), config.message_storage_limit);
         propagation_store.scan_messagestore();
 
         // Load peers from storage
@@ -1120,7 +1124,33 @@ impl LxmRouter {
     /// Used by the alternative relay fallback to re-target propagated delivery
     /// at a different propagation node.
     pub fn set_propagation_dest_hash(&mut self, dest_hash: [u8; 16]) {
+        self.set_outbound_propagation_node(dest_hash);
+    }
+
+    /// Set the outbound propagation node (`set_outbound_propagation_node`).
+    /// A link to a previous node is torn down so queued propagated messages
+    /// go to the new one.
+    pub fn set_outbound_propagation_node(&mut self, dest_hash: [u8; 16]) {
+        if self.outbound_propagation_node == Some(dest_hash) {
+            return;
+        }
         self.outbound_propagation_node = Some(dest_hash);
+        if let Some(link_id) = self.propagation_link.take() {
+            if let Some(node) = &self.node {
+                let _ = node.teardown_link(link_id);
+            }
+        }
+        for msg in &mut self.outbound {
+            if msg.method == DeliveryMethod::Propagated && msg.state == MessageState::Sending {
+                msg.state = MessageState::Outbound;
+                msg.link_id = None;
+            }
+        }
+    }
+
+    /// The outbound propagation node, if set (`get_outbound_propagation_node`).
+    pub fn outbound_propagation_node(&self) -> Option<[u8; 16]> {
+        self.outbound_propagation_node
     }
 
     pub fn reset_propagation_transfer_progress(&mut self) {
@@ -1856,6 +1886,19 @@ impl LxmRouter {
         }
 
         if self.ignored_list.contains(&result.source_hash) {
+            return;
+        }
+
+        // Only messages for our delivery destination are delivered
+        // (upstream looks the destination up and drops unknown ones).
+        if self
+            .delivery_dest_hash
+            .is_some_and(|dest| dest != result.destination_hash)
+        {
+            log::debug!(
+                "Dropping LXM for unknown destination {:02x?}",
+                &result.destination_hash[..4]
+            );
             return;
         }
 
@@ -3091,7 +3134,15 @@ impl Callbacks for LxmfCallbacks {
             router.outbound_propagation_node == Some(dest_hash)
                 && router.wake_messages_awaiting_path(&dest_hash)
         } else {
-            if let Some(app_data) = announced.app_data.as_deref() {
+            // Stamp costs and supported functionality are only read from
+            // lxmf.delivery announces (LXMFDeliveryAnnounceHandler).
+            let is_delivery_announce =
+                compute_dest_hash(APP_NAME, &["delivery"], &announced.identity_hash.0) == dest_hash;
+            if let Some(app_data) = announced
+                .app_data
+                .as_deref()
+                .filter(|_| is_delivery_announce)
+            {
                 if let Some(supports_compression) =
                     announce::compression_support_from_app_data(app_data)
                 {

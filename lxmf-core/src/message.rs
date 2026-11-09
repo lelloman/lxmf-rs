@@ -174,9 +174,16 @@ pub fn unpack(data: &[u8], verify_fn: Option<&VerifyFn<'_>>) -> Result<UnpackRes
         None
     };
 
-    // Re-pack 4-element payload for hash/signature verification
-    let payload_4 = Value::Array(payload_arr[..4].to_vec());
-    let packed_payload_no_stamp = msgpack::pack(&payload_4);
+    // Hash and verify over the payload as sent. Only a stamped payload is
+    // re-encoded without its stamp (`unpack_from_bytes`), so senders whose
+    // encoding differs from ours (e.g. float32 timestamps) still verify.
+    let repacked;
+    let packed_payload_no_stamp: &[u8] = if payload_arr.len() > 4 {
+        repacked = msgpack::pack(&Value::Array(payload_arr[..4].to_vec()));
+        &repacked
+    } else {
+        payload_bytes
+    };
 
     // Compute message hash
     let message_hash = compute_hash(&dest_hash, &src_hash, &packed_payload_no_stamp);

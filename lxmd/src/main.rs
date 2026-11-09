@@ -896,6 +896,7 @@ fn build_router_config(config: &LxmdConfig, paths: &LxmdPaths) -> RouterConfig {
         static_sequential: !config.static_peers_bypass_sequential,
         name: config.node_name.clone(),
         pn_stamp_throttle: config.propagation_stamp_throttle,
+        message_storage_limit: Some((config.message_storage_limit * 1_000_000.0) as usize),
     }
 }
 
@@ -1521,6 +1522,7 @@ fn main() {
     router.ignored_list = ignored;
     router.allowed_list = allowed;
     router.control_allowed_list = config.control_allowed.clone();
+    router.prioritised_list = config.prioritise_destinations.clone();
 
     let message_dir = paths.messagedir.clone();
     let on_inbound = config.on_inbound.clone();

@@ -33,7 +33,9 @@ struct DistributionEntry {
 pub struct PropagationStore {
     pub entries: HashMap<[u8; 32], PropagationEntry>,
     pub messagepath: PathBuf,
-    pub storage_limit: usize,
+    /// Message store size limit in bytes (`message_storage_limit`); `None`
+    /// keeps everything until it expires.
+    pub storage_limit: Option<usize>,
     distribution_queue: VecDeque<DistributionEntry>,
 
     // Statistics
@@ -44,12 +46,12 @@ pub struct PropagationStore {
 }
 
 impl PropagationStore {
-    pub fn new(messagepath: PathBuf, storage_limit_kb: u32) -> Self {
+    pub fn new(messagepath: PathBuf, storage_limit: Option<usize>) -> Self {
         let _ = fs::create_dir_all(&messagepath);
         Self {
             entries: HashMap::new(),
             messagepath,
-            storage_limit: storage_limit_kb as usize * 1000,
+            storage_limit,
             distribution_queue: VecDeque::new(),
             client_propagation_messages_received: 0,
             client_propagation_messages_served: 0,
@@ -250,8 +252,11 @@ impl PropagationStore {
         }
 
         // Phase 2: Weight-based culling
-        if self.storage_size() > self.storage_limit {
-            let bytes_needed = self.storage_size() - self.storage_limit;
+        if let Some(limit) = self
+            .storage_limit
+            .filter(|limit| self.storage_size() > *limit)
+        {
+            let bytes_needed = self.storage_size() - limit;
             let mut weighted: Vec<([u8; 32], f64, usize)> = self
                 .entries
                 .iter()
@@ -473,7 +478,8 @@ impl PropagationStore {
                     ),
                     (
                         Value::Str("limit".to_string()),
-                        Value::UInt(self.storage_limit as u64),
+                        self.storage_limit
+                            .map_or(Value::Nil, |limit| Value::UInt(limit as u64)),
                     ),
                 ]),
             ),
