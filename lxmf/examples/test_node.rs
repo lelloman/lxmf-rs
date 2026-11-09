@@ -40,9 +40,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use lxmf_core::constants::{
-    DeliveryMethod, MessageState, Representation, APP_NAME, DESTINATION_LENGTH,
-};
+use lxmf_core::constants::{DeliveryMethod, APP_NAME, DESTINATION_LENGTH};
 use lxmf_core::message;
 use lxmf_rs::router::{LxmDelivery, LxmRouter, LxmfCallbacks, OutboundMessage, RouterConfig};
 use rns_core::msgpack;
@@ -191,6 +189,49 @@ struct AppCallbacks {
 }
 
 impl Callbacks for AppCallbacks {
+    // Forward everything the router handles; callbacks left to their
+    // defaults would, for example, refuse every incoming resource.
+    fn on_resource_accept_query(
+        &mut self,
+        link_id: LinkId,
+        resource_hash: Vec<u8>,
+        transfer_size: u64,
+        has_metadata: bool,
+    ) -> bool {
+        self.inner
+            .on_resource_accept_query(link_id, resource_hash, transfer_size, has_metadata)
+    }
+
+    fn on_resource_accept_query_with_app_flag(
+        &mut self,
+        link_id: LinkId,
+        resource_hash: Vec<u8>,
+        transfer_size: u64,
+        has_metadata: bool,
+        app_flag: bool,
+    ) -> bool {
+        self.inner.on_resource_accept_query_with_app_flag(
+            link_id,
+            resource_hash,
+            transfer_size,
+            has_metadata,
+            app_flag,
+        )
+    }
+
+    fn on_resource_progress(&mut self, link_id: LinkId, received: usize, total: usize) {
+        self.inner.on_resource_progress(link_id, received, total);
+    }
+
+    fn on_request_failed(
+        &mut self,
+        link_id: LinkId,
+        request_id: [u8; 16],
+        reason: rns_net::link_manager::RequestFailure,
+    ) {
+        self.inner.on_request_failed(link_id, request_id, reason);
+    }
+
     fn on_announce(&mut self, announced: AnnouncedIdentity) {
         if let Ok(mut state) = self.state.lock() {
             state.announces.push(AnnounceRecord {
@@ -960,28 +1001,17 @@ fn handle_post(
 
             let mut router = ctx.router.lock().unwrap();
             router
-                .handle_outbound(OutboundMessage {
-                    destination_hash: dest_hash,
-                    source_hash: ctx.source_hash,
-                    packed: packed.packed,
-                    message_hash,
-                    method,
-                    state: MessageState::Outbound,
-                    representation: Representation::Unknown,
-                    attempts: 0,
-                    last_attempt: 0.0,
-                    stamp: None,
-                    stamp_cost: None,
-                    propagation_packed,
-                    propagation_stamp: None,
-                    transient_id,
-                    delivery_callback: None,
-                    failed_callback: None,
-                    progress_callback: None,
-                    link_id: None,
-                    packet_hash: None,
-                    tracking: Default::default(),
-                    include_ticket: false,
+                .handle_outbound({
+                    let mut msg = OutboundMessage::new(
+                        dest_hash,
+                        ctx.source_hash,
+                        packed.packed,
+                        message_hash,
+                        method,
+                    );
+                    msg.propagation_packed = propagation_packed;
+                    msg.transient_id = transient_id;
+                    msg
                 })
                 .map_err(|e| e.to_string())?;
             router.jobs();

@@ -1067,29 +1067,13 @@ fn test_direct_delivery_via_link() {
     // Queue as OutboundMessage with Direct method
     {
         let mut r = peers.alice.router.lock().unwrap();
-        let msg = OutboundMessage {
-            destination_hash: peers.bob.delivery_dest_hash,
-            source_hash: alice_src_hash,
-            packed: pack_result.packed,
-            message_hash: pack_result.message_hash,
-            method: DeliveryMethod::Direct,
-            state: MessageState::Outbound,
-            representation: Representation::Unknown,
-            attempts: 0,
-            last_attempt: 0.0,
-            stamp: None,
-            stamp_cost: None,
-            propagation_packed: None,
-            propagation_stamp: None,
-            transient_id: None,
-            delivery_callback: None,
-            failed_callback: None,
-            progress_callback: None,
-            link_id: None,
-            packet_hash: None,
-            tracking: Default::default(),
-            include_ticket: false,
-        };
+        let msg = OutboundMessage::new(
+            peers.bob.delivery_dest_hash,
+            alice_src_hash,
+            pack_result.packed,
+            pack_result.message_hash,
+            DeliveryMethod::Direct,
+        );
         r.handle_outbound(msg).unwrap();
     }
 

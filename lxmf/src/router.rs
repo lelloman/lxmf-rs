@@ -4058,11 +4058,28 @@ fn send_propagated_on_link<N: OutboundNetwork + ?Sized>(
 /// The router is wrapped in Arc<Mutex<>> for thread-safe access.
 pub struct LxmfCallbacks {
     router: Arc<Mutex<LxmRouter>>,
+    announce_handler: Option<AnnounceHandler>,
 }
+
+/// Observer for every announce the node receives.
+pub type AnnounceHandler = Box<dyn FnMut(&AnnouncedIdentity) + Send>;
 
 impl LxmfCallbacks {
     pub fn new(router: Arc<Mutex<LxmRouter>>) -> Self {
-        Self { router }
+        Self {
+            router,
+            announce_handler: None,
+        }
+    }
+
+    /// Callbacks that also hand every received announce to `handler`
+    /// (before the router processes it), so applications can observe
+    /// announces without wrapping the callbacks.
+    pub fn with_announce_handler(router: Arc<Mutex<LxmRouter>>, handler: AnnounceHandler) -> Self {
+        Self {
+            router,
+            announce_handler: Some(handler),
+        }
     }
 
     fn spawn_lxmf_delivery(
@@ -4237,6 +4254,9 @@ impl LxmRouter {
 
 impl Callbacks for LxmfCallbacks {
     fn on_announce(&mut self, announced: AnnouncedIdentity) {
+        if let Some(handler) = &mut self.announce_handler {
+            handler(&announced);
+        }
         let mut router = self.router.lock().unwrap();
         let dest_hash = announced.dest_hash.0;
 
