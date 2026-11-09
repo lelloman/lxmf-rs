@@ -425,10 +425,16 @@ impl LxmPeer {
         self.last_heard > 0.0 && (now - self.last_heard) > MAX_UNREACHABLE as f64
     }
 
-    /// Acceptance rate: proportion of offered messages that were accepted.
+    /// Node name from the peer's announce metadata (`PN_META_NAME`).
+    pub fn name(&self) -> Option<String> {
+        lxmf_core::announce::pn_metadata_name(self.metadata.as_deref()?)
+    }
+
+    /// Acceptance rate: proportion of offered messages that were accepted
+    /// (0 before anything was offered, as upstream).
     pub fn acceptance_rate(&self) -> f64 {
         if self.offered == 0 {
-            return 1.0; // Assume good for new peers
+            return 0.0;
         }
         self.outgoing as f64 / self.offered as f64
     }
