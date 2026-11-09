@@ -52,6 +52,7 @@ Status: `open`, `done` (with the commit), or `blocked` (with the reason).
 | `disable_propagation` keeps peers | done (`f68d899`) |
 | Propagation node announced on enable after `NODE_ANNOUNCE_DELAY` | done (`f68d899`) |
 | Path responses do not trigger auto-peering | blocked: `rns-net` does not flag path responses |
+| Remote control of a Rust daemon whose control destination was never announced | blocked: `rns-net` cannot answer path requests for unannounced local destinations |
 
 ## lxmd
 

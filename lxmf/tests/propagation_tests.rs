@@ -1,6 +1,6 @@
 use lxmf_core::constants::*;
 use lxmf_core::stamp::StampValue;
-use lxmf_rs::propagation::{ConfigStats, PropagationStore};
+use lxmf_rs::propagation::PropagationStore;
 
 fn sv(n: u32) -> StampValue {
     StampValue::from_whole(n)
@@ -601,67 +601,6 @@ fn test_storage_size() {
     store.store_message(&lxm2, None, sv(0), None).unwrap();
     let size2 = store.storage_size();
     assert_eq!(size2, lxm1.len() + lxm2.len());
-
-    cleanup(&dir);
-}
-
-#[test]
-fn test_compile_stats() {
-    let dir = temp_dir("stats");
-    let mut store = PropagationStore::new(dir.clone(), Some(1024 * 1000));
-
-    let dest = [0xCD; 16];
-    let lxm = make_lxm_data(&dest, b"stats message");
-    store.store_message(&lxm, None, sv(0), None).unwrap();
-    store.client_propagation_messages_received = 10;
-    store.client_propagation_messages_served = 5;
-
-    let identity_hash = [0x11; 16];
-    let prop_dest_hash = [0x22; 16];
-    let start_time = lxmf_rs::router::now_timestamp() - 3600.0;
-
-    let config = ConfigStats {
-        delivery_limit: 256.0,
-        propagation_limit: 512,
-        sync_limit: 10240,
-        propagation_cost: 16,
-        propagation_cost_flexibility: 3,
-        peering_cost: 18,
-        max_peering_cost: 22,
-        total_peers: 5,
-        max_peers: 20,
-    };
-
-    let stats = store.compile_stats(&identity_hash, &prop_dest_hash, start_time, &config, vec![]);
-
-    // Verify it's a map with expected keys
-    let map = stats.as_map().unwrap();
-    let keys: Vec<&str> = map.iter().filter_map(|(k, _)| k.as_str()).collect();
-
-    assert!(keys.contains(&"identity_hash"));
-    assert!(keys.contains(&"destination_hash"));
-    assert!(keys.contains(&"uptime"));
-    assert!(keys.contains(&"messagestore"));
-    assert!(keys.contains(&"clients"));
-    assert!(keys.contains(&"peers"));
-    assert!(keys.contains(&"target_stamp_cost"));
-
-    // Check messagestore sub-map
-    let ms = map
-        .iter()
-        .find(|(k, _)| k.as_str() == Some("messagestore"))
-        .unwrap()
-        .1
-        .as_map()
-        .unwrap();
-    let count = ms
-        .iter()
-        .find(|(k, _)| k.as_str() == Some("count"))
-        .unwrap()
-        .1
-        .as_uint()
-        .unwrap();
-    assert_eq!(count, 1);
 
     cleanup(&dir);
 }

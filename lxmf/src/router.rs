@@ -1388,20 +1388,6 @@ impl LxmRouter {
         }
     }
 
-    /// Announce the propagation control destination.
-    pub fn announce_control_destination(&self) {
-        if let Some(node) = &self.node {
-            let dest = Destination::single_in(
-                APP_NAME,
-                &["propagation", "control"],
-                IdentityHash(*self.identity.hash()),
-            );
-            if let Err(err) = node.announce_queued(&dest, &self.identity, None) {
-                log::warn!("Failed to queue control destination announce: {:?}", err);
-            }
-        }
-    }
-
     /// Build delivery announce app_data (LXMF 1.3 format).
     pub fn build_delivery_announce_data(&self) -> Vec<u8> {
         announce::build_delivery_announce_data(

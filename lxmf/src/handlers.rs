@@ -1,28 +1,6 @@
 use lxmf_core::announce;
 use lxmf_core::stamp::StampCost;
 
-/// Result of processing a delivery announce.
-pub struct DeliveryAnnounceResult {
-    pub destination_hash: [u8; 16],
-    pub stamp_cost: Option<StampCost>,
-}
-
-/// Process a delivery announce event.
-///
-/// Extracts the stamp cost from app_data and returns it for the router
-/// to update its stamp cost cache and trigger outbound processing.
-pub fn handle_delivery_announce(
-    destination_hash: [u8; 16],
-    app_data: Option<&[u8]>,
-) -> DeliveryAnnounceResult {
-    let stamp_cost = app_data.and_then(announce::stamp_cost_from_app_data);
-
-    DeliveryAnnounceResult {
-        destination_hash,
-        stamp_cost,
-    }
-}
-
 /// Result of processing a propagation node announce.
 pub enum PropagationAnnounceResult {
     /// Peer the node with the given parameters.

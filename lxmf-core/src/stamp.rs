@@ -41,12 +41,6 @@ pub fn format_py_float(value: f64) -> String {
     }
 }
 
-/// A stamp cost or value formatted as `RNS.prettycost` does: quantized onto
-/// the cost grid with three decimals.
-pub fn rns_pretty_cost(value: f64) -> String {
-    alloc::format!("{:.3}", StampCost::from_f64(value).as_f64())
-}
-
 /// The minimum stamp cost a propagation node accepts from clients:
 /// `max(0, target - flexibility)`.
 pub fn min_accepted_cost(target: StampCost, flexibility: StampCost) -> StampCost {
