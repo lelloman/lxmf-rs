@@ -49,6 +49,9 @@ pub struct DeliveryTracking {
     pub link_closed: Option<bool>,
     /// Delivery progress, 0.0 to 1.0.
     pub progress: f64,
+    /// When stamp generation was queued, for timing out on missing
+    /// recipient keys or propagation node costs.
+    pub generation_started: Option<f64>,
 }
 
 /// A send was not admitted by the transport.

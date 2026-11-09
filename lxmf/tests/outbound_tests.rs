@@ -312,6 +312,7 @@ fn propagated_resources_carry_the_app_flag() {
 
     let mut msg = message(DeliveryMethod::Propagated, 600);
     msg.propagation_packed = Some(vec![0u8; LINK_PACKET_MAX_CONTENT + 1]);
+    msg.propagation_stamp = Some(vec![0u8; STAMP_SIZE]);
     router.handle_outbound(msg).unwrap();
     assert_eq!(router.outbound[0].representation, Representation::Resource);
 
@@ -335,6 +336,7 @@ fn small_propagated_message_is_sent_as_link_packet() {
 
     let mut msg = message(DeliveryMethod::Propagated, 200);
     msg.propagation_packed = Some(vec![0u8; LINK_PACKET_MAX_CONTENT]);
+    msg.propagation_stamp = Some(vec![0u8; STAMP_SIZE]);
     router.handle_outbound(msg).unwrap();
     router.process_outbound_with(&network);
 
@@ -432,5 +434,93 @@ fn closed_link_requests_path_and_reschedules() {
 
     assert_eq!(*network.path_requests.lock().unwrap(), vec![DEST]);
     assert!(router.outbound[0].tracking.link_closed.is_none());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+fn signed_message(cost: Option<f64>) -> (OutboundMessage, Identity) {
+    let identity = Identity::new(&mut rns_crypto::OsRng);
+    let packed = lxmf_core::message::pack(
+        &DEST,
+        &[0x50; 16],
+        1_700_000_000.0,
+        b"title",
+        b"content",
+        vec![],
+        None,
+        |data| {
+            identity
+                .sign(data)
+                .map_err(|_| lxmf_core::message::Error::SignError)
+        },
+    )
+    .unwrap();
+    let mut msg = OutboundMessage::new(
+        DEST,
+        [0x50; 16],
+        packed.packed,
+        packed.message_hash,
+        DeliveryMethod::Opportunistic,
+    );
+    msg.stamp_cost = cost.map(lxmf_core::stamp::StampCost::from_f64);
+    (msg, identity)
+}
+
+#[test]
+fn messages_with_a_stamp_cost_are_stamped_before_sending() {
+    let (mut router, dir) = test_router("stamp_generation");
+    let network = MockNetwork::with_path(DEST);
+    let (msg, identity) = signed_message(Some(4.5));
+    router.handle_outbound(msg).unwrap();
+    assert_eq!(router.outbound[0].state, MessageState::Generating);
+
+    router.process_outbound_with(&network);
+    assert!(
+        network.opportunistic.lock().unwrap().is_empty(),
+        "not sent unstamped"
+    );
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while router.outbound[0].state == MessageState::Generating {
+        assert!(std::time::Instant::now() < deadline, "stamp not generated");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        router.process_outbound_with(&network);
+    }
+    assert_eq!(network.opportunistic.lock().unwrap().len(), 1);
+
+    // The stamped message still verifies, and its stamp meets the cost.
+    let msg = &router.outbound[0];
+    let public_key = identity.get_public_key().unwrap();
+    let verifier = Identity::from_public_key(&public_key).unwrap();
+    let unpacked = lxmf_core::message::unpack(
+        &msg.packed,
+        Some(&|_src: &[u8; 16], sig: &[u8; 64], data: &[u8]| verifier.verify(sig, data)),
+    )
+    .unwrap();
+    assert_eq!(unpacked.signature_valid, Some(true));
+    let stamp = unpacked.stamp.expect("stamp attached");
+    let workblock = lxmf_core::stamp::stamp_workblock(&msg.message_hash, WORKBLOCK_EXPAND_ROUNDS);
+    assert!(lxmf_core::stamp::stamp_valid(
+        &stamp,
+        lxmf_core::stamp::StampCost::from_f64(4.5),
+        &workblock
+    ));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn cancelling_a_generating_message_fails_it() {
+    let (mut router, dir) = test_router("cancel_generation");
+    let network = MockNetwork::with_path(DEST);
+    let (mut msg, _) = signed_message(Some(40.0));
+    let failed = counting_failed_callback(&mut msg);
+    let hash = msg.message_hash;
+    router.handle_outbound(msg).unwrap();
+    router.process_outbound_with(&network);
+
+    assert!(router.cancel_outbound(&hash));
+    router.process_outbound_with(&network);
+    assert!(router.outbound.is_empty());
+    assert_eq!(failed.load(Ordering::SeqCst), 1);
+    assert!(!router.cancel_outbound(&hash));
     let _ = std::fs::remove_dir_all(dir);
 }
