@@ -194,6 +194,8 @@ pub struct LxmDelivery {
     pub fields: Vec<(Value, Value)>,
     pub message_hash: [u8; 32],
     pub signature_valid: Option<bool>,
+    /// Why the signature could not be verified, when it was not.
+    pub unverified_reason: Option<UnverifiedReason>,
     pub stamp: Option<Vec<u8>>,
     /// Whether the stamp met the delivery destination's cost; `None` when no
     /// cost is set and the stamp was not checked.
@@ -206,6 +208,23 @@ pub struct LxmDelivery {
     /// The packed message as received (`LXMessage.packed`), e.g. for
     /// writing it to disk the way `write_to_directory` does.
     pub lxmf_bytes: Vec<u8>,
+}
+
+/// Per-delivery overrides used for paper messages (`lxmf_delivery`).
+#[derive(Debug, Clone, Copy, Default)]
+struct DeliveryOptions {
+    no_stamp_enforcement: bool,
+    allow_duplicate: bool,
+}
+
+/// Why an inbound message's signature was not verified
+/// (`LXMessage.unverified_reason`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnverifiedReason {
+    /// The sender's identity is not known.
+    SourceUnknown = 0x01,
+    /// The signature does not match the sender's identity.
+    SignatureInvalid = 0x02,
 }
 
 /// An outbound message queued for delivery.
@@ -448,7 +467,13 @@ pub struct LxmRouter {
     pub exit_handler_running: bool,
 
     // Delivery callback
-    pub delivery_callback: Option<DeliveryCallback>,
+    /// Behind its own lock so it can be called without the router locked.
+    pub delivery_callback: Option<Arc<Mutex<DeliveryCallback>>>,
+    /// Deliveries collected while the router lock is held, for the caller to
+    /// fire after releasing it (see `LxmfCallbacks::deliver_unlocked`).
+    deferred_deliveries: Option<Vec<LxmDelivery>>,
+    /// Outbound direct links we identified on for replies (backchannel).
+    backchannel_identified: HashSet<[u8; 16]>,
 
     // Access control
     pub auth_required: bool,
@@ -576,6 +601,8 @@ impl LxmRouter {
             processing_count: 0,
             exit_handler_running: false,
             delivery_callback: None,
+            deferred_deliveries: None,
+            backchannel_identified: HashSet::new(),
             auth_required: false,
             allowed_list: Vec::new(),
             ignored_list: Vec::new(),
@@ -1152,7 +1179,7 @@ impl LxmRouter {
 
     /// Set the delivery callback for incoming messages.
     pub fn set_delivery_callback(&mut self, callback: DeliveryCallback) {
-        self.delivery_callback = Some(callback);
+        self.delivery_callback = Some(Arc::new(Mutex::new(callback)));
     }
 
     /// Enable propagation node functionality.
@@ -2015,6 +2042,7 @@ impl LxmRouter {
             match state {
                 MessageState::Delivered => {
                     network.retain_destination(dest_hash);
+                    self.identify_backchannel(idx);
                     if self.outbound[idx].include_ticket {
                         self.tickets.record_delivery(dest_hash);
                         self.save_tickets();
@@ -2067,6 +2095,28 @@ impl LxmRouter {
                     cb(&msg);
                 }
             }
+        }
+    }
+
+    /// After a direct delivery over a link we opened, identify on it as our
+    /// delivery destination so the recipient can reply over the same link,
+    /// and accept those replies (`process_outbound`, backchannel).
+    fn identify_backchannel(&mut self, idx: usize) {
+        let msg = &self.outbound[idx];
+        let (Some(link_id), Some(delivery_dest)) = (msg.link_id, self.delivery_dest_hash) else {
+            return;
+        };
+        if msg.method != DeliveryMethod::Direct
+            || msg.source_hash != delivery_dest
+            || self.direct_links.get(&msg.destination_hash) != Some(&link_id)
+            || !self.backchannel_identified.insert(link_id)
+        {
+            return;
+        }
+        if let (Some(node), Some(prv)) = (&self.node, self.identity.get_private_key()) {
+            log::debug!("Identifying for backchannel on link {:02x?}", &link_id[..4]);
+            let _ = node.identify_on_link(link_id, prv);
+            self.link_destinations.insert(link_id, delivery_dest);
         }
     }
 
@@ -2563,6 +2613,52 @@ impl LxmRouter {
         transport_encryption: &str,
         method: DeliveryMethod,
     ) {
+        self.lxmf_delivery_with(
+            lxmf_bytes,
+            transport_encrypted,
+            transport_encryption,
+            method,
+            DeliveryOptions::default(),
+        );
+    }
+
+    /// Recall the sender's identity from the transport when this router has
+    /// not seen its announce, so its signature can be verified. Only call
+    /// this off the driver thread: the recall is a driver query.
+    fn recall_source_identity(&mut self, lxmf_bytes: &[u8]) {
+        let Some(source) = lxmf_bytes
+            .get(DESTINATION_LENGTH..2 * DESTINATION_LENGTH)
+            .and_then(|bytes| <[u8; 16]>::try_from(bytes).ok())
+        else {
+            return;
+        };
+        if self.identity_cache.contains_key(&source) {
+            return;
+        }
+        let Some(node) = self.node.clone() else {
+            return;
+        };
+        if let Some(public_key) = node.recall_public_key(&source) {
+            let identity_hash = crate::outbound::announced_from_public_key(source, &public_key)
+                .identity_hash
+                .0;
+            self.identity_cache.insert(source, public_key);
+            self.identity_hash_cache.insert(source, identity_hash);
+        }
+    }
+
+    fn lxmf_delivery_with(
+        &mut self,
+        lxmf_bytes: &[u8],
+        transport_encrypted: bool,
+        transport_encryption: &str,
+        method: DeliveryMethod,
+        options: DeliveryOptions,
+    ) {
+        let DeliveryOptions {
+            no_stamp_enforcement,
+            allow_duplicate,
+        } = options;
         // Use local identity cache for signature verification. We must NOT
         // call node.recall_identity() here because lxmf_delivery can be called
         // from a driver callback (on_local_delivery), and recall_identity does
@@ -2611,9 +2707,10 @@ impl LxmRouter {
 
         // Check for duplicates
         let now = now_timestamp();
-        if self
-            .locally_delivered_transient_ids
-            .contains_key(&result.message_hash)
+        if !allow_duplicate
+            && self
+                .locally_delivered_transient_ids
+                .contains_key(&result.message_hash)
         {
             return;
         }
@@ -2664,7 +2761,11 @@ impl LxmRouter {
                 }
             };
             if !valid {
-                if self.config.enforce_stamps {
+                if no_stamp_enforcement {
+                    log::info!(
+                        "Received message with invalid stamp, allowing since stamp enforcement is off for it"
+                    );
+                } else if self.config.enforce_stamps {
                     log::info!("Dropping message with invalid stamp");
                     return;
                 }
@@ -2680,8 +2781,17 @@ impl LxmRouter {
         self.locally_delivered_transient_ids
             .insert(result.message_hash, now);
 
-        // Fire delivery callback
-        if let Some(callback) = &self.delivery_callback {
+        let unverified_reason = match result.signature_valid {
+            Some(true) => None,
+            _ if self.identity_cache.contains_key(&result.source_hash) => {
+                Some(UnverifiedReason::SignatureInvalid)
+            }
+            _ => Some(UnverifiedReason::SourceUnknown),
+        };
+
+        // Fire delivery callback, or hand the delivery to the caller to fire
+        // once the router lock is released.
+        if self.delivery_callback.is_some() {
             let delivery = LxmDelivery {
                 destination_hash: result.destination_hash,
                 source_hash: result.source_hash,
@@ -2691,6 +2801,7 @@ impl LxmRouter {
                 fields: result.fields,
                 message_hash: result.message_hash,
                 signature_valid: result.signature_valid,
+                unverified_reason,
                 stamp: result.stamp,
                 stamp_valid,
                 stamp_value,
@@ -2699,7 +2810,14 @@ impl LxmRouter {
                 method,
                 lxmf_bytes: lxmf_bytes.to_vec(),
             };
-            callback(&delivery);
+            match &mut self.deferred_deliveries {
+                Some(deferred) => deferred.push(delivery),
+                None => {
+                    if let Some(callback) = &self.delivery_callback {
+                        (callback.lock().unwrap())(&delivery);
+                    }
+                }
+            }
         }
     }
 
@@ -3051,15 +3169,53 @@ impl LxmRouter {
         stamp_data: Option<&[u8]>,
         from_peer: Option<[u8; 16]>,
     ) -> Option<[u8; 32]> {
+        self.lxmf_propagation_with(lxmf_data, stamp_value, stamp_data, from_peer, false, false)
+    }
+
+    /// Ingest a paper message from an `lxm://` URI (`ingest_lxm_uri`).
+    /// Paper messages skip stamp enforcement; with `allow_duplicate` a
+    /// message already received is delivered again. Returns the transient
+    /// ID when a message was ingested.
+    pub fn ingest_lxm_uri(&mut self, uri: &str, allow_duplicate: bool) -> Option<[u8; 32]> {
+        let lxmf_data = match message::from_uri(uri) {
+            Ok(data) => data,
+            Err(_) => {
+                log::error!("Cannot ingest LXM, invalid URI provided");
+                return None;
+            }
+        };
+        let ingested = self.lxmf_propagation_with(
+            &lxmf_data,
+            lxmf_core::stamp::StampValue::ZERO,
+            None,
+            None,
+            true,
+            allow_duplicate,
+        );
+        if ingested.is_none() {
+            log::debug!("No valid LXM could be ingested from the provided URI");
+        }
+        ingested
+    }
+
+    fn lxmf_propagation_with(
+        &mut self,
+        lxmf_data: &[u8],
+        stamp_value: lxmf_core::stamp::StampValue,
+        stamp_data: Option<&[u8]>,
+        from_peer: Option<[u8; 16]>,
+        is_paper_message: bool,
+        allow_duplicate: bool,
+    ) -> Option<[u8; 32]> {
         if lxmf_data.len() < LXMF_OVERHEAD {
             return None;
         }
         let transient_id = rns_crypto::sha256::sha256(lxmf_data);
-        if self.propagation_store.entries.contains_key(&transient_id)
+        let seen = self.propagation_store.entries.contains_key(&transient_id)
             || self
                 .locally_processed_transient_ids
-                .contains_key(&transient_id)
-        {
+                .contains_key(&transient_id);
+        if seen && !allow_duplicate {
             return None;
         }
         let now = now_timestamp();
@@ -3076,11 +3232,19 @@ impl LxmRouter {
                         Vec::with_capacity(DESTINATION_LENGTH + decrypted.len());
                     delivery_data.extend_from_slice(&destination_hash);
                     delivery_data.extend_from_slice(&decrypted);
-                    self.lxmf_delivery(
+                    self.lxmf_delivery_with(
                         &delivery_data,
                         true,
                         ENCRYPTION_DESCRIPTION_EC,
-                        DeliveryMethod::Propagated,
+                        if is_paper_message {
+                            DeliveryMethod::Paper
+                        } else {
+                            DeliveryMethod::Propagated
+                        },
+                        DeliveryOptions {
+                            no_stamp_enforcement: is_paper_message,
+                            allow_duplicate,
+                        },
                     );
                     self.locally_delivered_transient_ids
                         .insert(transient_id, now_timestamp());
@@ -3720,6 +3884,25 @@ impl LxmRouter {
     }
 }
 
+/// Run `f` with the router locked, then fire the deliveries it produced
+/// with the lock released, so delivery callbacks may use the router (as
+/// upstream calls them without holding router locks).
+fn deliver_unlocked(router: &Arc<Mutex<LxmRouter>>, f: impl FnOnce(&mut LxmRouter)) {
+    let (callback, deliveries) = {
+        let mut router = router.lock().unwrap();
+        router.deferred_deliveries = Some(Vec::new());
+        f(&mut router);
+        let deliveries = router.deferred_deliveries.take().unwrap_or_default();
+        (router.delivery_callback.clone(), deliveries)
+    };
+    if let Some(callback) = callback {
+        let callback = callback.lock().unwrap();
+        for delivery in &deliveries {
+            callback(delivery);
+        }
+    }
+}
+
 /// A request error response: the error code as a msgpack integer, as
 /// upstream request handlers return it. (Handler output is sent as an
 /// already-encoded msgpack value; a bare `0xF0` byte would read as -16.)
@@ -3850,14 +4033,16 @@ impl LxmfCallbacks {
     ) {
         let router = self.router.clone();
         thread::spawn(move || {
-            let mut router = router.lock().unwrap();
-            router.refresh_blackholed_identities();
-            router.lxmf_delivery(
-                &lxmf_bytes,
-                transport_encrypted,
-                transport_encryption,
-                method,
-            );
+            deliver_unlocked(&router, |router| {
+                router.refresh_blackholed_identities();
+                router.recall_source_identity(&lxmf_bytes);
+                router.lxmf_delivery(
+                    &lxmf_bytes,
+                    transport_encrypted,
+                    transport_encryption,
+                    method,
+                );
+            });
         });
     }
 
@@ -4090,34 +4275,36 @@ impl Callbacks for LxmfCallbacks {
         if should_deliver {
             let router = self.router.clone();
             thread::spawn(move || {
-                let mut router = router.lock().unwrap();
-                // Extract data payload from raw wire packet
-                let packet = match rns_core::packet::RawPacket::unpack(&raw) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        log::warn!("on_local_delivery: unpack failed: {}", e);
-                        return;
-                    }
-                };
-                // Decrypt the data payload (encrypted with our public key by sender)
-                let plaintext = match router.identity.decrypt(packet.data()) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        log::warn!("on_local_delivery: decrypt failed: {:?}", e);
-                        return;
-                    }
-                };
-                // Opportunistic delivery: prepend destination hash to decrypted payload
-                let mut lxmf_bytes = Vec::with_capacity(DESTINATION_LENGTH + plaintext.len());
-                lxmf_bytes.extend_from_slice(&dest_hash.0);
-                lxmf_bytes.extend_from_slice(&plaintext);
-                router.refresh_blackholed_identities();
-                router.lxmf_delivery(
-                    &lxmf_bytes,
-                    true,
-                    ENCRYPTION_DESCRIPTION_EC,
-                    DeliveryMethod::Opportunistic,
-                );
+                deliver_unlocked(&router, |router| {
+                    // Extract data payload from raw wire packet
+                    let packet = match rns_core::packet::RawPacket::unpack(&raw) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            log::warn!("on_local_delivery: unpack failed: {}", e);
+                            return;
+                        }
+                    };
+                    // Decrypt the data payload (encrypted with our public key by sender)
+                    let plaintext = match router.identity.decrypt(packet.data()) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            log::warn!("on_local_delivery: decrypt failed: {:?}", e);
+                            return;
+                        }
+                    };
+                    // Opportunistic delivery: prepend destination hash to decrypted payload
+                    let mut lxmf_bytes = Vec::with_capacity(DESTINATION_LENGTH + plaintext.len());
+                    lxmf_bytes.extend_from_slice(&dest_hash.0);
+                    lxmf_bytes.extend_from_slice(&plaintext);
+                    router.refresh_blackholed_identities();
+                    router.recall_source_identity(&lxmf_bytes);
+                    router.lxmf_delivery(
+                        &lxmf_bytes,
+                        true,
+                        ENCRYPTION_DESCRIPTION_EC,
+                        DeliveryMethod::Opportunistic,
+                    );
+                })
             });
         }
     }
@@ -4208,6 +4395,7 @@ impl Callbacks for LxmfCallbacks {
         router.backchannel_links.retain(|_, v| *v != link);
         router.link_destinations.remove(&link);
         router.link_remote_identities.remove(&link);
+        router.backchannel_identified.remove(&link);
         router.active_propagation_links.retain(|&id| id != link);
 
         if router.propagation_link == Some(link) {
@@ -4323,12 +4511,14 @@ impl Callbacks for LxmfCallbacks {
             let offered_count = messages.len();
             let validated = crate::stamper::validate_pn_stamps(&messages, minimum_cost);
             let invalid_count = offered_count.saturating_sub(validated.len());
-            router.lock().unwrap().store_validated_inbound_messages(
-                link_id.0,
-                remote_hash,
-                validated,
-                invalid_count,
-            );
+            deliver_unlocked(&router, |router| {
+                router.store_validated_inbound_messages(
+                    link_id.0,
+                    remote_hash,
+                    validated,
+                    invalid_count,
+                )
+            });
         });
     }
 
@@ -4457,7 +4647,7 @@ impl Callbacks for LxmfCallbacks {
         }
     }
 
-    fn on_resource_failed(&mut self, link_id: LinkId, _error: String) {
+    fn on_resource_failed(&mut self, link_id: LinkId, error: String) {
         let mut router = self.router.lock().unwrap();
 
         router.cleanup_inbound_link(link_id.0);
@@ -4472,14 +4662,21 @@ impl Callbacks for LxmfCallbacks {
             return;
         }
 
-        // A failed outbound transfer tears the link down and returns the
-        // message to the queue (`__resource_concluded`).
+        // A resource the receiver rejected fails the message; any other
+        // failure tears the link down and returns the message to the queue
+        // (`__resource_concluded`).
+        let rejected = error == RESOURCE_REJECTED;
         let mut failed_outbound = false;
         for msg in &mut router.outbound {
             if msg.link_id == Some(link_id.0) && msg.state == MessageState::Sending {
-                msg.state = MessageState::Outbound;
                 msg.link_id = None;
-                failed_outbound = true;
+                if rejected {
+                    log::info!("Receiver rejected {:02x?}", &msg.message_hash[..4]);
+                    msg.state = MessageState::Rejected;
+                } else {
+                    msg.state = MessageState::Outbound;
+                    failed_outbound = true;
+                }
                 break;
             }
         }
@@ -4500,10 +4697,9 @@ impl Callbacks for LxmfCallbacks {
                 // Decrypting and delivering happens off the driver thread.
                 let router = self.router.clone();
                 thread::spawn(move || {
-                    router
-                        .lock()
-                        .unwrap()
-                        .ingest_downloaded_messages(link_id.0, messages);
+                    deliver_unlocked(&router, |router| {
+                        router.ingest_downloaded_messages(link_id.0, messages)
+                    });
                 });
             }
             return;
@@ -4567,11 +4763,12 @@ impl Callbacks for LxmfCallbacks {
             );
             return;
         }
-        let mut router = self.router.lock().unwrap();
-        if router.propagation_node && router.active_propagation_links.contains(&link_id.0) {
-            let valid = router.handle_propagation_packet(link_id.0, &data);
-            router.propagation_packet_proof = Some(valid);
-        }
+        deliver_unlocked(&self.router, |router| {
+            if router.propagation_node && router.active_propagation_links.contains(&link_id.0) {
+                let valid = router.handle_propagation_packet(link_id.0, &data);
+                router.propagation_packet_proof = Some(valid);
+            }
+        });
     }
 }
 
@@ -4645,6 +4842,10 @@ impl PnAnnounceSnapshot {
         })
     }
 }
+
+/// The error rns-net reports for a resource the receiver rejected
+/// (`ResourceError::Rejected`).
+const RESOURCE_REJECTED: &str = "Resource rejected";
 
 /// `Transport.PATHFINDER_M`: the hop count reported for unknown paths.
 const PATHFINDER_M: u64 = 128;
