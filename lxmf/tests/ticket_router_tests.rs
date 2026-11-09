@@ -2,7 +2,7 @@
 //! messages, stamping outbound messages with them, accepting ticket stamps
 //! inbound, and persisting them in upstream's `available_tickets` format.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -32,11 +32,11 @@ fn delivery_hash(identity: &Identity) -> [u8; 16] {
 }
 
 /// A router receiving for `identity`, with the given inbound stamp cost.
-fn receiver(dir: &PathBuf, identity: &Identity, cost: Option<f64>) -> LxmRouter {
+fn receiver(dir: &Path, identity: &Identity, cost: Option<f64>) -> LxmRouter {
     let mut router = LxmRouter::new(
         Identity::from_private_key(&identity.get_private_key().unwrap()),
         RouterConfig {
-            storagepath: dir.clone(),
+            storagepath: dir.to_path_buf(),
             enforce_stamps: true,
             ..RouterConfig::default()
         },
@@ -65,7 +65,10 @@ fn signed(
     .unwrap()
 }
 
-fn capture(router: &mut LxmRouter) -> Arc<Mutex<Vec<(Option<bool>, Option<f64>)>>> {
+/// Stamp validity and value of each delivered message.
+type Seen = Arc<Mutex<Vec<(Option<bool>, Option<f64>)>>>;
+
+fn capture(router: &mut LxmRouter) -> Seen {
     let seen = Arc::new(Mutex::new(Vec::new()));
     let sink = seen.clone();
     router.set_delivery_callback(Box::new(move |d: &LxmDelivery| {

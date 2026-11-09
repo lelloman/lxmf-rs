@@ -186,7 +186,7 @@ pub fn unpack(data: &[u8], verify_fn: Option<&VerifyFn<'_>>) -> Result<UnpackRes
     };
 
     // Compute message hash
-    let message_hash = compute_hash(&dest_hash, &src_hash, &packed_payload_no_stamp);
+    let message_hash = compute_hash(&dest_hash, &src_hash, packed_payload_no_stamp);
 
     // Build signed_part for verification
     let signature_valid = verify_fn.map(|vf| {
@@ -195,7 +195,7 @@ pub fn unpack(data: &[u8], verify_fn: Option<&VerifyFn<'_>>) -> Result<UnpackRes
         );
         signed_part.extend_from_slice(&dest_hash);
         signed_part.extend_from_slice(&src_hash);
-        signed_part.extend_from_slice(&packed_payload_no_stamp);
+        signed_part.extend_from_slice(packed_payload_no_stamp);
         signed_part.extend_from_slice(&message_hash);
         vf(&src_hash, &signature, &signed_part)
     });
