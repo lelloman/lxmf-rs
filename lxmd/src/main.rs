@@ -1930,6 +1930,54 @@ propagation_stamp_cost_target = 19
     }
 
     #[test]
+    fn fractional_costs_and_stamp_throttle_follow_upstream_bounds() {
+        let ini = parse_ini(
+            r#"
+[lxmf]
+stamp_cost = 8.5
+
+[propagation]
+propagation_stamp_cost_target = 16.25
+propagation_stamp_cost_flexibility = -2
+peering_cost = 18.75
+remote_peering_cost_max = 26.5
+propagation_stamp_throttle = 10
+"#,
+        );
+        let mut config = LxmdConfig::default();
+        apply_config(&ini, &mut config);
+
+        assert_eq!(config.peer_stamp_cost, 8.5);
+        assert_eq!(config.propagation_stamp_cost_target, 16.25);
+        assert_eq!(config.propagation_stamp_cost_flexibility, 0.0);
+        assert_eq!(config.peering_cost, 18.75);
+        assert_eq!(config.remote_peering_cost_max, 26.5);
+        assert_eq!(config.propagation_stamp_throttle, 600.0);
+
+        let paths = setup_paths(env::temp_dir().join("lxmd-fractional-costs").to_str());
+        let router_config = build_router_config(&config, &paths);
+        assert_eq!(router_config.propagation_cost, StampCost::from_f64(16.25));
+        assert_eq!(router_config.peering_cost, StampCost::from_f64(18.75));
+        assert_eq!(router_config.pn_stamp_throttle, 600.0);
+
+        // Targets below the minimum and throttles below five minutes clamp.
+        let ini = parse_ini(
+            r#"
+[propagation]
+propagation_stamp_cost_target = 4
+propagation_stamp_throttle = 1
+"#,
+        );
+        let mut config = LxmdConfig::default();
+        apply_config(&ini, &mut config);
+        assert_eq!(
+            config.propagation_stamp_cost_target,
+            PROPAGATION_COST_MIN.as_f64()
+        );
+        assert_eq!(config.propagation_stamp_throttle, PN_STAMP_THROTTLE as f64);
+    }
+
+    #[test]
     fn router_config_receives_inbound_sync_controls() {
         let base = env::temp_dir().join("lxmd-upstream-config-test");
         let paths = setup_paths(base.to_str());
