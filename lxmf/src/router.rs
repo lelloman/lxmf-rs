@@ -31,6 +31,24 @@ use crate::storage::{self, StoragePaths};
 /// generation succeeded.
 type PeeringKeyResult = ([u8; 16], Option<(Vec<u8>, lxmf_core::stamp::StampValue)>);
 
+/// Which `/get` request of a download from a propagation node is pending.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DownloadPhase {
+    Listing,
+    Getting,
+    Acknowledging,
+}
+
+/// Client-side state of a download from the outbound propagation node.
+#[derive(Debug, Default)]
+struct DownloadState {
+    phase: Option<DownloadPhase>,
+    /// A download was requested and starts once the link is up.
+    wanted: bool,
+    /// Give up waiting for a path to the propagation node after this time.
+    path_deadline: Option<f64>,
+}
+
 /// The outcome of a background stamp job for an outbound message.
 type StampJobResult = (
     [u8; 32],
@@ -450,6 +468,14 @@ pub struct LxmRouter {
     pub propagation_transfer_progress: f64,
     pub propagation_transfer_size: Option<u64>,
     pub propagation_transfer_max_messages: Option<u32>,
+    /// Messages received in the last completed download.
+    pub propagation_transfer_last_result: Option<usize>,
+    /// Duplicates among them.
+    pub propagation_transfer_last_duplicates: usize,
+    /// Keep downloaded messages on the propagation node
+    /// (`set_retain_node_lxms`).
+    pub retain_synced_on_node: bool,
+    download: DownloadState,
 
     // Active inbound direct-delivery resources
     pub incoming_delivery_resources: HashMap<Vec<u8>, InboundResource>,
@@ -563,6 +589,10 @@ impl LxmRouter {
             propagation_transfer_progress: 0.0,
             propagation_transfer_size: None,
             propagation_transfer_max_messages: None,
+            propagation_transfer_last_result: None,
+            propagation_transfer_last_duplicates: 0,
+            retain_synced_on_node: false,
+            download: DownloadState::default(),
             incoming_delivery_resources: HashMap::new(),
             identity_cache: HashMap::new(),
             identity_hash_cache: HashMap::new(),
@@ -1512,6 +1542,250 @@ impl LxmRouter {
         self.outbound_propagation_node
     }
 
+    /// Download messages for us from the outbound propagation node
+    /// (`request_messages_from_propagation_node`): list them, fetch the ones
+    /// not yet delivered (up to `max_messages`, `None` for all), deliver
+    /// them locally, and acknowledge them so the node deletes them unless
+    /// [`retain_synced_on_node`](Self::retain_synced_on_node) is set.
+    ///
+    /// Progress is reported through `propagation_transfer_state`,
+    /// `propagation_transfer_progress` and `propagation_transfer_last_result`.
+    pub fn request_messages_from_propagation_node(&mut self, max_messages: Option<u32>) {
+        self.propagation_transfer_progress = 0.0;
+        self.propagation_transfer_size = None;
+        self.propagation_transfer_max_messages = max_messages;
+        let Some(propagation_node) = self.outbound_propagation_node else {
+            log::warn!("Cannot request propagation node sync, no outbound propagation node set");
+            return;
+        };
+        let Some(node) = self.node.clone() else {
+            return;
+        };
+
+        if let Some(link_id) = self.propagation_link {
+            self.propagation_transfer_state = PropagationTransferState::LinkEstablished;
+            if let Some(prv) = self.identity.get_private_key() {
+                let _ = node.identify_on_link(link_id, prv);
+            }
+            let request = msgpack::pack(&Value::Array(vec![Value::Nil, Value::Nil]));
+            if node
+                .send_request(link_id, MESSAGE_GET_PATH, &request)
+                .is_ok()
+            {
+                self.download.phase = Some(DownloadPhase::Listing);
+                self.download.wanted = false;
+                self.propagation_transfer_state = PropagationTransferState::RequestSent;
+            }
+            return;
+        }
+
+        self.download.wanted = true;
+        if self.pending_direct_links.contains_key(&propagation_node)
+            || self
+                .pending_direct_link_creations
+                .contains_key(&propagation_node)
+        {
+            self.propagation_transfer_state = PropagationTransferState::LinkEstablishing;
+            return;
+        }
+        let medium = MediumInfo::query(&node);
+        let public_key = self.destination_public_key(&propagation_node, &node);
+        match public_key.filter(|_| node.has_path(&propagation_node)) {
+            Some(public_key) => {
+                self.download.path_deadline = None;
+                self.propagation_transfer_state = PropagationTransferState::LinkEstablishing;
+                let sig_pub: [u8; 32] = public_key[32..].try_into().unwrap();
+                self.pending_direct_link_creations
+                    .insert(propagation_node, now_timestamp());
+                node.begin_link(propagation_node, sig_pub, self.direct_link_tx.clone());
+            }
+            None => {
+                self.request_path_debounced(&propagation_node, &node, &medium);
+                self.download.path_deadline = Some(
+                    now_timestamp() + (PR_PATH_TIMEOUT as f64).max(medium.path_request_wait()),
+                );
+                self.propagation_transfer_state = PropagationTransferState::PathRequested;
+            }
+        }
+    }
+
+    /// Retry a download waiting for a path to the propagation node, or give
+    /// up once the path request timed out (`__request_messages_path_job`).
+    fn process_download_path_wait(&mut self) {
+        let Some(deadline) = self.download.path_deadline else {
+            return;
+        };
+        let (Some(node), Some(propagation_node)) =
+            (self.node.clone(), self.outbound_propagation_node)
+        else {
+            return;
+        };
+        if node.has_path(&propagation_node) {
+            self.download.path_deadline = None;
+            self.request_messages_from_propagation_node(self.propagation_transfer_max_messages);
+        } else if now_timestamp() > deadline {
+            log::debug!("Propagation node path request timed out");
+            self.acknowledge_sync_completion(false, Some(PropagationTransferState::NoPath));
+        }
+    }
+
+    /// Stop a download in progress (`cancel_propagation_node_requests`).
+    pub fn cancel_propagation_node_requests(&mut self) {
+        if let Some(link_id) = self.propagation_link.take() {
+            if let Some(node) = &self.node {
+                let _ = node.teardown_link(link_id);
+            }
+        }
+        self.acknowledge_sync_completion(true, None);
+    }
+
+    /// Reset download state after a completed or failed download
+    /// (`acknowledge_sync_completion`).
+    pub fn acknowledge_sync_completion(
+        &mut self,
+        reset_state: bool,
+        failure_state: Option<PropagationTransferState>,
+    ) {
+        self.propagation_transfer_last_result = None;
+        if reset_state
+            || (self.propagation_transfer_state as u8) <= PropagationTransferState::Complete as u8
+        {
+            self.propagation_transfer_state =
+                failure_state.unwrap_or(PropagationTransferState::Idle);
+        }
+        self.propagation_transfer_progress = 0.0;
+        self.propagation_transfer_size = None;
+        self.download = DownloadState::default();
+    }
+
+    /// Whether a message with this transient ID was already delivered to us
+    /// (`has_message`).
+    pub fn has_message(&self, transient_id: &[u8; 32]) -> bool {
+        self.locally_delivered_transient_ids
+            .contains_key(transient_id)
+    }
+
+    /// Handle a `/get` response from the outbound propagation node. Returns
+    /// the downloaded messages to ingest when the response carried them.
+    fn handle_download_response(&mut self, link_id: [u8; 16], data: &[u8]) -> Option<Vec<Vec<u8>>> {
+        let phase = self.download.phase.take()?;
+        let node = self.node.clone()?;
+        let response = msgpack::unpack_exact(data).unwrap_or(Value::Nil);
+        let error = response
+            .as_uint()
+            .and_then(|code| PeerError::from_u8(code as u8));
+        match error {
+            Some(PeerError::NoIdentity) => {
+                log::debug!("Propagation node indicated missing identification, tearing down link");
+                let _ = node.teardown_link(link_id);
+                self.propagation_transfer_state = PropagationTransferState::NoIdentityReceived;
+                return None;
+            }
+            Some(PeerError::NoAccess) => {
+                log::debug!("Propagation node did not allow the request, tearing down link");
+                let _ = node.teardown_link(link_id);
+                self.propagation_transfer_state = PropagationTransferState::NoAccess;
+                return None;
+            }
+            _ => {}
+        }
+
+        match phase {
+            DownloadPhase::Listing => {
+                let Some(listed) = response.as_array() else {
+                    log::debug!("Invalid message list data received from propagation node");
+                    let _ = node.teardown_link(link_id);
+                    return None;
+                };
+                let max = self
+                    .propagation_transfer_max_messages
+                    .filter(|max| *max > 0);
+                let mut haves = Vec::new();
+                let mut wants = Vec::new();
+                for id in listed
+                    .iter()
+                    .filter_map(|v| <[u8; 32]>::try_from(v.as_bin()?).ok())
+                {
+                    if self.has_message(&id) {
+                        if !self.retain_synced_on_node {
+                            haves.push(Value::Bin(id.to_vec()));
+                        }
+                    } else if max.is_none_or(|max| wants.len() < max as usize) {
+                        wants.push(Value::Bin(id.to_vec()));
+                    }
+                }
+                if listed.is_empty() {
+                    self.propagation_transfer_state = PropagationTransferState::Complete;
+                    self.propagation_transfer_progress = 1.0;
+                    self.propagation_transfer_last_result = Some(0);
+                    return None;
+                }
+                log::debug!(
+                    "Propagation node lists {} messages, requesting {} (already have {})",
+                    listed.len(),
+                    wants.len(),
+                    haves.len()
+                );
+                let request = msgpack::pack(&Value::Array(vec![
+                    Value::Array(wants),
+                    Value::Array(haves),
+                    Value::Float(self.config.delivery_limit),
+                ]));
+                if node
+                    .send_request(link_id, MESSAGE_GET_PATH, &request)
+                    .is_ok()
+                {
+                    self.download.phase = Some(DownloadPhase::Getting);
+                }
+                None
+            }
+            DownloadPhase::Getting => Some(
+                response
+                    .as_array()
+                    .unwrap_or(&[])
+                    .iter()
+                    .filter_map(|v| v.as_bin().map(<[u8]>::to_vec))
+                    .collect(),
+            ),
+            DownloadPhase::Acknowledging => None,
+        }
+    }
+
+    /// Deliver downloaded messages locally and acknowledge them so the node
+    /// deletes them (`message_get_response`).
+    fn ingest_downloaded_messages(&mut self, link_id: [u8; 16], messages: Vec<Vec<u8>>) {
+        let mut duplicates = 0;
+        let mut haves = Vec::with_capacity(messages.len());
+        for lxmf_data in &messages {
+            if self
+                .lxmf_propagation(lxmf_data, lxmf_core::stamp::StampValue::ZERO, None, None)
+                .is_none()
+            {
+                duplicates += 1;
+            }
+            haves.push(Value::Bin(rns_crypto::sha256::sha256(lxmf_data).to_vec()));
+        }
+        if !haves.is_empty() {
+            if let Some(node) = &self.node {
+                let request = msgpack::pack(&Value::Array(vec![Value::Nil, Value::Array(haves)]));
+                if node
+                    .send_request(link_id, MESSAGE_GET_PATH, &request)
+                    .is_ok()
+                {
+                    self.download.phase = Some(DownloadPhase::Acknowledging);
+                }
+            }
+        }
+        self.propagation_transfer_state = PropagationTransferState::Complete;
+        self.propagation_transfer_progress = 1.0;
+        self.propagation_transfer_last_duplicates = duplicates;
+        self.propagation_transfer_last_result = Some(messages.len());
+        let _ = storage::save_transient_ids(
+            &self.paths.local_deliveries,
+            &self.locally_delivered_transient_ids,
+        );
+    }
+
     pub fn reset_propagation_transfer_progress(&mut self) {
         self.propagation_transfer_progress = 0.0;
         self.propagation_transfer_size = None;
@@ -1618,6 +1892,7 @@ impl LxmRouter {
         self.process_outbound();
         self.clean_links();
         self.drain_peering_keys();
+        self.process_download_path_wait();
 
         // Transient ID cleanup (every 60 cycles = 4 min)
         if self.processing_count.is_multiple_of(JOB_TRANSIENT_INTERVAL) {
@@ -3660,6 +3935,10 @@ impl Callbacks for LxmfCallbacks {
             let is_propagation_link = router.outbound_propagation_node == Some(dest_hash.0);
             if is_propagation_link {
                 router.propagation_link = Some(link_id.0);
+                if router.download.wanted {
+                    let max = router.propagation_transfer_max_messages;
+                    router.request_messages_from_propagation_node(max);
+                }
             } else if let Some(peer) = router.peers.get_mut(&dest_hash.0) {
                 peer.handle_link_established(link_id.0, rtt);
             } else {
@@ -3902,6 +4181,9 @@ impl Callbacks for LxmfCallbacks {
         if router.propagation_link == Some(link_id.0) {
             router.propagation_transfer_size = Some(total as u64);
             router.propagation_transfer_progress = fraction;
+            if router.download.phase == Some(DownloadPhase::Getting) {
+                router.propagation_transfer_state = PropagationTransferState::Receiving;
+            }
         }
         for msg in &mut router.outbound {
             if msg.link_id == Some(link_id.0) && msg.state == MessageState::Sending {
@@ -4002,7 +4284,35 @@ impl Callbacks for LxmfCallbacks {
         let Some(node) = router.node.clone() else {
             return;
         };
+        if router.propagation_link == Some(link_id.0) && router.download.phase.is_some() {
+            if let Some(messages) = router.handle_download_response(link_id.0, &data) {
+                // Decrypting and delivering happens off the driver thread.
+                let router = self.router.clone();
+                thread::spawn(move || {
+                    router
+                        .lock()
+                        .unwrap()
+                        .ingest_downloaded_messages(link_id.0, messages);
+                });
+            }
+            return;
+        }
         let _ = router.handle_peer_offer_response_with_transport(link_id.0, &data, node.as_ref());
+    }
+
+    fn on_request_failed(
+        &mut self,
+        link_id: LinkId,
+        _request_id: [u8; 16],
+        _reason: rns_net::link_manager::RequestFailure,
+    ) {
+        let mut router = self.router.lock().unwrap();
+        if router.propagation_link == Some(link_id.0) && router.download.phase.take().is_some() {
+            log::debug!("Message list/get request failed");
+            if let Some(node) = &router.node {
+                let _ = node.teardown_link(link_id.0);
+            }
+        }
     }
 
     fn on_proof(&mut self, _dest_hash: DestHash, packet_hash: PacketHash, _rtt: f64) {
