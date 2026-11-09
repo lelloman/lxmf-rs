@@ -10,26 +10,42 @@ use crate::constants::{
 use crate::stamp::StampCost;
 
 /// Read a msgpack value the way Python's `float()` reads an announce field:
-/// ints, floats and bools are numbers. NaN is rejected, as `int()` rejects it
-/// and no cost or limit can meaningfully be NaN.
+/// ints, floats, bools and numeric strings are numbers. NaN is rejected, as
+/// no cost or limit can meaningfully be NaN.
 fn py_number(value: &Value) -> Option<f64> {
     let number = match value {
         Value::Bool(b) => Some(if *b { 1.0 } else { 0.0 }),
+        Value::Str(text) => text.trim().replace('_', "").parse::<f64>().ok(),
         other => other.as_number(),
     }?;
     (!number.is_nan()).then_some(number)
 }
 
 /// Read a msgpack value the way Python's `int()` reads an announce field:
-/// numbers truncate toward zero; infinities are rejected.
+/// floats truncate toward zero, strings must hold an integer, and
+/// infinities are rejected.
 fn py_int(value: &Value) -> Option<i64> {
     match value {
         Value::UInt(v) => i64::try_from(*v).ok(),
         Value::Int(v) => Some(*v),
+        Value::Str(text) => text.trim().replace('_', "").parse::<i64>().ok(),
         other => {
             let number = py_number(other)?;
-            number.is_finite().then_some(number.trunc() as i64)
+            // `as` truncates toward zero, as `int()` does.
+            number.is_finite().then_some(number as i64)
         }
+    }
+}
+
+/// Python's `data[2] != True and data[2] != False` check: bools, and the
+/// integers 0 and 1 that compare equal to them.
+fn py_bool(value: &Value) -> Option<bool> {
+    match value {
+        Value::Bool(b) => Some(*b),
+        Value::UInt(v @ (0 | 1)) => Some(*v == 1),
+        Value::Int(v @ (0 | 1)) => Some(*v == 1),
+        Value::Float(v) if *v == 0.0 || *v == 1.0 => Some(*v == 1.0),
+        _ => None,
     }
 }
 
@@ -151,10 +167,7 @@ pub fn build_delivery_announce_data(
     let stamp_cost = stamp_cost
         .filter(|cost| *cost > StampCost::ZERO && cost.whole() < u32::from(STAMP_COST_CAP));
     let (ceil_val, exact_val) = match stamp_cost {
-        Some(cost) => (
-            Value::UInt(cost.as_f64().ceil() as u64),
-            Value::Float(cost.as_f64()),
-        ),
+        Some(cost) => (Value::UInt(ceil_cost(cost)), Value::Float(cost.as_f64())),
         None => (Value::Nil, Value::Nil),
     };
     pack(&Value::Array(vec![
@@ -196,7 +209,7 @@ fn pn_cost_triplet_is_valid(value: &Value) -> bool {
 fn pn_announce_fields_are_valid(arr: &[Value]) -> bool {
     arr.len() >= 7
         && py_int(&arr[1]).is_some()
-        && matches!(arr[2], Value::Bool(_))
+        && py_bool(&arr[2]).is_some()
         && py_int(&arr[3]).is_some()
         && py_int(&arr[4]).is_some()
         && pn_cost_triplet_is_valid(&arr[5])
@@ -259,7 +272,7 @@ pub fn parse_pn_announce_data(app_data: &[u8]) -> Option<PnAnnounceData> {
 
     Some(PnAnnounceData {
         node_timebase: py_int(&arr[1])?.max(0) as u64,
-        propagation_enabled: arr[2].as_bool()?,
+        propagation_enabled: py_bool(&arr[2])?,
         propagation_transfer_limit: py_int(&arr[3])?.max(0) as u64,
         propagation_sync_limit: py_int(&arr[4])?.max(0) as u64,
         propagation_stamp_cost,
@@ -318,7 +331,7 @@ pub fn build_pn_announce_data(params: &PnAnnounceParams<'_>) -> Vec<u8> {
     ];
     let ceil_costs = costs
         .iter()
-        .map(|cost| Value::UInt(cost.as_f64().ceil() as u64))
+        .map(|cost| Value::UInt(ceil_cost(*cost)))
         .collect();
     let exact_costs = costs
         .iter()
@@ -335,6 +348,11 @@ pub fn build_pn_announce_data(params: &PnAnnounceParams<'_>) -> Vec<u8> {
         build_pn_metadata(params.implementation, params.name),
         Value::Array(exact_costs),
     ]))
+}
+
+/// `ceil(cost)` on the fixed-point grid (no float math needed).
+fn ceil_cost(cost: StampCost) -> u64 {
+    u64::from(cost.fp().div_ceil(StampCost::from_whole(1).fp()))
 }
 
 /// Check if byte is a msgpack array header (fixarray 0x90-0x9f or array16 0xdc).
