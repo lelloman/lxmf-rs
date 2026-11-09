@@ -171,6 +171,55 @@ systemctl enable --now lxmf-server'
 done
 ```
 
+## Remote Control
+
+`lxmd --status`, `--peers`, `--sync` and `--break` reach the node over its
+`lxmf.propagation.control` destination, which needs a path. `lxmd` announces
+that destination only when `control_allowed` is non-empty, so without it these
+commands time out (exit `200`), even on the same host. The node's own identity
+is always allowed; list it to enable the announce. `lxmd` logs the identity
+hash as `Loaded Primary Identity <...>` at every start; if that line has rotated
+out of the logs, restart `lxmf-server` first.
+
+```bash
+for host in vps-eu vps-us; do
+  ssh "root@$host" 'set -e
+C=/var/lib/lxmf-server/lxmd/config
+id=$(zgrep -ho "Loaded Primary Identity <[0-9a-f]*>" /var/lib/lxmf-server/logs/lxmd.log* | tail -1 | grep -o "[0-9a-f]\{32\}")
+test -n "$id"
+grep -q "^control_allowed" "$C" || sed -i "/^\[propagation\]/a control_allowed = $id" "$C"
+systemctl restart lxmf-server'
+done
+```
+
+Add other operator identities to the same comma-separated list. The commands
+work once the start-up announce has gone out, about 20 seconds after `lxmd`
+starts.
+
+## Log Rotation
+
+`lxmf-server` appends `lxmd` output to `/var/lib/lxmf-server/logs/lxmd.log`
+and never rotates it. The file is opened in append mode, so `copytruncate` is
+safe:
+
+```bash
+for host in vps-eu vps-us; do
+  ssh "root@$host" 'cat > /etc/logrotate.d/lxmf-server <<EOF
+/var/lib/lxmf-server/logs/*.log {
+    daily
+    maxsize 50M
+    rotate 7
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+}
+EOF
+logrotate -d /etc/logrotate.d/lxmf-server'
+done
+```
+
 ## Startup
 
 Development startup from the workspace:
@@ -490,8 +539,9 @@ Common cases:
   Read the failing checks first. Common causes are empty peer state, missing
   message-store directories, or recent shared-instance connection errors.
 - `lxmd --status` or `lxmd --peers` times out
-  The propagation control destination is not reachable. Confirm `lxmd` is
-  connected to RNS, wait for path discovery, and inspect recent announce logs.
+  The propagation control destination is not reachable. Check that
+  `control_allowed` is set (see Remote Control), that `lxmd` has been up for
+  more than about 20 seconds, and that it is connected to RNS.
 - API returns `401`
   Provide `Authorization: Bearer <token>` or verify `http.auth_token`.
 - Port conflict on `37529`
