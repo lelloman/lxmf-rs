@@ -20,7 +20,8 @@ Status: `open`, `done` (with the commit), or `blocked` (with the reason).
 | Backchannel identification on the direct link after delivery | done (`41b8237`) |
 | Rejected outbound resources fail the message instead of retrying | done (`41b8237`) |
 | Paper messages: `ingest_lxm_uri`, `from_uri` stripping `/` | done (`41b8237`) |
-| Ratchets for propagated encryption and on delivery destinations (`enforce_ratchets`) | open |
+| Ratchets on the delivery destination (`enable_ratchets`, `enforce_ratchets`) | done (`a4df128`) |
+| Propagated messages encrypted with the recipient's announced ratchet | blocked: `rns-net` exposes no lookup of remote ratchets (opportunistic sends already use them) |
 | Direct and propagated link packets wait for their proof | blocked: `rns-net` exposes no link packet receipt |
 
 ## Inbound delivery
