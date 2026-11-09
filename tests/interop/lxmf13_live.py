@@ -142,9 +142,11 @@ def main():
         storagepath=os.path.join(workdir, "lxmf"),
         propagation_cost=13.0,
         peering_cost=7.5,
+        enforce_stamps=True,
     )
     identity = RNS.Identity()
-    source = router.register_delivery_identity(identity, display_name="python 1.3 interop")
+    # Python requires a fractional stamp from Rust: every echo must carry one.
+    source = router.register_delivery_identity(identity, display_name="python 1.3 interop", stamp_cost=5.5)
     inbox = queue.Queue()
     router.register_delivery_callback(lambda message: inbox.put(message))
     router.enable_propagation()
@@ -204,7 +206,11 @@ def main():
                 except queue.Empty:
                     continue
                 if message.title_as_string() == f"Echo: {title}":
-                    check(f"{label}: echo received from rust", message.signature_validated, message.method)
+                    check(
+                        f"{label}: stamped echo received from rust",
+                        message.signature_validated and message.stamp_valid,
+                        (message.method, message.stamp_value),
+                    )
                     return message
             check(f"{label}: echo received from rust", False)
             return None

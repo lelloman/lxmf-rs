@@ -225,6 +225,41 @@ pub fn unpack(data: &[u8], verify_fn: Option<&VerifyFn<'_>>) -> Result<UnpackRes
     })
 }
 
+/// Attach (or replace) the stamp of a packed message.
+///
+/// The stamp is the optional fifth payload element and is covered by
+/// neither the message hash nor the signature, so a signed message can be
+/// stamped after packing, as `LXMRouter` does for deferred stamps.
+pub fn attach_stamp(packed: &[u8], stamp: &[u8]) -> Result<Vec<u8>, Error> {
+    let header = 2 * DESTINATION_LENGTH + SIGNATURE_LENGTH;
+    if packed.len() <= header {
+        return Err(Error::InvalidPayload("Packed message too short"));
+    }
+    let payload = msgpack::unpack_exact(&packed[header..])?;
+    let mut fields = match payload {
+        Value::Array(fields) if fields.len() >= 4 => fields,
+        _ => {
+            return Err(Error::InvalidPayload(
+                "Payload is not a 4 or 5 element array",
+            ))
+        }
+    };
+    fields.truncate(4);
+    fields.push(Value::Bin(stamp.to_vec()));
+    let mut out = packed[..header].to_vec();
+    out.extend_from_slice(&msgpack::pack(&Value::Array(fields)));
+    Ok(out)
+}
+
+/// Wrap stamped propagation data (`dest_hash + encrypted + stamp`) in the
+/// `[timestamp, [lxmf_data]]` container propagation nodes accept.
+pub fn propagation_container(lxmf_data: Vec<u8>, timestamp: f64) -> Vec<u8> {
+    msgpack::pack(&Value::Array(vec![
+        Value::Float(timestamp),
+        Value::Array(vec![Value::Bin(lxmf_data)]),
+    ]))
+}
+
 /// Content size of a packed message as `LXMessage.pack` measures it:
 /// the packed payload minus its timestamp and msgpack structure overhead.
 pub fn content_size(packed_len: usize) -> usize {

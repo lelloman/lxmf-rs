@@ -31,6 +31,12 @@ use crate::storage::{self, StoragePaths};
 /// generation succeeded.
 type PeeringKeyResult = ([u8; 16], Option<(Vec<u8>, lxmf_core::stamp::StampValue)>);
 
+/// The outcome of a background stamp job for an outbound message.
+type StampJobResult = (
+    [u8; 32],
+    Result<crate::stamper::StampedMessage, crate::stamper::StampJobError>,
+);
+
 /// Callback function types for the router.
 pub type DeliveryCallback = Box<dyn Fn(&LxmDelivery) + Send>;
 pub type ProgressCallback = Box<dyn Fn(&[u8; 32], f64) + Send>;
@@ -384,6 +390,12 @@ pub struct LxmRouter {
     /// Latest valid propagation node announces (info, hops), used to
     /// auto-peer with nodes that sync to us before we peered with them.
     pn_announces: HashMap<[u8; 16], (crate::handlers::PropagationPeerInfo, u8)>,
+    /// Propagation stamp costs announced by propagation nodes.
+    pn_costs: HashMap<[u8; 16], StampCost>,
+    stamp_job_tx: mpsc::Sender<StampJobResult>,
+    stamp_job_rx: mpsc::Receiver<StampJobResult>,
+    /// The message whose stamps are being generated, and its cancel flag.
+    stamp_job: Option<([u8; 32], Arc<std::sync::atomic::AtomicBool>)>,
     peering_key_tx: mpsc::Sender<PeeringKeyResult>,
     peering_key_rx: mpsc::Receiver<PeeringKeyResult>,
     /// Validation outcome of the last client propagation packet, consumed by
@@ -470,6 +482,7 @@ impl LxmRouter {
 
         let (direct_link_tx, direct_link_rx) = mpsc::channel();
         let (peering_key_tx, peering_key_rx) = mpsc::channel();
+        let (stamp_job_tx, stamp_job_rx) = mpsc::channel();
 
         Self {
             identity,
@@ -498,6 +511,10 @@ impl LxmRouter {
             peer_path_requests: HashMap::new(),
             peering_keys_generating: HashSet::new(),
             pn_announces: HashMap::new(),
+            pn_costs: HashMap::new(),
+            stamp_job_tx,
+            stamp_job_rx,
+            stamp_job: None,
             peering_key_tx,
             peering_key_rx,
             propagation_packet_proof: None,
@@ -908,9 +925,194 @@ impl LxmRouter {
         if msg.stamp_cost.is_none() {
             msg.stamp_cost = self.get_stamp_cost(&msg.destination_hash);
         }
-        msg.state = MessageState::Outbound;
+
+        // Stamps are generated in the background, one message at a time
+        // (`process_deferred_stamps`); the message waits as Generating.
+        let needs_stamp =
+            msg.stamp.is_none() && msg.stamp_cost.is_some_and(|c| c > StampCost::ZERO);
+        let needs_propagation_stamp =
+            msg.method == DeliveryMethod::Propagated && msg.propagation_stamp.is_none();
+        if needs_stamp || needs_propagation_stamp {
+            msg.state = MessageState::Generating;
+            msg.tracking.generation_started = Some(now_timestamp());
+        } else {
+            msg.state = MessageState::Outbound;
+        }
+        let dest_hash = msg.destination_hash;
+        let opportunistic = msg.method == DeliveryMethod::Opportunistic;
         self.outbound.push(msg);
+
+        // Pre-emptively request an unknown path for opportunistic delivery.
+        if opportunistic {
+            if let Some(node) = self.node.clone() {
+                if !node.has_path(&dest_hash) {
+                    let medium = MediumInfo::query(&node);
+                    self.request_path_debounced(&dest_hash, &node, &medium);
+                    let idx = self.outbound.len() - 1;
+                    self.schedule_attempt_for(idx, &dest_hash, true, &node, &medium);
+                }
+            }
+        }
         Ok(())
+    }
+
+    /// Cancel a queued outbound message (`cancel_outbound`). Stamp
+    /// generation in progress for it is stopped; the failed callback fires
+    /// when the message leaves the queue. Returns false when no pending
+    /// message has this hash.
+    pub fn cancel_outbound(&mut self, message_hash: &[u8; 32]) -> bool {
+        if let Some((running, cancel)) = &self.stamp_job {
+            if running == message_hash {
+                cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+        match self
+            .outbound
+            .iter_mut()
+            .find(|msg| &msg.message_hash == message_hash && !msg.is_concluded())
+        {
+            Some(msg) => {
+                msg.state = MessageState::Cancelled;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Delivery progress of a queued message (`get_outbound_progress`).
+    pub fn outbound_progress(&self, message_hash: &[u8; 32]) -> Option<f64> {
+        self.outbound
+            .iter()
+            .find(|msg| &msg.message_hash == message_hash)
+            .map(|msg| msg.tracking.progress)
+    }
+
+    /// Install finished stamp jobs and start the next one.
+    fn process_stamp_generation<N: OutboundNetwork + ?Sized>(&mut self, network: &N) {
+        while let Ok((message_hash, outcome)) = self.stamp_job_rx.try_recv() {
+            if self
+                .stamp_job
+                .as_ref()
+                .is_some_and(|(running, _)| *running == message_hash)
+            {
+                self.stamp_job = None;
+            }
+            let Some(msg) = self.outbound.iter_mut().find(|msg| {
+                msg.message_hash == message_hash && msg.state == MessageState::Generating
+            }) else {
+                continue;
+            };
+            match outcome {
+                Ok(stamped) => {
+                    msg.packed = stamped.packed;
+                    if stamped.stamp.is_some() {
+                        msg.stamp = stamped.stamp;
+                    }
+                    if stamped.propagation_packed.is_some() {
+                        msg.propagation_packed = stamped.propagation_packed;
+                        msg.transient_id = stamped.transient_id;
+                        msg.propagation_stamp = stamped.propagation_stamp;
+                    }
+                    msg.representation = message::resolve_delivery(
+                        msg.method,
+                        msg.packed.len(),
+                        msg.propagation_packed.as_ref().map(Vec::len),
+                    )
+                    .1;
+                    msg.state = MessageState::Outbound;
+                    log::debug!("Stamp generation completed for {:02x?}", &message_hash[..4]);
+                }
+                Err(err) => {
+                    log::error!(
+                        "Stamp generation for {:02x?} did not succeed ({:?}), failing it",
+                        &message_hash[..4],
+                        err
+                    );
+                    msg.state = MessageState::Failed;
+                    if let Some(cb) = &msg.failed_callback {
+                        cb(msg);
+                    }
+                }
+            }
+        }
+
+        if self.stamp_job.is_some() {
+            return;
+        }
+        let now = now_timestamp();
+        let Some(idx) = self
+            .outbound
+            .iter()
+            .position(|msg| msg.state == MessageState::Generating)
+        else {
+            return;
+        };
+
+        let msg = &self.outbound[idx];
+        let stamp_cost = if msg.stamp.is_none() {
+            msg.stamp_cost.filter(|cost| *cost > StampCost::ZERO)
+        } else {
+            None
+        };
+        let mut propagation = None;
+        if msg.method == DeliveryMethod::Propagated && msg.propagation_stamp.is_none() {
+            let dest_hash = msg.destination_hash;
+            let started = msg.tracking.generation_started.unwrap_or(now);
+            let pn = self.outbound_propagation_node;
+            let pn_cost = pn.and_then(|pn| self.pn_costs.get(&pn).copied());
+            let public_key = self.destination_public_key(&dest_hash, network);
+            match (pn_cost, public_key) {
+                (Some(cost), Some(key)) => propagation = Some((key, cost)),
+                (pn_cost, public_key) => {
+                    if now - started > PR_PATH_TIMEOUT as f64 {
+                        log::error!(
+                            "Propagation stamp for {:02x?} cannot be generated: {}",
+                            &msg.message_hash[..4],
+                            if pn_cost.is_none() {
+                                "propagation node stamp cost unknown"
+                            } else {
+                                "recipient identity unknown"
+                            }
+                        );
+                        let msg = &mut self.outbound[idx];
+                        msg.state = MessageState::Failed;
+                        if let Some(cb) = &msg.failed_callback {
+                            cb(msg);
+                        }
+                        return;
+                    }
+                    let medium = MediumInfo::query(network);
+                    if let (None, Some(pn)) = (pn_cost, pn) {
+                        self.request_path_debounced(&pn, network, &medium);
+                    }
+                    if public_key.is_none() {
+                        self.request_path_debounced(&dest_hash, network, &medium);
+                    }
+                    return;
+                }
+            }
+        }
+
+        let msg = &self.outbound[idx];
+        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let job = crate::stamper::StampJob {
+            message_hash: msg.message_hash,
+            packed: msg.packed.clone(),
+            stamp_cost,
+            ticket_stamp: None,
+            propagation,
+            cancel: cancel.clone(),
+        };
+        log::debug!(
+            "Starting stamp generation for {:02x?}",
+            &msg.message_hash[..4]
+        );
+        self.stamp_job = Some((msg.message_hash, cancel));
+        let results = self.stamp_job_tx.clone();
+        thread::spawn(move || {
+            let outcome = crate::stamper::run_stamp_job(&job);
+            let _ = results.send((job.message_hash, outcome));
+        });
     }
 
     /// Update the outbound propagation node destination hash at runtime.
@@ -1066,6 +1268,7 @@ impl LxmRouter {
     /// rejected messages fire their failed callback.
     pub fn process_outbound_with<N: OutboundNetwork + ?Sized>(&mut self, network: &N) {
         self.drain_direct_link_results();
+        self.process_stamp_generation(network);
 
         let medium = MediumInfo::query(network);
         let now = now_timestamp();
@@ -1092,6 +1295,8 @@ impl LxmRouter {
                     concluded.push((idx, state != MessageState::Failed));
                     continue;
                 }
+                // Waiting for stamps; see process_stamp_generation.
+                MessageState::Generating => continue,
                 _ => {}
             }
 
@@ -2877,6 +3082,9 @@ impl Callbacks for LxmfCallbacks {
 
         let trigger_outbound = if is_pn_announce {
             let app_data = announced.app_data.as_deref().unwrap_or_default();
+            if let Some(cost) = announce::pn_stamp_cost_from_app_data(app_data) {
+                router.pn_costs.insert(dest_hash, cost);
+            }
             router.handle_peer_announce(&announced, app_data);
             // An announce from our outbound propagation node makes propagated
             // messages waiting for its path actionable.
