@@ -15,8 +15,8 @@ Status: `open`, `done` (with the commit), or `blocked` (with the reason).
 | Outbound message stamps and propagation stamps generated in the background | done (`ce79538`) |
 | `cancel_outbound`, outbound progress, pre-emptive opportunistic path request | done (`ce79538`) |
 | Tickets: learn `FIELD_TICKET` from inbound messages, stamp with outbound tickets, issue tickets (`include_ticket`), record deliveries, accept ticket stamps inbound, persist `available_tickets` | open |
-| Hash inbound payloads from the original bytes when no stamp is present (`unpack_from_bytes`) | open |
-| Changing the outbound propagation node tears down the old propagation link | open |
+| Hash inbound payloads from the original bytes when no stamp is present (`unpack_from_bytes`) | done (`fd7bac9`) |
+| Changing the outbound propagation node tears down the old propagation link | done (`fd7bac9`) |
 | Backchannel identification on the direct link after delivery | open |
 | Rejected outbound resources fail the message instead of retrying | open |
 | Paper messages: `ingest_lxm_uri`, `from_uri` stripping `/` | open |
@@ -27,18 +27,18 @@ Status: `open`, `done` (with the commit), or `blocked` (with the reason).
 
 | Gap | Status |
 | --- | --- |
-| Messages for another destination hash are dropped | open |
+| Messages for another destination hash are dropped | done (`fd7bac9`) |
 | Stamps are validated whenever a cost is set; validity and value reach the app | open |
 | Unknown source is distinguished from an invalid signature; identities recalled from the transport | open |
 | Delivery callback runs without the router lock held | open |
-| Delivery announce handling only for `lxmf.delivery` destinations | open |
+| Delivery announce handling only for `lxmf.delivery` destinations | done (`fd7bac9`) |
 | Delivery resource limit checks the uncompressed size | open |
 
 ## Propagation node and peers
 
 | Gap | Status |
 | --- | --- |
-| Message store size limit comes from `message_storage_limit`, not the per-transfer limit | open |
+| Message store size limit comes from `message_storage_limit`, not the per-transfer limit | done (`fd7bac9`) |
 | `/get` request handler: clients list, download and acknowledge messages | open |
 | Client download from a propagation node (`request_messages_from_propagation_node`) | open |
 | Control paths `/pn/get/stats`, `/pn/peer/sync`, `/pn/peer/unpeer` with upstream access rules, error codes and `compile_stats` payload | open |
@@ -56,7 +56,7 @@ Status: `open`, `done` (with the commit), or `blocked` (with the reason).
 
 | Gap | Status |
 | --- | --- |
-| `prioritise_destinations` applied | open |
+| `prioritise_destinations` applied | done (`fd7bac9`) |
 | Inbound messages written as upstream containers to `storage/messages/<hash>` | open |
 | `on_inbound` commands with arguments | open |
 | Remote control: `-r` takes any destination of the node, exit codes, default timeouts, messages | open |
