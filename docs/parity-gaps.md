@@ -17,9 +17,9 @@ Status: `open`, `done` (with the commit), or `blocked` (with the reason).
 | Tickets: learn `FIELD_TICKET` from inbound messages, stamp with outbound tickets, issue tickets (`include_ticket`), record deliveries, accept ticket stamps inbound, persist `available_tickets` | done (`51fbb3d`) |
 | Hash inbound payloads from the original bytes when no stamp is present (`unpack_from_bytes`) | done (`fd7bac9`) |
 | Changing the outbound propagation node tears down the old propagation link | done (`fd7bac9`) |
-| Backchannel identification on the direct link after delivery | open |
-| Rejected outbound resources fail the message instead of retrying | open |
-| Paper messages: `ingest_lxm_uri`, `from_uri` stripping `/` | open |
+| Backchannel identification on the direct link after delivery | done (`41b8237`) |
+| Rejected outbound resources fail the message instead of retrying | done (`41b8237`) |
+| Paper messages: `ingest_lxm_uri`, `from_uri` stripping `/` | done (`41b8237`) |
 | Ratchets for propagated encryption and on delivery destinations (`enforce_ratchets`) | open |
 | Direct and propagated link packets wait for their proof | blocked: `rns-net` exposes no link packet receipt |
 
@@ -29,10 +29,10 @@ Status: `open`, `done` (with the commit), or `blocked` (with the reason).
 | --- | --- |
 | Messages for another destination hash are dropped | done (`fd7bac9`) |
 | Stamps are validated whenever a cost is set; validity and value reach the app | done (`51fbb3d`) |
-| Unknown source is distinguished from an invalid signature; identities recalled from the transport | open |
-| Delivery callback runs without the router lock held | open |
+| Unknown source is distinguished from an invalid signature; identities recalled from the transport | done (`41b8237`) |
+| Delivery callback runs without the router lock held | done (`41b8237`) |
 | Delivery announce handling only for `lxmf.delivery` destinations | done (`fd7bac9`) |
-| Delivery resource limit checks the uncompressed size | open |
+| Delivery resource limit checks the uncompressed size | blocked: `rns-net` resource accept queries expose only the transfer size |
 
 ## Propagation node and peers
 
