@@ -822,7 +822,7 @@ fn inbound_offer_rejects_invalid_shape_and_invalid_peering_key() {
 
     assert_eq!(
         router.handle_inbound_offer(link_id, remote_identity, b"not msgpack"),
-        vec![PeerError::InvalidData as u8]
+        lxmf_rs::router::error_response(PeerError::InvalidData)
     );
 
     router.config.peering_cost = cost(255);
@@ -832,7 +832,7 @@ fn inbound_offer_rejects_invalid_shape_and_invalid_peering_key() {
     ]));
     assert_eq!(
         router.handle_inbound_offer(link_id, remote_identity, &offer),
-        vec![PeerError::InvalidKey as u8]
+        lxmf_rs::router::error_response(PeerError::InvalidKey)
     );
     assert!(router.accepted_offer_links.is_empty());
     let _ = fs::remove_dir_all(dir);

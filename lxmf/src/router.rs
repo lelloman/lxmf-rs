@@ -419,6 +419,8 @@ pub struct LxmRouter {
 
     // State
     pub propagation_node: bool,
+    /// When propagation was enabled, for the `uptime` statistic.
+    pub propagation_node_start_time: Option<f64>,
     pub processing_count: u32,
     pub exit_handler_running: bool,
 
@@ -539,6 +541,7 @@ impl LxmRouter {
             peering_key_rx,
             propagation_packet_proof: None,
             propagation_node: false,
+            propagation_node_start_time: None,
             processing_count: 0,
             exit_handler_running: false,
             delivery_callback: None,
@@ -617,21 +620,346 @@ impl LxmRouter {
         dest_hash
     }
 
+    /// Register the propagation node request handlers: peer sync offers
+    /// (`/offer`), client message downloads (`/get`), and the control
+    /// requests (`/pn/get/stats`, `/pn/peer/sync`, `/pn/peer/unpeer`).
     pub fn register_propagation_request_handlers(
         node: &Arc<RnsNode>,
         router: Arc<Mutex<LxmRouter>>,
     ) -> Result<(), PeerSyncTransportError> {
+        let failed = |_| PeerSyncTransportError::SendFailed;
+
+        let offer_router = router.clone();
         node.register_request_handler(OFFER_REQUEST_PATH, None, move |link_id, _, data, remote| {
             let Some((remote_identity_hash, _)) = remote else {
-                return Some(vec![PeerError::NoIdentity as u8]);
+                return Some(error_response(PeerError::NoIdentity));
             };
-            let mut router = router.lock().unwrap();
+            let mut router = offer_router.lock().unwrap();
             if !router.propagation_node || !router.active_propagation_links.contains(&link_id) {
-                return Some(vec![PeerError::NoAccess as u8]);
+                return Some(error_response(PeerError::NoAccess));
             }
             Some(router.handle_inbound_offer(link_id, *remote_identity_hash, data))
         })
-        .map_err(|_| PeerSyncTransportError::SendFailed)
+        .map_err(failed)?;
+
+        let get_router = router.clone();
+        node.register_request_handler(MESSAGE_GET_PATH, None, move |link_id, _, data, remote| {
+            let mut router = get_router.lock().unwrap();
+            if !router.propagation_node || !router.active_propagation_links.contains(&link_id) {
+                return None;
+            }
+            Some(router.handle_message_get(remote.map(|(hash, _)| *hash), data))
+        })
+        .map_err(failed)?;
+
+        let stats_router = router.clone();
+        node.register_request_handler(STATS_GET_PATH, None, move |_, _, _, remote| {
+            let router = stats_router.lock().unwrap();
+            Some(
+                match router.check_control_access(remote.map(|(hash, _)| hash)) {
+                    Err(error) => error_response(error),
+                    Ok(()) => msgpack::pack(&router.compile_stats()),
+                },
+            )
+        })
+        .map_err(failed)?;
+
+        let sync_router = router.clone();
+        node.register_request_handler(SYNC_REQUEST_PATH, None, move |_, _, data, remote| {
+            let mut router = sync_router.lock().unwrap();
+            if let Err(error) = router.check_control_access(remote.map(|(hash, _)| hash)) {
+                return Some(error_response(error));
+            }
+            let peer_hash = match control_peer_hash(data) {
+                Ok(hash) => hash,
+                Err(error) => return Some(error_response(error)),
+            };
+            match router.sync_peer(&peer_hash) {
+                Ok(()) => {
+                    // Start the sync now rather than on the next sync job.
+                    let router = sync_router.clone();
+                    thread::spawn(move || {
+                        let mut router = router.lock().unwrap();
+                        if let Some(node) = router.node.clone() {
+                            router.ensure_peer_sync_links_at(&node, now_timestamp());
+                        }
+                    });
+                    Some(msgpack::pack(&Value::Bool(true)))
+                }
+                Err(error) => Some(error_response(error)),
+            }
+        })
+        .map_err(failed)?;
+
+        let unpeer_router = router;
+        node.register_request_handler(UNPEER_REQUEST_PATH, None, move |_, _, data, remote| {
+            let mut router = unpeer_router.lock().unwrap();
+            if let Err(error) = router.check_control_access(remote.map(|(hash, _)| hash)) {
+                return Some(error_response(error));
+            }
+            let peer_hash = match control_peer_hash(data) {
+                Ok(hash) => hash,
+                Err(error) => return Some(error_response(error)),
+            };
+            match router.unpeer(&peer_hash) {
+                Ok(()) => {
+                    router.save_peers();
+                    Some(msgpack::pack(&Value::Bool(true)))
+                }
+                Err(error) => Some(error_response(error)),
+            }
+        })
+        .map_err(failed)
+    }
+
+    /// Control requests are allowed for this node's own identity and the
+    /// configured `control_allowed_list`.
+    pub fn check_control_access(&self, remote: Option<&[u8; 16]>) -> Result<(), PeerError> {
+        let remote = remote.ok_or(PeerError::NoIdentity)?;
+        if remote == self.identity.hash() || self.control_allowed_list.contains(remote) {
+            Ok(())
+        } else {
+            Err(PeerError::NoAccess)
+        }
+    }
+
+    /// Serve a client message request (`message_get_request`):
+    /// `[None, None]` lists the client's messages smallest first; otherwise
+    /// `[wants, haves, transfer_limit_kb]` deletes the messages the client
+    /// has and returns the wanted ones within its transfer limit.
+    pub fn handle_message_get(
+        &mut self,
+        remote_identity: Option<[u8; 16]>,
+        data: &[u8],
+    ) -> Vec<u8> {
+        let Some(remote_identity) = remote_identity else {
+            return error_response(PeerError::NoIdentity);
+        };
+        if self.auth_required && !self.allowed_list.contains(&remote_identity) {
+            return error_response(PeerError::NoAccess);
+        }
+        let client = compute_dest_hash(APP_NAME, &["delivery"], &remote_identity);
+        let Ok(request) = msgpack::unpack_exact(data) else {
+            return msgpack::pack(&Value::Nil);
+        };
+        let Some(fields) = request.as_array().filter(|fields| fields.len() >= 2) else {
+            return msgpack::pack(&Value::Nil);
+        };
+        let ids = |value: &Value| -> Vec<[u8; 32]> {
+            value
+                .as_array()
+                .unwrap_or(&[])
+                .iter()
+                .filter_map(|id| id.as_bin()?.try_into().ok())
+                .collect()
+        };
+
+        if fields[0].is_nil() && fields[1].is_nil() {
+            let listed = self
+                .propagation_store
+                .list_messages_for_dest(&client)
+                .into_iter()
+                .map(|(id, _)| Value::Bin(id.to_vec()))
+                .collect();
+            return msgpack::pack(&Value::Array(listed));
+        }
+
+        let haves = ids(&fields[1]);
+        if !haves.is_empty() {
+            self.propagation_store.handle_get_haves(&client, &haves);
+        }
+        let wants = ids(&fields[0]);
+        let transfer_limit = fields
+            .get(2)
+            .and_then(Value::as_number)
+            .map(|kb| (kb * 1000.0) as usize);
+        let messages = if wants.is_empty() {
+            Vec::new()
+        } else {
+            self.propagation_store
+                .handle_get_wants(&client, &wants, transfer_limit)
+        };
+        msgpack::pack(&Value::Array(
+            messages.into_iter().map(Value::Bin).collect(),
+        ))
+    }
+
+    /// Node statistics served to control clients (`compile_stats`); nil when
+    /// not running a propagation node.
+    pub fn compile_stats(&self) -> Value {
+        if !self.propagation_node {
+            return Value::Nil;
+        }
+        let s = |key: &str| Value::Str(key.into());
+        let opt_cost =
+            |cost: Option<StampCost>| cost.map_or(Value::Nil, |c| Value::Float(c.as_f64()));
+        let peers = self
+            .peers
+            .iter()
+            .map(|(hash, peer)| {
+                let distance = self
+                    .pn_announces
+                    .get(hash)
+                    .map_or(PATHFINDER_M, |(_, hops)| u64::from(*hops));
+                let stats = Value::Map(vec![
+                    (
+                        s("type"),
+                        s(if self.config.static_peers.contains(hash) {
+                            "static"
+                        } else {
+                            "discovered"
+                        }),
+                    ),
+                    (s("state"), Value::UInt(peer.state as u64)),
+                    (s("alive"), Value::Bool(peer.alive)),
+                    (s("name"), peer.name().map_or(Value::Nil, Value::Str)),
+                    (s("last_heard"), Value::Int(peer.last_heard as i64)),
+                    (s("next_sync_attempt"), Value::Float(peer.next_sync_attempt)),
+                    (s("last_sync_attempt"), Value::Float(peer.last_sync_attempt)),
+                    (s("sync_backoff"), Value::Float(peer.sync_backoff)),
+                    (s("peering_timebase"), Value::Float(peer.peering_timebase)),
+                    (s("ler"), Value::Int(peer.link_establishment_rate as i64)),
+                    (s("str"), Value::Int(peer.sync_transfer_rate as i64)),
+                    (
+                        s("transfer_limit"),
+                        peer.propagation_transfer_limit
+                            .map_or(Value::Nil, Value::Float),
+                    ),
+                    (
+                        s("sync_limit"),
+                        peer.propagation_sync_limit.map_or(Value::Nil, Value::UInt),
+                    ),
+                    (
+                        s("target_stamp_cost"),
+                        opt_cost(peer.propagation_stamp_cost),
+                    ),
+                    (
+                        s("stamp_cost_flexibility"),
+                        opt_cost(peer.propagation_stamp_cost_flexibility),
+                    ),
+                    (s("peering_cost"), opt_cost(peer.peering_cost)),
+                    (
+                        s("peering_key"),
+                        peer.peering_key_value()
+                            .map_or(Value::Nil, |v| Value::Float(v.as_f64())),
+                    ),
+                    (s("network_distance"), Value::UInt(distance)),
+                    (s("rx_bytes"), Value::UInt(peer.rx_bytes)),
+                    (s("tx_bytes"), Value::UInt(peer.tx_bytes)),
+                    (s("acceptance_rate"), Value::Float(peer.acceptance_rate())),
+                    (
+                        s("messages"),
+                        Value::Map(vec![
+                            (s("offered"), Value::UInt(peer.offered)),
+                            (s("outgoing"), Value::UInt(peer.outgoing)),
+                            (s("incoming"), Value::UInt(peer.incoming)),
+                            (s("unhandled"), Value::UInt(peer.unhandled_ids.len() as u64)),
+                        ]),
+                    ),
+                ]);
+                (Value::Bin(hash.to_vec()), stats)
+            })
+            .collect();
+        let store = &self.propagation_store;
+        let static_peers = self
+            .peers
+            .keys()
+            .filter(|hash| self.config.static_peers.contains(hash))
+            .count();
+        Value::Map(vec![
+            (
+                s("identity_hash"),
+                Value::Bin(self.identity.hash().to_vec()),
+            ),
+            (
+                s("destination_hash"),
+                Value::Bin(self.propagation_dest_hash.to_vec()),
+            ),
+            (
+                s("uptime"),
+                Value::Float(
+                    now_timestamp()
+                        - self
+                            .propagation_node_start_time
+                            .unwrap_or_else(now_timestamp),
+                ),
+            ),
+            (
+                s("delivery_limit"),
+                Value::Float(self.config.delivery_limit),
+            ),
+            (
+                s("propagation_limit"),
+                Value::UInt(self.config.propagation_limit as u64),
+            ),
+            (s("sync_limit"), Value::UInt(self.config.sync_limit as u64)),
+            (
+                s("target_stamp_cost"),
+                Value::Float(self.config.propagation_cost.as_f64()),
+            ),
+            (
+                s("stamp_cost_flexibility"),
+                Value::Float(self.config.propagation_cost_flexibility.as_f64()),
+            ),
+            (
+                s("peering_cost"),
+                Value::Float(self.config.peering_cost.as_f64()),
+            ),
+            (
+                s("max_peering_cost"),
+                Value::Float(self.config.max_peering_cost.as_f64()),
+            ),
+            (
+                s("autopeer_maxdepth"),
+                Value::UInt(u64::from(self.config.autopeer_maxdepth)),
+            ),
+            (
+                s("from_static_only"),
+                Value::Bool(self.config.from_static_only),
+            ),
+            (
+                s("messagestore"),
+                Value::Map(vec![
+                    (s("count"), Value::UInt(store.message_count() as u64)),
+                    (s("bytes"), Value::UInt(store.storage_size() as u64)),
+                    (
+                        s("limit"),
+                        store
+                            .storage_limit
+                            .map_or(Value::Nil, |l| Value::UInt(l as u64)),
+                    ),
+                ]),
+            ),
+            (
+                s("clients"),
+                Value::Map(vec![
+                    (
+                        s("client_propagation_messages_received"),
+                        Value::UInt(store.client_propagation_messages_received),
+                    ),
+                    (
+                        s("client_propagation_messages_served"),
+                        Value::UInt(store.client_propagation_messages_served),
+                    ),
+                ]),
+            ),
+            (
+                s("unpeered_propagation_incoming"),
+                Value::UInt(store.unpeered_propagation_incoming),
+            ),
+            (
+                s("unpeered_propagation_rx_bytes"),
+                Value::UInt(store.unpeered_propagation_rx_bytes),
+            ),
+            (s("static_peers"), Value::UInt(static_peers as u64)),
+            (
+                s("discovered_peers"),
+                Value::UInt((self.peers.len() - static_peers) as u64),
+            ),
+            (s("total_peers"), Value::UInt(self.peers.len() as u64)),
+            (s("max_peers"), Value::UInt(self.config.max_peers as u64)),
+            (s("peers"), Value::Map(peers)),
+        ])
     }
 
     /// Get a reference to the RNS node.
@@ -787,6 +1115,7 @@ impl LxmRouter {
     /// has also been called with the shared router.
     pub fn enable_propagation(&mut self) {
         self.propagation_node = true;
+        self.propagation_node_start_time = Some(now_timestamp());
 
         if let Some(node) = &self.node {
             // Register propagation destination for incoming links
@@ -2219,32 +2548,32 @@ impl LxmRouter {
     ) -> Vec<u8> {
         let remote_hash = compute_dest_hash(APP_NAME, &["propagation"], &remote_identity_hash);
         if let Err(error) = self.check_inbound_offer_admission(remote_hash) {
-            return vec![error as u8];
+            return error_response(error);
         }
 
         let value = match msgpack::unpack_exact(data) {
             Ok(value) => value,
-            Err(_) => return vec![PeerError::InvalidData as u8],
+            Err(_) => return error_response(PeerError::InvalidData),
         };
         let fields = match value.as_array() {
             Some(fields) if fields.len() == 2 => fields,
-            _ => return vec![PeerError::InvalidData as u8],
+            _ => return error_response(PeerError::InvalidData),
         };
         let peering_key = match fields[0].as_bin() {
             Some(key) if key.len() == STAMP_SIZE => key,
-            _ => return vec![PeerError::InvalidData as u8],
+            _ => return error_response(PeerError::InvalidData),
         };
         let transient_values = match fields[1].as_array() {
             Some(values) => values,
-            None => return vec![PeerError::InvalidData as u8],
+            None => return error_response(PeerError::InvalidData),
         };
         let mut transient_ids = Vec::with_capacity(transient_values.len());
         for value in transient_values {
             let Some(bytes) = value.as_bin() else {
-                return vec![PeerError::InvalidData as u8];
+                return error_response(PeerError::InvalidData);
             };
             let Ok(transient_id) = <[u8; 32]>::try_from(bytes) else {
-                return vec![PeerError::InvalidData as u8];
+                return error_response(PeerError::InvalidData);
             };
             transient_ids.push(transient_id);
         }
@@ -2257,7 +2586,7 @@ impl LxmRouter {
             peering_key,
             self.config.peering_cost,
         ) {
-            return vec![PeerError::InvalidKey as u8];
+            return error_response(PeerError::InvalidKey);
         }
         self.validated_peer_links.insert(link_id);
 
@@ -2910,6 +3239,13 @@ impl LxmRouter {
         // Drop node reference so the daemon can reclaim ownership for full shutdown.
         self.node = None;
     }
+}
+
+/// A request error response: the error code as a msgpack integer, as
+/// upstream request handlers return it. (Handler output is sent as an
+/// already-encoded msgpack value; a bare `0xF0` byte would read as -16.)
+pub fn error_response(error: PeerError) -> Vec<u8> {
+    msgpack::pack(&Value::UInt(error as u64))
 }
 
 /// Offer weight of a stored message for peer sync ordering.
@@ -3747,6 +4083,18 @@ pub fn now_timestamp() -> f64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs_f64()
+}
+
+/// `Transport.PATHFINDER_M`: the hop count reported for unknown paths.
+const PATHFINDER_M: u64 = 128;
+
+/// The peer hash a control request names: 16 raw bytes, sent as msgpack
+/// bin (upstream sends `bytes`).
+fn control_peer_hash(data: &[u8]) -> Result<[u8; 16], PeerError> {
+    msgpack::unpack_exact(data)
+        .ok()
+        .and_then(|value| value.as_bin().and_then(|bytes| bytes.try_into().ok()))
+        .ok_or(PeerError::InvalidData)
 }
 
 #[cfg(test)]

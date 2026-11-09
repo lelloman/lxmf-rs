@@ -429,3 +429,196 @@ fn incoming_sync_does_not_auto_peer_distant_or_unannounced_nodes() {
     drop(r);
     let _ = std::fs::remove_dir_all(dir);
 }
+
+fn decode(bytes: &[u8]) -> Value {
+    rns_core::msgpack::unpack_exact(bytes).unwrap()
+}
+
+#[test]
+fn message_get_lists_serves_and_purges_client_messages() {
+    let (mut router, dir) = test_router("message_get");
+    let client_identity = [0x61; 16];
+    let client =
+        rns_core::destination::destination_hash(APP_NAME, &["delivery"], Some(&client_identity));
+    let mut ids = Vec::new();
+    for (i, size) in [300usize, 100, 200].iter().enumerate() {
+        let mut data = client.to_vec();
+        data.extend(std::iter::repeat_n(
+            i as u8,
+            LXMF_OVERHEAD - DESTINATION_LENGTH + size,
+        ));
+        ids.push(
+            router
+                .propagation_store
+                .store_message(
+                    &data,
+                    Some(&[0x5A; STAMP_SIZE]),
+                    StampValue::from_whole(8),
+                    None,
+                )
+                .unwrap(),
+        );
+    }
+    // Someone else's message is never listed or served.
+    let other = transient(0x99, b"not yours");
+    router
+        .lxmf_propagation(
+            &other[..other.len() - STAMP_SIZE],
+            StampValue::from_whole(8),
+            Some(&other[other.len() - STAMP_SIZE..]),
+            None,
+        )
+        .unwrap();
+
+    let list = decode(&router.handle_message_get(
+        Some(client_identity),
+        &pack(&Value::Array(vec![Value::Nil, Value::Nil])),
+    ));
+    let listed: Vec<Vec<u8>> = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_bin().unwrap().to_vec())
+        .collect();
+    assert_eq!(
+        listed,
+        vec![ids[1].to_vec(), ids[2].to_vec(), ids[0].to_vec()],
+        "smallest first"
+    );
+
+    let request = pack(&Value::Array(vec![
+        Value::Array(vec![Value::Bin(ids[1].to_vec())]),
+        Value::Array(vec![Value::Bin(ids[0].to_vec())]),
+        Value::Float(100.0),
+    ]));
+    let served = decode(&router.handle_message_get(Some(client_identity), &request));
+    let served = served.as_array().unwrap();
+    assert_eq!(served.len(), 1);
+    assert_eq!(
+        rns_crypto::sha256::sha256(served[0].as_bin().unwrap()),
+        ids[1],
+        "served without its stamp"
+    );
+    assert!(
+        !router.propagation_store.entries.contains_key(&ids[0]),
+        "haves are purged"
+    );
+    assert_eq!(
+        router.propagation_store.client_propagation_messages_served,
+        1
+    );
+
+    assert_eq!(
+        router.handle_message_get(None, &pack(&Value::Array(vec![Value::Nil, Value::Nil]))),
+        lxmf_rs::router::error_response(PeerError::NoIdentity)
+    );
+    router.auth_required = true;
+    assert_eq!(
+        router.handle_message_get(
+            Some(client_identity),
+            &pack(&Value::Array(vec![Value::Nil, Value::Nil]))
+        ),
+        lxmf_rs::router::error_response(PeerError::NoAccess)
+    );
+    router.allowed_list.push(client_identity);
+    assert_ne!(
+        router.handle_message_get(
+            Some(client_identity),
+            &pack(&Value::Array(vec![Value::Nil, Value::Nil]))
+        ),
+        lxmf_rs::router::error_response(PeerError::NoAccess)
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn control_access_and_stats_follow_upstream() {
+    let (mut router, dir) = test_router("control");
+    router.enable_propagation();
+    let own = *router.identity.hash();
+    assert_eq!(router.check_control_access(Some(&own)), Ok(()));
+    assert_eq!(
+        router.check_control_access(None),
+        Err(PeerError::NoIdentity)
+    );
+    assert_eq!(
+        router.check_control_access(Some(&[0x01; 16])),
+        Err(PeerError::NoAccess)
+    );
+    router.control_allowed_list.push([0x01; 16]);
+    assert_eq!(router.check_control_access(Some(&[0x01; 16])), Ok(()));
+
+    let peer_hash = [0xA7; 16];
+    router.peers.insert(peer_hash, LxmPeer::new(peer_hash));
+    let stats = router.compile_stats();
+    let get = |map: &Value, key: &str| -> Value {
+        map.as_map()
+            .unwrap()
+            .iter()
+            .find(|(k, _)| k.as_str() == Some(key))
+            .map(|(_, v)| v.clone())
+            .unwrap_or_else(|| panic!("missing {key}"))
+    };
+    for key in [
+        "identity_hash",
+        "destination_hash",
+        "uptime",
+        "delivery_limit",
+        "propagation_limit",
+        "sync_limit",
+        "target_stamp_cost",
+        "stamp_cost_flexibility",
+        "peering_cost",
+        "max_peering_cost",
+        "autopeer_maxdepth",
+        "from_static_only",
+        "messagestore",
+        "clients",
+        "unpeered_propagation_incoming",
+        "unpeered_propagation_rx_bytes",
+        "static_peers",
+        "discovered_peers",
+        "total_peers",
+        "max_peers",
+        "peers",
+    ] {
+        get(&stats, key);
+    }
+    let peers = get(&stats, "peers");
+    let peer = &peers.as_map().unwrap()[0].1;
+    for key in [
+        "type",
+        "state",
+        "alive",
+        "name",
+        "last_heard",
+        "next_sync_attempt",
+        "last_sync_attempt",
+        "sync_backoff",
+        "peering_timebase",
+        "ler",
+        "str",
+        "transfer_limit",
+        "sync_limit",
+        "target_stamp_cost",
+        "stamp_cost_flexibility",
+        "peering_cost",
+        "peering_key",
+        "network_distance",
+        "rx_bytes",
+        "tx_bytes",
+        "acceptance_rate",
+        "messages",
+    ] {
+        get(peer, key);
+    }
+    assert_eq!(
+        get(peer, "network_distance").as_uint(),
+        Some(128),
+        "unknown distance is PATHFINDER_M"
+    );
+    assert_eq!(get(peer, "type").as_str(), Some("discovered"));
+    router.propagation_node = false;
+    assert!(router.compile_stats().is_nil());
+    let _ = std::fs::remove_dir_all(dir);
+}
