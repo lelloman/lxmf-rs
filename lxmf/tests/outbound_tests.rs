@@ -184,7 +184,10 @@ fn opportunistic_retries_rediscovers_path_then_fails() {
     assert_eq!(*network.drops.lock().unwrap(), vec![DEST]);
     assert_eq!(*network.path_requests.lock().unwrap(), vec![DEST]);
     assert_eq!(failed.load(Ordering::SeqCst), 1);
-    assert!(router.outbound.is_empty(), "failed messages leave the queue");
+    assert!(
+        router.outbound.is_empty(),
+        "failed messages leave the queue"
+    );
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -290,7 +293,10 @@ fn large_direct_message_is_sent_as_resource() {
 
     router.process_outbound_with(&network);
 
-    assert_eq!(*network.resources.lock().unwrap(), vec![(link_id, 2_000, false)]);
+    assert_eq!(
+        *network.resources.lock().unwrap(),
+        vec![(link_id, 2_000, false)]
+    );
     assert_eq!(router.outbound[0].state, MessageState::Sending);
     let _ = std::fs::remove_dir_all(dir);
 }

@@ -2285,7 +2285,16 @@ impl LxmRouter {
     /// the key in the background), request paths and back off when none is
     /// found (upstream c939e25), and start link establishment.
     fn ensure_peer_sync_links<N: OutboundNetwork + ?Sized>(&mut self, network: &N) {
-        let now = now_timestamp();
+        self.ensure_peer_sync_links_at(network, now_timestamp());
+    }
+
+    /// [`ensure_peer_sync_links`](Self::ensure_peer_sync_links) at a given
+    /// time, against any network implementation.
+    pub fn ensure_peer_sync_links_at<N: OutboundNetwork + ?Sized>(
+        &mut self,
+        network: &N,
+        now: f64,
+    ) {
         let medium = MediumInfo::query(network);
         let peer_hashes: Vec<[u8; 16]> = self.peers.keys().copied().collect();
         for peer_hash in peer_hashes {
@@ -2424,7 +2433,7 @@ impl LxmRouter {
     }
 
     /// Install peering keys generated in the background.
-    fn drain_peering_keys(&mut self) {
+    pub fn drain_peering_keys(&mut self) {
         let mut updated = false;
         while let Ok((peer_hash, key)) = self.peering_key_rx.try_recv() {
             self.peering_keys_generating.remove(&peer_hash);
