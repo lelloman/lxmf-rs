@@ -148,6 +148,17 @@ fn main() {
         "peering_cost": PEERING_COST,
     }));
 
+    // Commands from the driver on stdin: `download <propagation node hash>`.
+    let (command_tx, command_rx) = mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        for line in std::io::stdin().lines().map_while(Result::ok) {
+            if command_tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let mut download_reported = String::new();
+
     let mut last_announce = Instant::now() - Duration::from_secs(3600);
     let mut reported = serde_json::Value::Null;
     loop {
@@ -220,9 +231,36 @@ fn main() {
             let _ = router.lock().unwrap().handle_outbound(msg);
         }
 
+        while let Ok(command) = command_rx.try_recv() {
+            let mut parts = command.split_whitespace();
+            if let (Some("download"), Some(hash)) = (parts.next(), parts.next()) {
+                let bytes: Vec<u8> = (0..hash.len())
+                    .step_by(2)
+                    .filter_map(|i| u8::from_str_radix(hash.get(i..i + 2)?, 16).ok())
+                    .collect();
+                if let Ok(pn) = <[u8; 16]>::try_from(bytes) {
+                    let mut r = router.lock().unwrap();
+                    r.set_outbound_propagation_node(pn);
+                    r.request_messages_from_propagation_node(None);
+                }
+            }
+        }
+
         {
             let mut r = router.lock().unwrap();
             r.jobs();
+            let download = format!(
+                "{:?}/{:?}",
+                r.propagation_transfer_state, r.propagation_transfer_last_result
+            );
+            if download != download_reported {
+                emit(serde_json::json!({
+                    "event": "download_state",
+                    "state": format!("{:?}", r.propagation_transfer_state),
+                    "last_result": r.propagation_transfer_last_result,
+                }));
+                download_reported = download;
+            }
             let mut transient_ids: Vec<String> = r
                 .propagation_store
                 .entries

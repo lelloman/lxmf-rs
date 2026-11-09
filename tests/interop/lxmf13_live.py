@@ -41,6 +41,7 @@ for var in ("RNS_SRC", "LXMF_SRC"):
     sys.path.insert(0, os.path.abspath(path))
 
 import RNS  # noqa: E402
+import RNS.vendor.umsgpack  # noqa: E402,F401
 import LXMF  # noqa: E402
 import LXMF.LXStamper  # noqa: E402,F401
 from LXMF.LXMessage import LXMessage  # noqa: E402
@@ -77,6 +78,7 @@ class RustPeer:
         self.lock = threading.Lock()
         self.proc = subprocess.Popen(
             [binary, f"127.0.0.1:{port}", storage],
+            stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=open(os.path.join(os.path.dirname(storage), "rust.log"), "w"),
             text=True,
@@ -99,6 +101,10 @@ class RustPeer:
                 if event.get("event") == kind and all(event.get(k) == v for k, v in match.items()):
                     return event
         return None
+
+    def command(self, line):
+        self.proc.stdin.write(line + "\n")
+        self.proc.stdin.flush()
 
     def stop(self):
         self.proc.terminate()
@@ -305,6 +311,63 @@ def main():
         check("python PN syncs the message to the rust PN", synced, rust_peer(python_pn))
         peer = rust_peer(python_pn)
         check("rust accounts the transfer to its python peer", peer and peer["incoming"] >= 1, peer)
+
+        # 9. Python client downloads its messages from the Rust PN.
+        router.set_outbound_propagation_node(rust_pn)
+        # Python enforces its own stamp cost on delivery, including for this.
+        to_self = LXMessage(source, source, "stored for me", "download-from-rust", desired_method=LXMessage.PROPAGATED, stamp_cost=5.5)
+        router.handle_outbound(to_self)
+        wait_for(lambda: to_self.state in (LXMessage.SENT, LXMessage.FAILED))
+        check("python stores a message for itself on the rust PN", to_self.state == LXMessage.SENT, f"state={to_self.state:#x}")
+        while not inbox.empty():
+            inbox.get()
+        router.request_messages_from_propagation_node(identity)
+        done = wait_for(lambda: router.propagation_transfer_state == LXMF.LXMRouter.PR_COMPLETE)
+        got = None
+        try:
+            while True:
+                got = inbox.get(timeout=5)
+                if got.title_as_string() == "download-from-rust":
+                    break
+        except queue.Empty:
+            got = None
+        check(
+            "python downloads its message from the rust PN",
+            done and got is not None,
+            (router.propagation_transfer_state, router.propagation_transfer_last_result),
+        )
+        to_self_tid = RNS.hexrep(to_self.transient_id, delimit=False)
+        check(
+            "rust PN deletes the downloaded message once acknowledged",
+            wait_for(lambda: to_self_tid not in rust_state().get("transient_ids", []), 30),
+            to_self_tid,
+        )
+
+        # 10. Rust client downloads its messages from the Python PN.
+        # Packed directly rather than through handle_outbound, so the stamp
+        # cost Rust announced is set explicitly.
+        for_rust = LXMessage(destination, source, "stored for rust", "download-from-python", desired_method=LXMessage.PROPAGATED, stamp_cost=ready["delivery_stamp_cost"])
+        for_rust.defer_stamp = False  # stamped by pack(), not the router's deferred job
+        for_rust.pack()
+        packed = RNS.vendor.umsgpack.unpackb(for_rust.propagation_packed)
+        lxmf_data = packed[1][0]
+        stored_tid = RNS.Identity.full_hash(lxmf_data)
+        pn_stamp, pn_value = LXMF.LXStamper.generate_stamp(
+            stored_tid, 13.0, expand_rounds=LXMF.LXStamper.WORKBLOCK_EXPAND_ROUNDS_PN
+        )
+        router.lxmf_propagation(lxmf_data, stamp_value=pn_value, stamp_data=pn_stamp)
+        check("python PN stores a message for rust", stored_tid in router.propagation_entries)
+        rust.command(f"download {python_pn.hex()}")
+        delivered = wait_for(lambda: rust.find("delivered", title="download-from-python"), 60)
+        check("rust downloads its message from the python PN", delivered and delivered["method"] == "Propagated", delivered)
+        check(
+            "rust download completes",
+            wait_for(lambda: rust.find("download_state", state="Complete", last_result=1), 30),
+        )
+        check(
+            "python PN deletes the message once rust acknowledges it",
+            wait_for(lambda: stored_tid not in router.propagation_entries, 30),
+        )
     finally:
         rust.stop()
         failed = [name for name, ok, _ in results if not ok]
