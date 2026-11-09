@@ -187,38 +187,37 @@ impl LxmPeer {
         };
 
         let min_accepted_cost = self.minimum_accepted_stamp_cost();
+        let transfer_limit_bytes = self.propagation_transfer_limit.map(|l| l * 1000.0);
+        let sync_limit_bytes = self.propagation_sync_limit.map(|l| (l * 1000) as f64);
 
-        let transfer_limit_bytes = self
-            .propagation_transfer_limit
-            .map(|l| (l * 1000.0) as usize)
-            .unwrap_or(usize::MAX);
-        let sync_limit_bytes = self
-            .propagation_sync_limit
-            .map(|l| (l * 1000) as usize)
-            .unwrap_or(usize::MAX);
-
-        // Filter and sort by weight (ascending = lowest weight first)
-        let mut entries: Vec<&OfferEntry> = available_messages
-            .iter()
-            .filter(|e| e.stamp_value.meets(min_accepted_cost))
-            .filter(|e| e.size <= transfer_limit_bytes)
-            .collect();
+        // Unhandled messages no longer in the store, or whose stamp value
+        // is below what the peer accepts, are dropped (`LXMPeer.sync`).
+        let mut entries: Vec<&OfferEntry> = Vec::new();
+        for id in self.unhandled_ids.clone() {
+            match available_messages.iter().find(|e| e.transient_id == id) {
+                Some(entry) if entry.stamp_value.meets(min_accepted_cost) => entries.push(entry),
+                _ => self.unhandled_ids.retain(|unhandled| *unhandled != id),
+            }
+        }
         entries.sort_by(|a, b| {
             a.weight
                 .partial_cmp(&b.weight)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
 
-        // Accumulate up to sync limit
         let per_message_overhead = 16usize;
-        let structure_overhead = 24usize;
-        let mut cumulative_size = structure_overhead;
+        let mut cumulative_size = 24usize;
         let mut offer_ids = Vec::new();
-
         for entry in entries {
-            let next_size = cumulative_size + entry.size + per_message_overhead;
-            if next_size >= sync_limit_bytes {
-                break;
+            let transfer_size = entry.size + per_message_overhead;
+            // Messages the peer could never accept count as handled.
+            if transfer_limit_bytes.is_some_and(|limit| transfer_size as f64 > limit) {
+                self.mark_handled(entry.transient_id);
+                continue;
+            }
+            let next_size = cumulative_size + transfer_size;
+            if sync_limit_bytes.is_some_and(|limit| next_size as f64 >= limit) {
+                continue;
             }
             cumulative_size = next_size;
             offer_ids.push(entry.transient_id);
@@ -277,6 +276,8 @@ impl LxmPeer {
             for id in &offer {
                 self.mark_handled(*id);
             }
+            // Nothing was wanted: the whole offer counts as offered.
+            self.offered += offer.len() as u64;
             self.state = PeerState::Idle;
             return SyncAction::TeardownLink;
         }
@@ -312,6 +313,7 @@ impl LxmPeer {
             }
 
             if wanted.is_empty() {
+                self.offered += offer.len() as u64;
                 self.state = PeerState::Idle;
                 return SyncAction::TeardownLink;
             }
@@ -349,7 +351,9 @@ impl LxmPeer {
             for id in transferred.clone() {
                 self.mark_handled(id);
             }
-            self.offered += count;
+            // The whole offer counts as offered, the transfer as outgoing,
+            // so the acceptance rate reflects what the peer declined.
+            self.offered += self.last_offer.len() as u64;
             self.outgoing += count;
             self.tx_bytes += transfer_size_bytes as u64;
         }
@@ -649,100 +653,6 @@ pub enum SyncAction {
     Unpeer,
     /// Close the link and return to idle.
     TeardownLink,
-}
-
-/// Select peers for sync.
-///
-/// Returns indices of peers to sync, prioritizing fastest peers
-/// with a random pool for discovery.
-pub fn select_peers_for_sync(peers: &[LxmPeer], fastest_n: usize) -> Vec<usize> {
-    let candidates: Vec<(usize, &LxmPeer)> = peers
-        .iter()
-        .enumerate()
-        .filter(|(_, p)| {
-            p.state == PeerState::Idle && !p.unhandled_ids.is_empty() && !p.is_unreachable()
-        })
-        .collect();
-
-    if candidates.is_empty() {
-        return Vec::new();
-    }
-
-    // Partition into known-speed and unknown-speed
-    let mut known: Vec<(usize, &LxmPeer)> = Vec::new();
-    let mut unknown: Vec<(usize, &LxmPeer)> = Vec::new();
-
-    for (idx, peer) in &candidates {
-        if peer.sync_transfer_rate > 0.0 {
-            known.push((*idx, *peer));
-        } else {
-            unknown.push((*idx, *peer));
-        }
-    }
-
-    // Sort known by transfer rate (highest first)
-    known.sort_by(|a, b| {
-        b.1.sync_transfer_rate
-            .partial_cmp(&a.1.sync_transfer_rate)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-
-    let mut selected = Vec::new();
-
-    // Take fastest N from known
-    for (idx, _) in known.iter().take(fastest_n) {
-        selected.push(*idx);
-    }
-
-    // Add one from unknown pool if available
-    if let Some((idx, _)) = unknown.first() {
-        selected.push(*idx);
-    }
-
-    selected
-}
-
-/// Calculate peer rotation: identify peers to drop.
-///
-/// Returns indices of peers that should be removed.
-pub fn peers_to_drop(peers: &[LxmPeer], max_peers: usize) -> Vec<usize> {
-    if peers.len() <= max_peers {
-        return Vec::new();
-    }
-
-    let headroom = (max_peers * ROTATION_HEADROOM_PCT) / 100;
-    let target = max_peers.saturating_sub(headroom);
-
-    if peers.len() <= target {
-        return Vec::new();
-    }
-
-    let to_drop = peers.len() - target;
-
-    // Build drop candidates: unreachable + low acceptance rate
-    let mut candidates: Vec<(usize, f64)> = peers
-        .iter()
-        .enumerate()
-        .filter(|(_, p)| p.is_unreachable() || p.acceptance_rate() < ROTATION_AR_MAX)
-        .map(|(idx, p)| {
-            // Score: lower is worse (more droppable)
-            let score = if p.is_unreachable() {
-                0.0
-            } else {
-                p.acceptance_rate()
-            };
-            (idx, score)
-        })
-        .collect();
-
-    // Sort by score ascending (worst first)
-    candidates.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-
-    candidates
-        .iter()
-        .take(to_drop)
-        .map(|(idx, _)| *idx)
-        .collect()
 }
 
 // ============================================================

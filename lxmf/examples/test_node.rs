@@ -828,7 +828,7 @@ fn handle_post(
         }
         "/api/propagation/announce" => {
             let router = ctx.router.lock().unwrap();
-            router.announce_propagation_node();
+            router.announce_propagation_node_now();
             write_json(
                 stream,
                 200,

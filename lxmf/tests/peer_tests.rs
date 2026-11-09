@@ -219,6 +219,12 @@ fn test_peer_offer_format() {
 }
 
 fn offer_ids(peer: &mut LxmPeer, entries: &[OfferEntry]) -> Vec<[u8; 32]> {
+    // Offers are built from the peer's unhandled messages.
+    for entry in entries {
+        if !peer.unhandled_ids.contains(&entry.transient_id) {
+            peer.unhandled_ids.push(entry.transient_id);
+        }
+    }
     let packed = peer.build_offer(entries).expect("offer should be built");
     let value = unpack_exact(&packed).expect("offer should be valid msgpack");
     value.as_array().unwrap()[1]
@@ -522,34 +528,13 @@ fn test_peer_offer_response_wants_specific() {
 }
 
 #[test]
-fn test_peer_selection() {
-    let mut peers = vec![
-        LxmPeer::new([0x01; 16]),
-        LxmPeer::new([0x02; 16]),
-        LxmPeer::new([0x03; 16]),
-    ];
-
-    peers[0].unhandled_ids.push([0xAA; 32]);
-    peers[1].unhandled_ids.push([0xBB; 32]);
-    peers[2].unhandled_ids.push([0xCC; 32]);
-
-    peers[0].sync_transfer_rate = 100000.0;
-    peers[1].sync_transfer_rate = 50000.0;
-
-    let selected = lxmf_rs::peer::select_peers_for_sync(&peers, 2);
-    assert!(!selected.is_empty());
-    assert!(selected.contains(&0)); // fastest
-    assert!(selected.contains(&1)); // second fastest
-    assert!(selected.contains(&2)); // unknown pool
-}
-
-#[test]
 fn test_peer_resource_completed() {
     let mut peer = LxmPeer::new([0xAA; 16]);
     let tid1 = [0x11; 32];
     let tid2 = [0x22; 32];
 
     peer.unhandled_ids = vec![tid1, tid2];
+    peer.last_offer = vec![tid1, tid2];
     peer.currently_transferring_messages = Some(vec![tid1, tid2]);
     peer.current_sync_transfer_started = lxmf_rs::router::now_timestamp() - 1.0;
     peer.state = PeerState::ResourceTransferring;

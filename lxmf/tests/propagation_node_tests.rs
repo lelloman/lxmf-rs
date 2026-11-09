@@ -267,6 +267,8 @@ impl OutboundNetwork for PathlessNetwork {
 
 fn sync_ready_peer(hash: [u8; 16]) -> LxmPeer {
     let mut peer = LxmPeer::new(hash);
+    // Heard recently: peers unheard for MAX_UNREACHABLE are culled.
+    peer.last_heard = lxmf_rs::router::now_timestamp();
     peer.propagation_stamp_cost = Some(StampCost::from_whole(16));
     peer.propagation_stamp_cost_flexibility = Some(StampCost::from_whole(3));
     peer.peering_cost = Some(StampCost::from_whole(4));
@@ -621,4 +623,131 @@ fn control_access_and_stats_follow_upstream() {
     router.propagation_node = false;
     assert!(router.compile_stats().is_nil());
     let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn sync_peers_syncs_one_peer_per_cycle_and_culls_unreachable_peers() {
+    let (mut router, dir) = test_router("sync_peers");
+    let network = PathlessNetwork::default();
+    *network.has_path.lock().unwrap() = true;
+    for i in 0..3u8 {
+        let mut peer = sync_ready_peer([0xB0 + i; 16]);
+        peer.alive = true;
+        router.peers.insert(peer.destination_hash, peer);
+    }
+    let stale = [0xBF; 16];
+    let mut stale_peer = sync_ready_peer(stale);
+    stale_peer.last_heard = lxmf_rs::router::now_timestamp() - MAX_UNREACHABLE as f64 - 10.0;
+    router.peers.insert(stale, stale_peer);
+    let static_stale = [0xBE; 16];
+    router.config.static_peers.push(static_stale);
+    let mut static_peer = sync_ready_peer(static_stale);
+    static_peer.last_heard = 0.0;
+    router.peers.insert(static_stale, static_peer);
+
+    router.ensure_peer_sync_links_at(&network, lxmf_rs::router::now_timestamp());
+    assert_eq!(
+        network.links.lock().unwrap().len(),
+        1,
+        "one peer per sync cycle"
+    );
+    assert!(
+        !router.peers.contains_key(&stale),
+        "unreachable peer culled"
+    );
+    assert!(
+        router.peers.contains_key(&static_stale),
+        "static peers are kept"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn rotation_drops_low_acceptance_peers_but_not_static_ones() {
+    let (mut router, dir) = test_router("rotation");
+    router.config.max_peers = 4;
+    for i in 0..5u8 {
+        let hash = [0xC0 + i; 16];
+        let mut peer = sync_ready_peer(hash);
+        peer.unhandled_ids.clear();
+        peer.alive = true;
+        peer.last_sync_attempt = 1.0;
+        peer.offered = 10;
+        peer.outgoing = if i == 0 { 1 } else { 9 };
+        router.peers.insert(hash, peer);
+    }
+    router.config.static_peers.push([0xC1; 16]);
+    router.peers.get_mut(&[0xC1; 16]).unwrap().outgoing = 0;
+
+    router.rotate_peers();
+    // 5 peers, max 4 with headroom 1: two drops needed, but only the
+    // non-static peer below the acceptance threshold goes.
+    assert!(!router.peers.contains_key(&[0xC0; 16]));
+    assert!(router.peers.contains_key(&[0xC1; 16]));
+    assert_eq!(router.peers.len(), 4);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn enabling_propagation_activates_static_peers_and_restores_stats() {
+    let (mut router, dir) = test_router("enable");
+    router.propagation_node = false;
+    let static_peer = [0xD5; 16];
+    router.config.static_peers.push(static_peer);
+    router
+        .propagation_store
+        .client_propagation_messages_received = 7;
+    router.propagation_store.unpeered_propagation_rx_bytes = 99;
+    router.save_node_stats();
+    router
+        .propagation_store
+        .client_propagation_messages_received = 0;
+    router.propagation_store.unpeered_propagation_rx_bytes = 0;
+
+    router.enable_propagation();
+    assert!(router.peers.contains_key(&static_peer));
+    assert_eq!(
+        router
+            .propagation_store
+            .client_propagation_messages_received,
+        7
+    );
+    assert_eq!(router.propagation_store.unpeered_propagation_rx_bytes, 99);
+
+    router.disable_propagation();
+    assert!(!router.propagation_node);
+    assert!(
+        router.peers.contains_key(&static_peer),
+        "disabling keeps peers"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn offers_drop_stale_and_low_value_messages_and_skip_oversized_ones() {
+    use lxmf_rs::peer::OfferEntry;
+    let mut peer = sync_ready_peer([0xE9; 16]);
+    peer.unhandled_ids.clear();
+    peer.propagation_transfer_limit = Some(1.0); // 1 KB per message
+    let entry = |id: u8, size: usize, value: u32| OfferEntry {
+        transient_id: [id; 32],
+        weight: 1.0,
+        size,
+        stamp_value: StampValue::from_whole(value),
+    };
+    let available = vec![entry(1, 100, 20), entry(2, 100, 2), entry(3, 5_000, 20)];
+    peer.unhandled_ids = vec![[1; 32], [2; 32], [3; 32], [4; 32]];
+
+    assert!(peer.build_offer(&available).is_some());
+    assert_eq!(peer.last_offer, vec![[1; 32]]);
+    assert_eq!(
+        peer.unhandled_ids,
+        vec![[1; 32]],
+        "stale, low-value and oversized removed"
+    );
+    assert!(
+        peer.handled_ids.contains(&[3; 32]),
+        "oversized counts as handled"
+    );
+    assert!(!peer.handled_ids.contains(&[2; 32]));
 }
