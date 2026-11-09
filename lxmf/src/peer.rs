@@ -423,12 +423,6 @@ impl LxmPeer {
         self.unhandled_ids.retain(|id| id != transient_id);
     }
 
-    /// Check if this peer is unreachable (not heard from in MAX_UNREACHABLE).
-    pub fn is_unreachable(&self) -> bool {
-        let now = now_timestamp();
-        self.last_heard > 0.0 && (now - self.last_heard) > MAX_UNREACHABLE as f64
-    }
-
     /// Node name from the peer's announce metadata (`PN_META_NAME`).
     pub fn name(&self) -> Option<String> {
         lxmf_core::announce::pn_metadata_name(self.metadata.as_deref()?)

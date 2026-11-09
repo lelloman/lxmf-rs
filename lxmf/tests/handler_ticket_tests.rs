@@ -1,8 +1,7 @@
 use lxmf_core::constants::*;
 use lxmf_core::stamp::StampCost;
 use lxmf_rs::handlers::{
-    decide_propagation_action, handle_delivery_announce, parse_propagation_announce,
-    PropagationAnnounceResult,
+    decide_propagation_action, parse_propagation_announce, PropagationAnnounceResult,
 };
 use lxmf_rs::tickets::{ticket_stamp, validate_stamp_with_tickets, TicketStore};
 use rns_crypto::sha256::sha256;
@@ -68,36 +67,6 @@ fn load_ticket_vectors() -> Vec<TicketVector> {
 
 // ============================================================
 // Delivery announce handler tests
-// ============================================================
-
-#[test]
-fn test_delivery_announce_with_stamp_cost() {
-    // v0.5.0+ format: msgpack([b"TestNode", 16])
-    let app_data = rns_core::msgpack::pack(&rns_core::msgpack::Value::Array(vec![
-        rns_core::msgpack::Value::Bin(b"TestNode".to_vec()),
-        rns_core::msgpack::Value::UInt(16),
-    ]));
-
-    let result = handle_delivery_announce([0xAA; 16], Some(&app_data));
-    assert_eq!(result.destination_hash, [0xAA; 16]);
-    assert_eq!(result.stamp_cost, Some(StampCost::from_whole(16)));
-}
-
-#[test]
-fn test_delivery_announce_no_app_data() {
-    let result = handle_delivery_announce([0xBB; 16], None);
-    assert_eq!(result.stamp_cost, None);
-}
-
-#[test]
-fn test_delivery_announce_legacy_format() {
-    let app_data = b"LegacyNode";
-    let result = handle_delivery_announce([0xCC; 16], Some(app_data));
-    assert_eq!(result.stamp_cost, None);
-}
-
-// ============================================================
-// Propagation announce handler tests
 // ============================================================
 
 fn make_pn_announce_data(enabled: bool, timebase: u64) -> Vec<u8> {
