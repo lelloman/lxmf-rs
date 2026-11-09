@@ -1088,6 +1088,7 @@ fn test_direct_delivery_via_link() {
             link_id: None,
             packet_hash: None,
             tracking: Default::default(),
+            include_ticket: false,
         };
         r.handle_outbound(msg).unwrap();
     }

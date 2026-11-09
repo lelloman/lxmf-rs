@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use lxmf_core::constants::*;
+use rns_core::msgpack::Value;
 use rns_crypto::sha256::sha256;
 
 use crate::router::now_timestamp;
@@ -114,6 +115,102 @@ impl TicketStore {
             .insert(destination_hash, now_timestamp());
     }
 
+    /// Serialize as upstream's `available_tickets` file:
+    /// `{"outbound": {dest: [expires, ticket]}, "inbound": {dest: {ticket:
+    /// [expires]}}, "last_deliveries": {dest: timestamp}}`.
+    pub fn to_value(&self) -> Value {
+        let outbound = self
+            .outbound
+            .iter()
+            .map(|(dest, (expires, ticket))| {
+                (
+                    Value::Bin(dest.to_vec()),
+                    Value::Array(vec![Value::Float(*expires), Value::Bin(ticket.clone())]),
+                )
+            })
+            .collect();
+        let inbound = self
+            .inbound
+            .iter()
+            .map(|(dest, tickets)| {
+                let tickets = tickets
+                    .iter()
+                    .map(|(ticket, expires)| {
+                        (
+                            Value::Bin(ticket.clone()),
+                            Value::Array(vec![Value::Float(*expires)]),
+                        )
+                    })
+                    .collect();
+                (Value::Bin(dest.to_vec()), Value::Map(tickets))
+            })
+            .collect();
+        let last_deliveries = self
+            .last_deliveries
+            .iter()
+            .map(|(dest, at)| (Value::Bin(dest.to_vec()), Value::Float(*at)))
+            .collect();
+        Value::Map(vec![
+            (Value::Str("outbound".into()), Value::Map(outbound)),
+            (Value::Str("inbound".into()), Value::Map(inbound)),
+            (
+                Value::Str("last_deliveries".into()),
+                Value::Map(last_deliveries),
+            ),
+        ])
+    }
+
+    /// Load from upstream's `available_tickets` format; malformed entries
+    /// are skipped, as upstream recreates missing sections.
+    pub fn from_value(value: &Value) -> Self {
+        let mut store = Self::new();
+        let Some(map) = value.as_map() else {
+            return store;
+        };
+        let section = |name: &str| {
+            map.iter()
+                .find(|(k, _)| k.as_str() == Some(name))
+                .and_then(|(_, v)| v.as_map())
+                .unwrap_or(&[])
+        };
+        let dest = |value: &Value| -> Option<[u8; 16]> { value.as_bin()?.try_into().ok() };
+        for (k, v) in section("outbound") {
+            let (Some(dest), Some(entry)) = (dest(k), v.as_array()) else {
+                continue;
+            };
+            if let (Some(expires), Some(ticket)) = (
+                entry.first().and_then(Value::as_number),
+                entry.get(1).and_then(Value::as_bin),
+            ) {
+                store.outbound.insert(dest, (expires, ticket.to_vec()));
+            }
+        }
+        for (k, v) in section("inbound") {
+            let (Some(dest), Some(tickets)) = (dest(k), v.as_map()) else {
+                continue;
+            };
+            for (ticket, entry) in tickets {
+                let expires = entry
+                    .as_array()
+                    .and_then(|e| e.first())
+                    .and_then(Value::as_number);
+                if let (Some(ticket), Some(expires)) = (ticket.as_bin(), expires) {
+                    store
+                        .inbound
+                        .entry(dest)
+                        .or_default()
+                        .insert(ticket.to_vec(), expires);
+                }
+            }
+        }
+        for (k, v) in section("last_deliveries") {
+            if let (Some(dest), Some(at)) = (dest(k), v.as_number()) {
+                store.last_deliveries.insert(dest, at);
+            }
+        }
+        store
+    }
+
     /// Clean expired tickets.
     pub fn clean(&mut self) {
         let now = now_timestamp();
@@ -154,14 +251,10 @@ pub fn validate_stamp_with_tickets(
     message_id: &[u8],
     tickets: &[&[u8]],
 ) -> Option<u32> {
-    if stamp.len() < TICKET_LENGTH {
-        return None;
-    }
-    let stamp_truncated = &stamp[..TICKET_LENGTH];
-
+    // The stamp must equal the ticket stamp exactly (`validate_stamp`).
     for ticket in tickets {
         let expected = ticket_stamp(ticket, message_id);
-        if stamp_truncated == expected {
+        if stamp == expected {
             return Some(COST_TICKET);
         }
     }
@@ -181,4 +274,23 @@ fn generate_random_ticket() -> Vec<u8> {
     let mut ticket = vec![0u8; TICKET_LENGTH];
     OsRng.fill_bytes(&mut ticket);
     ticket
+}
+
+/// The `FIELD_TICKET` value carried in a message: `[expires, ticket]`.
+pub fn ticket_field(expires: f64, ticket: &[u8]) -> (Value, Value) {
+    (
+        Value::UInt(FIELD_TICKET as u64),
+        Value::Array(vec![Value::Float(expires), Value::Bin(ticket.to_vec())]),
+    )
+}
+
+/// Read an unexpired ticket from message fields (`FIELD_TICKET`).
+pub fn ticket_from_fields(fields: &[(Value, Value)], now: f64) -> Option<(f64, Vec<u8>)> {
+    let (_, entry) = fields
+        .iter()
+        .find(|(k, _)| k.as_uint() == Some(FIELD_TICKET as u64))?;
+    let entry = entry.as_array()?;
+    let expires = entry.first()?.as_number()?;
+    let ticket = entry.get(1)?.as_bin()?;
+    (now < expires && ticket.len() == TICKET_LENGTH).then(|| (expires, ticket.to_vec()))
 }

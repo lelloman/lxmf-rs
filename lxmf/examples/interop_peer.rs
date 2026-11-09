@@ -48,6 +48,7 @@ struct Delivered {
     method: DeliveryMethod,
     signature_valid: Option<bool>,
     has_stamp: bool,
+    stamp_value: Option<f64>,
 }
 
 fn main() {
@@ -89,6 +90,7 @@ fn main() {
             method: delivery.method,
             signature_valid: delivery.signature_valid,
             has_stamp: delivery.stamp.is_some(),
+            stamp_value: delivery.stamp_value,
         });
     }));
 
@@ -165,14 +167,24 @@ fn main() {
                 "method": format!("{:?}", delivered.method),
                 "signature_valid": delivered.signature_valid,
                 "has_stamp": delivered.has_stamp,
+                "stamp_value": delivered.stamp_value,
             }));
+            // Include a ticket so the sender can stamp replies cheaply.
+            let ticket = router
+                .lock()
+                .unwrap()
+                .generate_ticket(delivered.source_hash);
+            let fields = ticket
+                .iter()
+                .map(|(expires, ticket)| lxmf_rs::tickets::ticket_field(*expires, ticket))
+                .collect();
             let echo = message::pack(
                 &delivered.source_hash,
                 &delivery_hash,
                 lxmf_rs::router::now_timestamp(),
                 format!("Echo: {}", String::from_utf8_lossy(&delivered.title)).as_bytes(),
                 &delivered.content,
-                vec![],
+                fields,
                 None,
                 |data| identity.sign(data).map_err(|_| message::Error::SignError),
             )
@@ -190,6 +202,7 @@ fn main() {
                 echo.message_hash,
                 reply_method,
             );
+            msg.include_ticket = ticket.is_some();
             let title = String::from_utf8_lossy(&delivered.title).to_string();
             msg.delivery_callback = Some(Box::new(move |m: &OutboundMessage| {
                 emit(serde_json::json!({

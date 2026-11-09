@@ -180,6 +180,7 @@ fn outbound(method: DeliveryMethod) -> OutboundMessage {
         link_id: None,
         packet_hash: None,
         tracking: Default::default(),
+        include_ticket: false,
     }
 }
 

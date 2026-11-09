@@ -177,6 +177,11 @@ pub struct LxmDelivery {
     pub message_hash: [u8; 32],
     pub signature_valid: Option<bool>,
     pub stamp: Option<Vec<u8>>,
+    /// Whether the stamp met the delivery destination's cost; `None` when no
+    /// cost is set and the stamp was not checked.
+    pub stamp_valid: Option<bool>,
+    /// Value of a valid stamp (`COST_TICKET` for ticket stamps).
+    pub stamp_value: Option<f64>,
     pub transport_encrypted: bool,
     pub transport_encryption: String,
     pub method: DeliveryMethod,
@@ -207,6 +212,9 @@ pub struct OutboundMessage {
     pub packet_hash: Option<[u8; 32]>,
     /// Retry timing and slow-path bookkeeping used by outbound processing.
     pub tracking: DeliveryTracking,
+    /// The message carries a ticket from [`LxmRouter::generate_ticket`];
+    /// its delivery is recorded so tickets are not re-sent too often.
+    pub include_ticket: bool,
 }
 
 impl OutboundMessage {
@@ -239,6 +247,7 @@ impl OutboundMessage {
             link_id: None,
             packet_hash: None,
             tracking: DeliveryTracking::default(),
+            include_ticket: false,
         }
     }
 
@@ -386,6 +395,8 @@ pub struct LxmRouter {
     pub locally_delivered_transient_ids: HashMap<[u8; 32], f64>,
     pub locally_processed_transient_ids: HashMap<[u8; 32], f64>,
     pub outbound_stamp_costs: HashMap<[u8; 16], (f64, StampCost)>,
+    /// Tickets issued to and received from other destinations.
+    pub tickets: crate::tickets::TicketStore,
     stamp_costs_dirty: bool,
     path_request_times: HashMap<[u8; 16], f64>,
     slow_path_cache: HashMap<[u8; 16], (bool, f64)>,
@@ -471,6 +482,10 @@ impl LxmRouter {
         let locally_delivered_transient_ids = storage::load_transient_ids(&paths.local_deliveries);
         let locally_processed_transient_ids = storage::load_transient_ids(&paths.locally_processed);
         let outbound_stamp_costs = storage::load_stamp_costs(&paths.outbound_stamp_costs);
+        let mut tickets = storage::load_tickets(&paths.available_tickets)
+            .map(|value| crate::tickets::TicketStore::from_value(&value))
+            .unwrap_or_default();
+        tickets.clean();
         let mut propagation_store =
             PropagationStore::new(paths.messagestore.clone(), config.message_storage_limit);
         propagation_store.scan_messagestore();
@@ -509,6 +524,7 @@ impl LxmRouter {
             locally_delivered_transient_ids,
             locally_processed_transient_ids,
             outbound_stamp_costs,
+            tickets,
             stamp_costs_dirty: false,
             path_request_times: HashMap::new(),
             slow_path_cache: HashMap::new(),
@@ -930,6 +946,20 @@ impl LxmRouter {
             msg.stamp_cost = self.get_stamp_cost(&msg.destination_hash);
         }
 
+        // A ticket the destination gave us replaces proof-of-work.
+        if msg.stamp.is_none() {
+            if let Some(ticket) = self.tickets.get_outbound_ticket(&msg.destination_hash) {
+                let stamp = crate::tickets::generate_stamp_from_ticket(ticket, &msg.message_hash);
+                match message::attach_stamp(&msg.packed, &stamp) {
+                    Ok(packed) => {
+                        msg.packed = packed;
+                        msg.stamp = Some(stamp);
+                    }
+                    Err(err) => log::warn!("Could not apply outbound ticket: {:?}", err),
+                }
+            }
+        }
+
         // Stamps are generated in the background, one message at a time
         // (`process_deferred_stamps`); the message waits as Generating.
         let needs_stamp =
@@ -1279,6 +1309,8 @@ impl LxmRouter {
                 .clean_messagestore(&self.prioritised_list);
             self.save_peers();
             self.save_stamp_costs_if_dirty();
+            self.tickets.clean();
+            self.save_tickets();
         }
     }
 
@@ -1312,6 +1344,10 @@ impl LxmRouter {
             match state {
                 MessageState::Delivered => {
                     network.retain_destination(dest_hash);
+                    if self.outbound[idx].include_ticket {
+                        self.tickets.record_delivery(dest_hash);
+                        self.save_tickets();
+                    }
                     concluded.push((idx, false));
                     continue;
                 }
@@ -1911,29 +1947,62 @@ impl LxmRouter {
             return;
         }
 
-        // Check stamp validity if enforcement is on
-        if self.config.enforce_stamps {
-            if let Some(dest_hash) = self.delivery_dest_hash {
-                if dest_hash == result.destination_hash {
-                    if let Some(stamp_cost) = self.delivery_stamp_cost {
-                        if stamp_cost > StampCost::ZERO {
-                            let valid_stamp = if let Some(ref stamp) = result.stamp {
-                                let workblock = lxmf_core::stamp::stamp_workblock(
-                                    &result.message_hash,
-                                    WORKBLOCK_EXPAND_ROUNDS,
-                                );
-                                lxmf_core::stamp::stamp_valid(stamp, stamp_cost, &workblock)
-                            } else {
-                                false
-                            };
-                            if !valid_stamp {
-                                log::debug!("Dropping message with invalid stamp");
-                                return;
-                            }
+        // Remember a ticket the sender included for replies to it.
+        if result.signature_valid == Some(true) {
+            if let Some((expires, ticket)) =
+                crate::tickets::ticket_from_fields(&result.fields, now_timestamp())
+            {
+                log::debug!("Remembering ticket for {:02x?}", &result.source_hash[..4]);
+                self.tickets
+                    .remember_ticket(result.source_hash, expires, ticket);
+                self.save_tickets();
+            }
+        }
+
+        // Validate the stamp whenever a cost is set, accepting stamps made
+        // from tickets we issued to the sender; drop invalid ones only when
+        // enforcing (`lxmf_delivery`).
+        let mut stamp_valid = None;
+        let mut stamp_value = None;
+        if let Some(stamp_cost) = self.delivery_stamp_cost.filter(|c| *c > StampCost::ZERO) {
+            let (valid, value) = match result.stamp.as_deref() {
+                None => (false, None),
+                Some(stamp) => {
+                    let inbound_tickets = self
+                        .tickets
+                        .get_inbound_tickets(&result.source_hash)
+                        .unwrap_or_default();
+                    if let Some(value) = crate::tickets::validate_stamp_with_tickets(
+                        stamp,
+                        &result.message_hash,
+                        &inbound_tickets,
+                    ) {
+                        (true, Some(f64::from(value)))
+                    } else {
+                        let workblock = lxmf_core::stamp::stamp_workblock(
+                            &result.message_hash,
+                            WORKBLOCK_EXPAND_ROUNDS,
+                        );
+                        if lxmf_core::stamp::stamp_valid(stamp, stamp_cost, &workblock) {
+                            let value = lxmf_core::stamp::stamp_value(&workblock, stamp);
+                            (true, Some(value.as_f64()))
+                        } else {
+                            (false, None)
                         }
                     }
                 }
+            };
+            if !valid {
+                if self.config.enforce_stamps {
+                    log::info!("Dropping message with invalid stamp");
+                    return;
+                }
+                log::info!(
+                    "Received message with invalid stamp, allowing since enforcement is off"
+                );
             }
+            stamp_valid = Some(valid);
+            stamp_value = value;
         }
 
         // Record delivery
@@ -1952,6 +2021,8 @@ impl LxmRouter {
                 message_hash: result.message_hash,
                 signature_valid: result.signature_valid,
                 stamp: result.stamp,
+                stamp_valid,
+                stamp_value,
                 transport_encrypted,
                 transport_encryption: transport_encryption.to_string(),
                 method,
@@ -1990,6 +2061,29 @@ impl LxmRouter {
             .get(dest_hash)
             .filter(|(ts, _)| now - ts < STAMP_COST_EXPIRY as f64)
             .map(|(_, cost)| *cost)
+    }
+
+    /// Persist tickets (`save_available_tickets`).
+    pub fn save_tickets(&self) {
+        if let Err(err) =
+            storage::save_tickets(&self.paths.available_tickets, &self.tickets.to_value())
+        {
+            log::error!("Could not save available tickets: {}", err);
+        }
+    }
+
+    /// Issue a ticket the destination can use to stamp replies to us,
+    /// reusing one with enough validity left (`generate_ticket`). Returns
+    /// `None` when a ticket was delivered to it within `TICKET_INTERVAL`.
+    ///
+    /// Put it in the message with [`crate::tickets::ticket_field`] before
+    /// packing, and set [`OutboundMessage::include_ticket`].
+    pub fn generate_ticket(&mut self, destination_hash: [u8; 16]) -> Option<(f64, Vec<u8>)> {
+        let ticket = self.tickets.generate_ticket(destination_hash);
+        if ticket.is_some() {
+            self.save_tickets();
+        }
+        ticket
     }
 
     /// Persist outbound stamp costs if they changed since the last save.

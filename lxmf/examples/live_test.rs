@@ -382,6 +382,7 @@ fn main() {
                 link_id: None,
                 packet_hash: None,
                 tracking: Default::default(),
+                include_ticket: false,
             };
             let _ = r.handle_outbound(msg);
         }
