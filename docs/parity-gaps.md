@@ -43,13 +43,13 @@ Status: `open`, `done` (with the commit), or `blocked` (with the reason).
 | Client download from a propagation node (`request_messages_from_propagation_node`) | done (`b525e3a`) |
 | Control paths `/pn/get/stats`, `/pn/peer/sync`, `/pn/peer/unpeer` with upstream access rules, error codes and `compile_stats` payload | done (`38eb76e`) |
 | PN access control (`auth_required`, allowed list) | done (`38eb76e`) |
-| Static peers created and resolved when propagation is enabled | open |
-| `sync_peers` selection, `rotate_peers`, unreachable peer culling | open |
-| Offer accounting (`offered`), purging oversized and low-value messages when offering | open |
-| Identify immediately on peer link establishment, then sync | open |
-| Node stats persisted and loaded | open |
-| `disable_propagation` keeps peers | open |
-| Propagation node announced on enable after `NODE_ANNOUNCE_DELAY` | open |
+| Static peers created and resolved when propagation is enabled | done (`f68d899`) |
+| `sync_peers` selection, `rotate_peers`, unreachable peer culling | done (`f68d899`) |
+| Offer accounting (`offered`), purging oversized and low-value messages when offering | done (`f68d899`) |
+| Identify immediately on peer link establishment, then sync | done (`f68d899`) |
+| Node stats persisted and loaded | done (`f68d899`) |
+| `disable_propagation` keeps peers | done (`f68d899`) |
+| Propagation node announced on enable after `NODE_ANNOUNCE_DELAY` | done (`f68d899`) |
 | Path responses do not trigger auto-peering | blocked: `rns-net` does not flag path responses |
 
 ## lxmd
@@ -57,11 +57,11 @@ Status: `open`, `done` (with the commit), or `blocked` (with the reason).
 | Gap | Status |
 | --- | --- |
 | `prioritise_destinations` applied | done (`fd7bac9`) |
-| Inbound messages written as upstream containers to `storage/messages/<hash>` | open |
-| `on_inbound` commands with arguments | open |
-| Remote control: `-r` takes any destination of the node, exit codes, default timeouts, messages | open |
-| Status and peers output in upstream format | open |
-| Unreadable identity files abort instead of being replaced | open |
-| `-s/--service` logs to `<configdir>/logfile` | open |
-| Announce scheduling: deferred start, control destination only with a control list | open |
-| Logging default level, config dir detection, fractional KB limits | open |
+| Inbound messages written as upstream containers to `storage/messages/<hash>` | done (`5c2b906`, `a85eab2`) |
+| `on_inbound` commands with arguments | done (`5c2b906`) |
+| Remote control: `-r` takes any destination of the node, exit codes, default timeouts, messages | done (`5c2b906`) |
+| Status and peers output in upstream format | done (`5c2b906`) |
+| Unreadable identity files abort instead of being replaced | done (`5c2b906`) |
+| `-s/--service` logs to `<configdir>/logfile` | done (`5c2b906`) |
+| Announce scheduling: deferred start, control destination only with a control list | done (`5c2b906`) |
+| Logging default level, config dir detection, fractional KB limits | done (`5c2b906`, `a85eab2`) |
