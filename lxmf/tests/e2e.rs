@@ -789,7 +789,7 @@ fn test_propagation_node_announce_received() {
     // Propagation node announces
     {
         let r = prop_router.lock().unwrap();
-        r.announce_propagation_node();
+        r.announce_propagation_node_now();
     }
 
     // Client should receive the propagation announce

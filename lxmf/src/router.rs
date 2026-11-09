@@ -1072,20 +1072,24 @@ impl LxmRouter {
     /// failed creation leaves the messages queued for their next attempt.
     fn drain_direct_link_results(&mut self) {
         while let Ok(result) = self.direct_link_rx.try_recv() {
-            self.pending_direct_link_creations.remove(&result.dest_hash);
-            if result.link_id.is_none() {
-                if let Some(peer) = self.peers.get_mut(&result.dest_hash) {
-                    if peer.state == PeerState::LinkEstablishing {
-                        peer.state = PeerState::Idle;
-                    }
-                }
-            }
-            if let Some(link_id) = result.link_id {
-                let established = self.direct_links.contains_key(&result.dest_hash)
-                    || (self.outbound_propagation_node == Some(result.dest_hash)
-                        && self.propagation_link.is_some());
-                if !established {
+            // on_link_established clears the creation marker, so a link that
+            // came up (and maybe closed) before its result is drained here is
+            // not recorded as pending, which would block new links to it.
+            let still_pending = self
+                .pending_direct_link_creations
+                .remove(&result.dest_hash)
+                .is_some();
+            match result.link_id {
+                Some(link_id) if still_pending => {
                     self.pending_direct_links.insert(result.dest_hash, link_id);
+                }
+                Some(_) => {}
+                None => {
+                    if let Some(peer) = self.peers.get_mut(&result.dest_hash) {
+                        if peer.state == PeerState::LinkEstablishing {
+                            peer.state = PeerState::Idle;
+                        }
+                    }
                 }
             }
         }
@@ -1147,6 +1151,28 @@ impl LxmRouter {
         self.propagation_node = true;
         self.propagation_node_start_time = Some(now_timestamp());
 
+        // Static peers are peered with whether or not they announced; a
+        // path request lets their announce fill in the peering config.
+        for static_peer in self.config.static_peers.clone() {
+            if !self.peers.contains_key(&static_peer) {
+                log::info!("Activating static peering with {:02x?}", &static_peer[..4]);
+                let mut peer = LxmPeer::new(static_peer);
+                peer.sync_strategy = self.config.sync_strategy;
+                self.peers.insert(static_peer, peer);
+                if let Some(node) = &self.node {
+                    let _ = RnsNode::request_path(node, &DestHash(static_peer));
+                }
+            }
+        }
+
+        let stats = storage::load_node_stats(&self.paths.node_stats);
+        let store = &mut self.propagation_store;
+        let stat = |key: &str| stats.get(key).copied().unwrap_or(0);
+        store.client_propagation_messages_received = stat("client_propagation_messages_received");
+        store.client_propagation_messages_served = stat("client_propagation_messages_served");
+        store.unpeered_propagation_incoming = stat("unpeered_propagation_incoming");
+        store.unpeered_propagation_rx_bytes = stat("unpeered_propagation_rx_bytes");
+
         if let Some(node) = &self.node {
             // Register propagation destination for incoming links
             Self::register_inbound_destination(
@@ -1165,42 +1191,41 @@ impl LxmRouter {
             );
             self.control_dest_hash = Some(control_hash);
         }
+        self.announce_propagation_node();
+    }
+
+    /// Persist propagation node statistics (`save_node_stats`).
+    pub fn save_node_stats(&self) {
+        let store = &self.propagation_store;
+        let stats = HashMap::from([
+            (
+                "client_propagation_messages_received".to_string(),
+                store.client_propagation_messages_received,
+            ),
+            (
+                "client_propagation_messages_served".to_string(),
+                store.client_propagation_messages_served,
+            ),
+            (
+                "unpeered_propagation_incoming".to_string(),
+                store.unpeered_propagation_incoming,
+            ),
+            (
+                "unpeered_propagation_rx_bytes".to_string(),
+                store.unpeered_propagation_rx_bytes,
+            ),
+        ]);
+        if let Err(err) = storage::save_node_stats(&self.paths.node_stats, &stats) {
+            log::error!("Could not save node stats: {}", err);
+        }
     }
 
     /// Disable propagation node functionality at runtime.
     pub fn disable_propagation(&mut self) {
-        if !self.propagation_node {
-            return;
-        }
+        // Upstream only stops acting as a node and announces that; peers,
+        // the message store and the destinations are kept for re-enabling.
         self.propagation_node = false;
-
-        if let Some(node) = &self.node {
-            // Tear down active propagation links
-            for &link_id in &self.active_propagation_links {
-                let _ = node.teardown_link(link_id);
-            }
-            self.active_propagation_links.clear();
-
-            // Deregister propagation destination (link + regular)
-            let _ = node.deregister_link_destination(self.propagation_dest_hash);
-            let _ = node.deregister_destination(self.propagation_dest_hash);
-
-            // Deregister control destination
-            if let Some(control_hash) = self.control_dest_hash.take() {
-                let _ = node.deregister_link_destination(control_hash);
-                let _ = node.deregister_destination(control_hash);
-            }
-
-            // Re-announce with propagation_enabled=false
-            self.announce_propagation_node();
-        }
-
-        // Clear peers and save empty state
-        let peer_hashes: Vec<[u8; 16]> = self.peers.keys().copied().collect();
-        for hash in &peer_hashes {
-            let _ = self.unpeer(hash);
-        }
-        self.save_peers();
+        self.announce_propagation_node();
     }
 
     /// Announce the delivery destination.
@@ -1219,17 +1244,52 @@ impl LxmRouter {
     }
 
     /// Announce the propagation node.
+    ///
+    /// As upstream, the announce goes out after `NODE_ANNOUNCE_DELAY`, and
+    /// the control destination is announced with it when anyone besides
+    /// this node may use it.
     pub fn announce_propagation_node(&self) {
-        if let Some(node) = &self.node {
-            let app_data = self.build_pn_announce_data();
-            let dest = Destination::single_in(
-                APP_NAME,
-                &["propagation"],
-                IdentityHash(*self.identity.hash()),
-            );
-            if let Err(err) = node.announce_queued(&dest, &self.identity, Some(&app_data)) {
-                log::warn!("Failed to queue propagation node announce: {:?}", err);
+        let Some(node) = self.node.clone() else {
+            return;
+        };
+        let Some(prv) = self.identity.get_private_key() else {
+            return;
+        };
+        let identity = Identity::from_private_key(&prv);
+        let announce_control = !self.control_allowed_list.is_empty();
+        let config = PnAnnounceSnapshot::of(self);
+        thread::spawn(move || {
+            thread::sleep(std::time::Duration::from_secs(NODE_ANNOUNCE_DELAY));
+            Self::send_propagation_announce(&node, &identity, &config.build());
+            if announce_control {
+                Self::send_control_announce(&node, &identity);
             }
+        });
+    }
+
+    /// Announce the propagation node immediately.
+    pub fn announce_propagation_node_now(&self) {
+        if let Some(node) = &self.node {
+            Self::send_propagation_announce(node, &self.identity, &self.build_pn_announce_data());
+        }
+    }
+
+    fn send_propagation_announce(node: &RnsNode, identity: &Identity, app_data: &[u8]) {
+        let dest =
+            Destination::single_in(APP_NAME, &["propagation"], IdentityHash(*identity.hash()));
+        if let Err(err) = node.announce_queued(&dest, identity, Some(app_data)) {
+            log::warn!("Failed to queue propagation node announce: {:?}", err);
+        }
+    }
+
+    fn send_control_announce(node: &RnsNode, identity: &Identity) {
+        let dest = Destination::single_in(
+            APP_NAME,
+            &["propagation", "control"],
+            IdentityHash(*identity.hash()),
+        );
+        if let Err(err) = node.announce_queued(&dest, identity, None) {
+            log::warn!("Failed to queue control destination announce: {:?}", err);
         }
     }
 
@@ -1257,18 +1317,7 @@ impl LxmRouter {
 
     /// Build propagation node announce data (LXMF 1.3 format).
     pub fn build_pn_announce_data(&self) -> Vec<u8> {
-        let name = self.config.name.as_deref();
-        announce::build_pn_announce_data(&announce::PnAnnounceParams {
-            node_timebase: now_timestamp() as u64,
-            propagation_enabled: self.propagation_node && !self.config.from_static_only,
-            propagation_transfer_limit: self.config.propagation_limit as u64,
-            propagation_sync_limit: self.config.sync_limit as u64,
-            propagation_stamp_cost: self.config.propagation_cost,
-            propagation_stamp_cost_flexibility: self.config.propagation_cost_flexibility,
-            peering_cost: self.config.peering_cost,
-            implementation: Some((IMPLEMENTATION_NAME, env!("CARGO_PKG_VERSION"))),
-            name,
-        })
+        PnAnnounceSnapshot::of(self).build()
     }
 
     /// Handle an outbound message for delivery.
@@ -1899,8 +1948,13 @@ impl LxmRouter {
             self.clean_transient_id_caches();
         }
 
+        // Peer rotation (every 336 cycles)
+        if self.propagation_node && self.processing_count.is_multiple_of(JOB_ROTATE_INTERVAL) {
+            self.rotate_peers();
+        }
+
         // Peer propagation sync (every 6 cycles = 24s)
-        if self.processing_count.is_multiple_of(JOB_PEERSYNC_INTERVAL) {
+        if self.propagation_node && self.processing_count.is_multiple_of(JOB_PEERSYNC_INTERVAL) {
             if let Some(node) = self.node.clone() {
                 self.ensure_peer_sync_links(&node);
                 self.process_peer_syncs_with_transport(node.as_ref());
@@ -3273,16 +3327,74 @@ impl LxmRouter {
         network: &N,
         now: f64,
     ) {
-        let medium = MediumInfo::query(network);
-        let peer_hashes: Vec<[u8; 16]> = self.peers.keys().copied().collect();
-        for peer_hash in peer_hashes {
-            let Some(peer) = self.peers.get_mut(&peer_hash) else {
-                continue;
-            };
+        // `sync_peers`: cull peers unreachable for too long, then sync one
+        // peer per cycle, picked at random from the fastest waiting peers
+        // and peers of unknown speed, or else from unresponsive peers whose
+        // backoff has elapsed.
+        let mut culled = Vec::new();
+        let mut waiting = Vec::new();
+        let mut unresponsive = Vec::new();
+        for (hash, peer) in self.peers.iter_mut() {
             peer.process_queues();
-            if peer.state != PeerState::Idle || peer.unhandled_ids.is_empty() {
-                continue;
+            if now > peer.last_heard + MAX_UNREACHABLE as f64 {
+                if !self.config.static_peers.contains(hash) {
+                    culled.push(*hash);
+                }
+            } else if peer.state == PeerState::Idle && !peer.unhandled_ids.is_empty() {
+                if peer.alive {
+                    waiting.push((*hash, peer.sync_transfer_rate));
+                } else if now > peer.next_sync_attempt {
+                    unresponsive.push(*hash);
+                }
             }
+        }
+        for hash in &culled {
+            log::warn!(
+                "Removing peer {:02x?} due to excessive unreachability",
+                &hash[..4]
+            );
+            self.peers.remove(hash);
+        }
+
+        let pool: Vec<[u8; 16]> = if !waiting.is_empty() {
+            let mut fastest = waiting.clone();
+            fastest.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            fastest.truncate(FASTEST_N_RANDOM_POOL);
+            let unknown_speed = waiting
+                .iter()
+                .filter(|(_, rate)| *rate == 0.0)
+                .take(fastest.len())
+                .map(|(hash, _)| *hash);
+            fastest
+                .iter()
+                .map(|(hash, _)| *hash)
+                .chain(unknown_speed)
+                .collect()
+        } else {
+            unresponsive
+        };
+        if pool.is_empty() {
+            return;
+        }
+        let selected =
+            pool[(crate::outbound::retry_jitter() * pool.len() as f64) as usize % pool.len()];
+        self.sync_peer_now(selected, network, now);
+    }
+
+    /// One peer's sync step (`LXMPeer.sync`): postpone when its costs or
+    /// peering key are not ready (generating the key in the background),
+    /// request a path and back off when none is found, then link.
+    fn sync_peer_now<N: OutboundNetwork + ?Sized>(
+        &mut self,
+        peer_hash: [u8; 16],
+        network: &N,
+        now: f64,
+    ) {
+        let medium = MediumInfo::query(network);
+        {
+            let Some(peer) = self.peers.get_mut(&peer_hash) else {
+                return;
+            };
             peer.last_sync_attempt = now;
             let (checks_ok, reason) = peer.sync_checks();
             if !checks_ok {
@@ -3297,7 +3409,7 @@ impl LxmRouter {
                     }
                     _ => {}
                 }
-                continue;
+                return;
             }
 
             if let Some(link_id) = peer.link_id {
@@ -3305,7 +3417,7 @@ impl LxmRouter {
                 if let Some(peer) = self.peers.get_mut(&peer_hash).filter(|_| !pending) {
                     peer.state = PeerState::LinkReady;
                 }
-                continue;
+                return;
             }
 
             let public_key = self.destination_public_key(&peer_hash, network);
@@ -3330,17 +3442,17 @@ impl LxmRouter {
                         self.peer_path_requests.insert(peer_hash, now);
                     }
                 }
-                continue;
+                return;
             }
             self.peer_path_requests.remove(&peer_hash);
 
             let link_pending = self.pending_direct_links.contains_key(&peer_hash)
                 || self.pending_direct_link_creations.contains_key(&peer_hash);
             if link_pending {
-                continue;
+                return;
             }
             let Some(public_key) = public_key else {
-                continue;
+                return;
             };
             log::debug!(
                 "Establishing link for sync to peer {:02x?}",
@@ -3353,6 +3465,81 @@ impl LxmRouter {
             let sig_pub: [u8; 32] = public_key[32..].try_into().unwrap();
             self.pending_direct_link_creations.insert(peer_hash, now);
             network.begin_link(peer_hash, sig_pub, self.direct_link_tx.clone());
+        }
+    }
+
+    /// Drop low acceptance rate peers to keep headroom below `max_peers`
+    /// (`rotate_peers`). Static peers are never dropped, peers that were
+    /// never offered anything are spared, and fully synced peers are
+    /// preferred as candidates.
+    pub fn rotate_peers(&mut self) {
+        let max_peers = self.config.max_peers;
+        let headroom = ((max_peers as f64) * (ROTATION_HEADROOM_PCT as f64 / 100.0))
+            .floor()
+            .max(1.0) as usize;
+        let required_drops = self.peers.len() as i64 - (max_peers as i64 - headroom as i64);
+        if required_drops <= 0 || self.peers.len() as i64 - required_drops <= 1 {
+            return;
+        }
+        let untested = self
+            .peers
+            .values()
+            .filter(|p| p.last_sync_attempt == 0.0)
+            .count();
+        if untested >= headroom {
+            log::debug!("Newly added peer threshold reached, postponing peer rotation");
+            return;
+        }
+        for peer in self.peers.values_mut() {
+            peer.process_queues();
+        }
+        let fully_synced: Vec<[u8; 16]> = self
+            .peers
+            .iter()
+            .filter(|(_, p)| p.unhandled_ids.is_empty())
+            .map(|(hash, _)| *hash)
+            .collect();
+        let candidates: Vec<[u8; 16]> = if fully_synced.is_empty() {
+            self.peers.keys().copied().collect()
+        } else {
+            fully_synced
+        };
+
+        let mut waiting = Vec::new();
+        let mut unresponsive = Vec::new();
+        for hash in candidates {
+            let peer = &self.peers[&hash];
+            if self.config.static_peers.contains(&hash) || peer.state != PeerState::Idle {
+                continue;
+            }
+            if !peer.alive {
+                unresponsive.push(hash);
+            } else if peer.offered > 0 {
+                waiting.push(hash);
+            }
+        }
+        // `prioritise_rotating_unreachable_peers` is off upstream, so the
+        // pool always includes reachable peers too.
+        let mut pool = unresponsive;
+        pool.extend(waiting);
+        pool.sort_by(|a, b| {
+            self.peers[a]
+                .acceptance_rate()
+                .partial_cmp(&self.peers[b].acceptance_rate())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        pool.truncate(required_drops as usize);
+
+        let mut dropped = 0;
+        for hash in pool {
+            if self.peers[&hash].acceptance_rate() < ROTATION_AR_MAX {
+                log::debug!("Dropping low acceptance rate peer {:02x?}", &hash[..4]);
+                let _ = self.unpeer(&hash);
+                dropped += 1;
+            }
+        }
+        if dropped > 0 {
+            self.save_peers();
         }
     }
 
@@ -3510,6 +3697,9 @@ impl LxmRouter {
 
         // Save peers
         self.save_peers();
+        if self.propagation_node {
+            self.save_node_stats();
+        }
 
         // Drop node reference so the daemon can reclaim ownership for full shutdown.
         self.node = None;
@@ -3941,6 +4131,13 @@ impl Callbacks for LxmfCallbacks {
                 }
             } else if let Some(peer) = router.peers.get_mut(&dest_hash.0) {
                 peer.handle_link_established(link_id.0, rtt);
+                // Identify, then offer right away (`LXMPeer.link_established`).
+                if let Some(node) = router.node.clone() {
+                    if let Some(prv) = router.identity.get_private_key() {
+                        let _ = node.identify_on_link(link_id.0, prv);
+                    }
+                    let _ = router.send_peer_sync_offer_with_transport(dest_hash.0, node.as_ref());
+                }
             } else {
                 router.direct_links.insert(dest_hash.0, link_id.0);
             }
@@ -4393,6 +4590,46 @@ pub fn now_timestamp() -> f64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs_f64()
+}
+
+/// The router settings a propagation node announce is built from, captured
+/// so the announce can be sent after `NODE_ANNOUNCE_DELAY`.
+struct PnAnnounceSnapshot {
+    propagation_enabled: bool,
+    transfer_limit: u64,
+    sync_limit: u64,
+    costs: [StampCost; 3],
+    name: Option<String>,
+}
+
+impl PnAnnounceSnapshot {
+    fn of(router: &LxmRouter) -> Self {
+        Self {
+            propagation_enabled: router.propagation_node && !router.config.from_static_only,
+            transfer_limit: router.config.propagation_limit as u64,
+            sync_limit: router.config.sync_limit as u64,
+            costs: [
+                router.config.propagation_cost,
+                router.config.propagation_cost_flexibility,
+                router.config.peering_cost,
+            ],
+            name: router.config.name.clone(),
+        }
+    }
+
+    fn build(&self) -> Vec<u8> {
+        announce::build_pn_announce_data(&announce::PnAnnounceParams {
+            node_timebase: now_timestamp() as u64,
+            propagation_enabled: self.propagation_enabled,
+            propagation_transfer_limit: self.transfer_limit,
+            propagation_sync_limit: self.sync_limit,
+            propagation_stamp_cost: self.costs[0],
+            propagation_stamp_cost_flexibility: self.costs[1],
+            peering_cost: self.costs[2],
+            implementation: Some((IMPLEMENTATION_NAME, env!("CARGO_PKG_VERSION"))),
+            name: self.name.as_deref(),
+        })
+    }
 }
 
 /// `Transport.PATHFINDER_M`: the hop count reported for unknown paths.

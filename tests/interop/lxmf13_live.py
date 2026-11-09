@@ -360,10 +360,15 @@ def main():
         rust.command(f"download {python_pn.hex()}")
         delivered = wait_for(lambda: rust.find("delivered", title="download-from-python"), 60)
         check("rust downloads its message from the python PN", delivered and delivered["method"] == "Propagated", delivered)
-        check(
-            "rust download completes",
-            wait_for(lambda: rust.find("download_state", state="Complete", last_result=1), 30),
+        # The Python PN is also Rust's sync peer and may push the message
+        # first; then the download finds it delivered and only acknowledges
+        # it (last_result 0), which still deletes it on the node.
+        completed = wait_for(
+            lambda: rust.find("download_state", state="Complete", last_result=1)
+            or rust.find("download_state", state="Complete", last_result=0),
+            30,
         )
+        check("rust download completes", completed, completed)
         check(
             "python PN deletes the message once rust acknowledges it",
             wait_for(lambda: stored_tid not in router.propagation_entries, 30),

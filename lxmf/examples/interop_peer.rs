@@ -165,7 +165,7 @@ fn main() {
         if last_announce.elapsed() > Duration::from_secs(8) {
             let r = router.lock().unwrap();
             r.announce_delivery(&identity);
-            r.announce_propagation_node();
+            r.announce_propagation_node_now();
             last_announce = Instant::now();
         }
 
