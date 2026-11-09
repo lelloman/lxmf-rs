@@ -39,10 +39,10 @@ Status: `open`, `done` (with the commit), or `blocked` (with the reason).
 | Gap | Status |
 | --- | --- |
 | Message store size limit comes from `message_storage_limit`, not the per-transfer limit | done (`fd7bac9`) |
-| `/get` request handler: clients list, download and acknowledge messages | open |
-| Client download from a propagation node (`request_messages_from_propagation_node`) | open |
-| Control paths `/pn/get/stats`, `/pn/peer/sync`, `/pn/peer/unpeer` with upstream access rules, error codes and `compile_stats` payload | open |
-| PN access control (`auth_required`, allowed list) | open |
+| `/get` request handler: clients list, download and acknowledge messages | done (`38eb76e`) |
+| Client download from a propagation node (`request_messages_from_propagation_node`) | done (`b525e3a`) |
+| Control paths `/pn/get/stats`, `/pn/peer/sync`, `/pn/peer/unpeer` with upstream access rules, error codes and `compile_stats` payload | done (`38eb76e`) |
+| PN access control (`auth_required`, allowed list) | done (`38eb76e`) |
 | Static peers created and resolved when propagation is enabled | open |
 | `sync_peers` selection, `rotate_peers`, unreachable peer culling | open |
 | Offer accounting (`offered`), purging oversized and low-value messages when offering | open |
