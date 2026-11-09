@@ -320,11 +320,15 @@ def main():
         router.set_outbound_propagation_node(rust_pn)
         # Python enforces its own stamp cost on delivery, including for this.
         to_self = LXMessage(source, source, "stored for me", "download-from-rust", desired_method=LXMessage.PROPAGATED, stamp_cost=5.5)
+        # The Rust PN may sync the stored message to its Python PN peer (this
+        # router) before the download, which delivers it straight away and
+        # leaves the download nothing new: drain the inbox before sending and
+        # accept either path, as the Rust download check does.
+        while not inbox.empty():
+            inbox.get()
         router.handle_outbound(to_self)
         wait_for(lambda: to_self.state in (LXMessage.SENT, LXMessage.FAILED))
         check("python stores a message for itself on the rust PN", to_self.state == LXMessage.SENT, f"state={to_self.state:#x}")
-        while not inbox.empty():
-            inbox.get()
         router.request_messages_from_propagation_node(identity)
         done = wait_for(lambda: router.propagation_transfer_state == LXMF.LXMRouter.PR_COMPLETE)
         got = None
@@ -336,9 +340,12 @@ def main():
         except queue.Empty:
             got = None
         check(
-            "python downloads its message from the rust PN",
+            "python receives its message from the rust PN (download or peer sync)",
             done and got is not None,
-            (router.propagation_transfer_state, router.propagation_transfer_last_result),
+            {
+                "state": router.propagation_transfer_state,
+                "downloaded": router.propagation_transfer_last_result,
+            },
         )
         to_self_tid = RNS.hexrep(to_self.transient_id, delimit=False)
         check(
