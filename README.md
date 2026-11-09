@@ -124,8 +124,9 @@ baseline in [UPSTREAM.md](./UPSTREAM.md):
   announce data.
 - **Live interop**: `tests/interop/run_live.sh` runs upstream Python LXMF and
   the Rust `interop_peer` over a real RNS TCP link, covering announces,
-  stamped opportunistic and direct delivery with proofs, and propagation
-  through a Rust propagation node.
+  stamped opportunistic and direct delivery with proofs, propagation
+  through a Rust propagation node, and peer sync in both directions between
+  Rust and Python propagation nodes.
 
 ```bash
 LXMF_SRC=../LXMF RNS_SRC=../Reticulum tests/interop/run_live.sh

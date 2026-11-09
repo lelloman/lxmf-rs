@@ -381,6 +381,9 @@ pub struct LxmRouter {
     slow_path_cache: HashMap<[u8; 16], (bool, f64)>,
     peer_path_requests: HashMap<[u8; 16], f64>,
     peering_keys_generating: HashSet<[u8; 16]>,
+    /// Latest valid propagation node announces (info, hops), used to
+    /// auto-peer with nodes that sync to us before we peered with them.
+    pn_announces: HashMap<[u8; 16], (crate::handlers::PropagationPeerInfo, u8)>,
     peering_key_tx: mpsc::Sender<PeeringKeyResult>,
     peering_key_rx: mpsc::Receiver<PeeringKeyResult>,
     /// Validation outcome of the last client propagation packet, consumed by
@@ -494,6 +497,7 @@ impl LxmRouter {
             slow_path_cache: HashMap::new(),
             peer_path_requests: HashMap::new(),
             peering_keys_generating: HashSet::new(),
+            pn_announces: HashMap::new(),
             peering_key_tx,
             peering_key_rx,
             propagation_packet_proof: None,
@@ -740,6 +744,10 @@ impl LxmRouter {
     }
 
     /// Enable propagation node functionality.
+    ///
+    /// Peers can only sync to this node once
+    /// [`register_propagation_request_handlers`](Self::register_propagation_request_handlers)
+    /// has also been called with the shared router.
     pub fn enable_propagation(&mut self) {
         self.propagation_node = true;
 
@@ -2088,6 +2096,9 @@ impl LxmRouter {
         validated: Vec<lxmf_core::stamp::PnStampResult>,
         invalid_count: usize,
     ) {
+        if let Some(remote_hash) = remote_hash {
+            self.autopeer_from_incoming_sync(remote_hash);
+        }
         for result in validated {
             let message_len = result.lxm_data.len() as u64;
             let peer_hash = remote_hash.filter(|hash| self.peers.contains_key(hash));
@@ -2143,6 +2154,27 @@ impl LxmRouter {
             }
         }
         self.finish_inbound_sync(link_id);
+    }
+
+    /// Peer with an identified propagation node that synced to us before we
+    /// peered with it, when its last announce shows it enabled within the
+    /// auto-peering depth (`propagation_resource_concluded`).
+    pub fn autopeer_from_incoming_sync(&mut self, remote_hash: [u8; 16]) -> bool {
+        if !self.config.autopeer || self.peers.contains_key(&remote_hash) {
+            return false;
+        }
+        let Some((info, hops)) = self.pn_announces.get(&remote_hash).cloned() else {
+            return false;
+        };
+        if !info.propagation_enabled || hops > self.config.autopeer_maxdepth {
+            return false;
+        }
+        log::debug!(
+            "Auto-peering with {:02x?} discovered via incoming sync",
+            &remote_hash[..4]
+        );
+        self.peer(info);
+        self.peers.contains_key(&remote_hash)
     }
 
     /// Handle a client propagation upload sent as a link packet
@@ -2725,6 +2757,13 @@ impl LxmRouter {
         let Some(info) = parse_propagation_announce(announced.dest_hash.0, Some(app_data)) else {
             return;
         };
+        if self.pn_announces.len() >= 4096
+            && !self.pn_announces.contains_key(&info.destination_hash)
+        {
+            self.pn_announces.clear();
+        }
+        self.pn_announces
+            .insert(info.destination_hash, (info.clone(), announced.hops));
         let is_static_peer = self.config.static_peers.contains(&announced.dest_hash.0);
         let is_existing_peer = self.peers.contains_key(&announced.dest_hash.0);
         let last_heard = self

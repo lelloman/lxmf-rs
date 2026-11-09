@@ -24,8 +24,12 @@ use rns_net::InterfaceId;
 
 /// Inbound stamp cost the peer requires from senders.
 const DELIVERY_STAMP_COST: f64 = 6.5;
-/// Propagation stamp cost the peer's propagation node requires.
-const PROPAGATION_STAMP_COST: f64 = 7.25;
+/// Propagation stamp cost the peer's propagation node requires. At least
+/// upstream's minimum accepted value (13 - 3) so stored messages qualify
+/// for sync to upstream propagation nodes.
+const PROPAGATION_STAMP_COST: f64 = 10.25;
+/// Peering cost upstream peers must meet to sync to this node.
+const PEERING_COST: f64 = 6.75;
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{:02x}", b)).collect()
@@ -67,6 +71,7 @@ fn main() {
         enforce_stamps: true,
         propagation_cost: StampCost::from_f64(PROPAGATION_STAMP_COST),
         propagation_cost_flexibility: StampCost::ZERO,
+        peering_cost: StampCost::from_f64(PEERING_COST),
         name: Some("lxmf-rs interop PN".into()),
         ..RouterConfig::default()
     };
@@ -129,6 +134,8 @@ fn main() {
         );
         r.enable_propagation();
     }
+    LxmRouter::register_propagation_request_handlers(&node, router.clone())
+        .expect("register propagation request handlers");
     let propagation_hash = router.lock().unwrap().propagation_dest_hash;
     emit(serde_json::json!({
         "event": "ready",
@@ -136,10 +143,11 @@ fn main() {
         "propagation_hash": hex(&propagation_hash),
         "delivery_stamp_cost": DELIVERY_STAMP_COST,
         "propagation_stamp_cost": PROPAGATION_STAMP_COST,
+        "peering_cost": PEERING_COST,
     }));
 
     let mut last_announce = Instant::now() - Duration::from_secs(3600);
-    let mut stored_reported = 0usize;
+    let mut reported = serde_json::Value::Null;
     loop {
         if last_announce.elapsed() > Duration::from_secs(8) {
             let r = router.lock().unwrap();
@@ -202,14 +210,36 @@ fn main() {
         {
             let mut r = router.lock().unwrap();
             r.jobs();
-            let stored = r.propagation_store.message_count();
-            if stored != stored_reported {
-                stored_reported = stored;
-                emit(serde_json::json!({
-                    "event": "propagation_stored",
-                    "count": stored,
-                    "client_received": r.propagation_store.client_propagation_messages_received,
-                }));
+            let mut transient_ids: Vec<String> = r
+                .propagation_store
+                .entries
+                .keys()
+                .map(|id| hex(id))
+                .collect();
+            transient_ids.sort();
+            let mut peers: Vec<serde_json::Value> = r
+                .peers
+                .values()
+                .map(|peer| {
+                    serde_json::json!({
+                        "hash": hex(&peer.destination_hash),
+                        "incoming": peer.incoming,
+                        "outgoing": peer.outgoing,
+                        "has_key": peer.peering_key.is_some(),
+                    })
+                })
+                .collect();
+            peers.sort_by_key(|peer| peer["hash"].as_str().unwrap_or_default().to_string());
+            let state = serde_json::json!({
+                "event": "propagation_state",
+                "count": transient_ids.len(),
+                "transient_ids": transient_ids,
+                "client_received": r.propagation_store.client_propagation_messages_received,
+                "peers": peers,
+            });
+            if state != reported {
+                emit(state.clone());
+                reported = state;
             }
         }
         std::thread::sleep(Duration::from_millis(500));

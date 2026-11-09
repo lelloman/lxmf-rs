@@ -112,7 +112,8 @@ Interop with this baseline is checked two ways:
 - `tests/interop/run_live.sh` runs upstream Python LXMF against the Rust
   `interop_peer` example over a real RNS TCP link: announces both ways,
   stamped opportunistic and direct (packet and resource) delivery with
-  proofs, and propagation through the Rust propagation node. CI runs it as
+  proofs, propagation through the Rust propagation node, and peer sync in
+  both directions between Rust and Python propagation nodes. CI runs it as
   the `Python LXMF Interop` job against the pinned upstream commits.
 
 ## RNS Dependency Baseline

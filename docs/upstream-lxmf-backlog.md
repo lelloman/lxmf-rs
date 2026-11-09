@@ -23,7 +23,14 @@ the authoritative reviewed commit is recorded in `UPSTREAM.md`. The remote
 
 ## Open Upstream Commits
 
-None. Every commit in
+None. Open Rust-side parity gaps (not tied to a new upstream commit):
+
+- Direct link packets are marked delivered when the transport admits them,
+  while upstream waits for the link packet proof. Blocked on `rns-net`:
+  `try_send_on_link` returns no packet hash and link packet proofs are only
+  matched for channel packets, so there is nothing to wait for yet.
+
+Every commit in
 `fab12ad9bf9f997797034950f289fe41a79dcf5a..101fd447815b4f4f699f8bb700e0df613f71efce`
 is ported, covered by tests, or explicitly closed as metadata/design-equivalent.
 
@@ -66,7 +73,10 @@ caches expired after 30 days instead of upstream's 180; propagation nodes
 accepted only offered peer transfers, not client uploads; delivery and
 propagation destinations had no proof strategy, so their packets were never
 proven; propagation nodes never generated peering keys; and propagated link
-packets never reached the sent state.
+packets never reached the sent state. Auto-peering with a propagation node
+that syncs to us before we peered with it (`propagation_resource_concluded`)
+was also missing and is ported, using cached propagation node announces in
+place of a transport query.
 
 ## Recently Reviewed And Closed
 
