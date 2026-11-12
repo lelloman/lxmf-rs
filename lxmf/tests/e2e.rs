@@ -1131,3 +1131,187 @@ fn test_direct_delivery_via_link() {
 
     peers.shutdown();
 }
+
+// ============================================================
+// Test F: Download from a propagation node
+// ============================================================
+
+/// Tests the order of a download from a propagation node, through a real
+/// network, as upstream `message_get_response`:
+///
+/// A node holds two messages for the client. While the client's delivery
+/// callback runs for either of them, the client has not acknowledged the
+/// batch (the node still holds both), has not saved their transient IDs and
+/// does not report the download complete, so a client that stops inside its
+/// callback finds the messages again. All three follow once the callbacks
+/// returned.
+#[test]
+fn test_downloaded_messages_are_delivered_before_acknowledgement() {
+    let port = find_free_port();
+    let (transport_node, transport_dir) = start_transport_node(port);
+    thread::sleep(Duration::from_millis(500));
+
+    // Create propagation node
+    let prop_dir = temp_dir("prop_node_download");
+    let prop_identity = Identity::new(&mut rns_crypto::OsRng);
+    let prop_router = Arc::new(Mutex::new(LxmRouter::new(
+        Identity::from_private_key(&prop_identity.get_private_key().unwrap()),
+        RouterConfig {
+            storagepath: prop_dir.clone(),
+            ..RouterConfig::default()
+        },
+    )));
+    let (prop_tx, _prop_rx) = mpsc::channel::<LxmfTestEvent>();
+    let prop_test_cb = LxmfTestCallbacks::new(LxmfCallbacks::new(prop_router.clone()), prop_tx);
+    let prop_node = Arc::new(start_client_node(port, Box::new(prop_test_cb)));
+    LxmRouter::register_propagation_request_handlers(&prop_node, prop_router.clone())
+        .expect("propagation request handlers");
+    let propagation_dest_hash = rns_core::destination::destination_hash(
+        APP_NAME,
+        &["propagation"],
+        Some(prop_identity.hash()),
+    );
+    {
+        let mut r = prop_router.lock().unwrap();
+        r.set_node(prop_node.clone());
+        r.enable_propagation();
+    }
+
+    // Create client node
+    let client = setup_lxmf_node(port, "client_download", None);
+    thread::sleep(Duration::from_millis(SETTLE_MS));
+    {
+        let r = prop_router.lock().unwrap();
+        r.announce_propagation_node_now();
+    }
+    assert!(
+        wait_for_announce(&client.rx, &propagation_dest_hash, DEFAULT_TIMEOUT).is_some(),
+        "Client should receive propagation node announce"
+    );
+
+    // The node holds two messages for the client
+    let sender_identity = Identity::new(&mut rns_crypto::OsRng);
+    let mut transient_ids = Vec::new();
+    for content in [&b"first"[..], &b"second"[..]] {
+        let packed = pack_test_message(
+            &sender_identity,
+            &client.delivery_dest_hash,
+            b"Stored",
+            content,
+        )
+        .packed;
+        let mut lxmf_data = packed[..DESTINATION_LENGTH].to_vec();
+        lxmf_data.extend(
+            client
+                .identity
+                .encrypt(&packed[DESTINATION_LENGTH..], &mut rns_crypto::OsRng)
+                .expect("encrypt for client"),
+        );
+        let transient_id = prop_router.lock().unwrap().lxmf_propagation(
+            &lxmf_data,
+            lxmf_core::stamp::StampValue::from_whole(8),
+            Some(&[0x5A; STAMP_SIZE]),
+            None,
+        );
+        transient_ids.push(transient_id.expect("node should store the message"));
+    }
+    let stored_on_node = || {
+        let r = prop_router.lock().unwrap();
+        r.propagation_store.message_count()
+    };
+    assert_eq!(stored_on_node(), 2);
+
+    // A delivery callback that holds each delivery until released
+    let (delivered_tx, delivered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel::<()>();
+    {
+        let mut r = client.router.lock().unwrap();
+        r.set_delivery_callback(Box::new(move |delivery: &LxmDelivery| {
+            let _ = delivered_tx.send(delivery.content.clone());
+            let _ = release_rx.recv_timeout(DEFAULT_TIMEOUT);
+        }));
+        r.set_outbound_propagation_node(propagation_dest_hash);
+        r.request_messages_from_propagation_node(None);
+    }
+    let saved_transient_ids = || {
+        let paths = lxmf_rs::storage::StoragePaths::new(&client.temp_dir);
+        lxmf_rs::storage::load_transient_ids(&paths.local_deliveries)
+    };
+
+    let mut delivered = Vec::new();
+    for _ in 0..2 {
+        let content = delivered_rx
+            .recv_timeout(DEFAULT_TIMEOUT)
+            .expect("Downloaded message should reach the delivery callback");
+        delivered.push(content);
+
+        // The callback is running. Give an acknowledgement sent too early
+        // time to reach the node.
+        thread::sleep(Duration::from_millis(500));
+        assert_eq!(
+            stored_on_node(),
+            2,
+            "Messages should not be acknowledged while a delivery callback runs"
+        );
+        assert_ne!(
+            client.router.lock().unwrap().propagation_transfer_state,
+            PropagationTransferState::Complete,
+            "Download should not be complete while a delivery callback runs"
+        );
+        let saved = saved_transient_ids();
+        assert!(
+            !transient_ids.iter().any(|id| saved.contains_key(id)),
+            "Transient IDs should not be saved while a delivery callback runs"
+        );
+        release_tx.send(()).unwrap();
+    }
+    delivered.sort();
+    assert_eq!(delivered, [b"first".to_vec(), b"second".to_vec()]);
+
+    // With both callbacks done, the batch is acknowledged and complete
+    let deadline = Instant::now() + DEFAULT_TIMEOUT;
+    while Instant::now() < deadline
+        && (stored_on_node() > 0
+            || client.router.lock().unwrap().propagation_transfer_state
+                != PropagationTransferState::Complete)
+    {
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(
+        stored_on_node(),
+        0,
+        "Node should delete the acknowledged messages"
+    );
+    {
+        let r = client.router.lock().unwrap();
+        assert_eq!(
+            r.propagation_transfer_state,
+            PropagationTransferState::Complete
+        );
+        assert_eq!(r.propagation_transfer_last_result, Some(2));
+        assert_eq!(r.propagation_transfer_last_duplicates, 0);
+    }
+    let saved = saved_transient_ids();
+    assert!(
+        transient_ids.iter().all(|id| saved.contains_key(id)),
+        "Transient IDs should be saved once the download completed"
+    );
+
+    // Cleanup
+    client.shutdown();
+    {
+        if let Ok(mut r) = prop_router.lock() {
+            r.exit_handler();
+        }
+    }
+    match Arc::try_unwrap(prop_node) {
+        Ok(node) => node.shutdown(),
+        Err(node) => {
+            let _ = node.event_sender().send(Event::Shutdown);
+            thread::sleep(Duration::from_millis(100));
+        }
+    }
+    transport_node.shutdown();
+    let _ = fs::remove_dir_all(&transport_dir);
+    let _ = fs::remove_dir_all(&prop_dir);
+}
