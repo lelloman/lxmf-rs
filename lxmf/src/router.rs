@@ -1881,12 +1881,13 @@ impl LxmRouter {
         }
     }
 
-    /// Deliver downloaded messages locally and acknowledge them so the node
-    /// deletes them (`message_get_response`).
-    fn ingest_downloaded_messages(&mut self, link_id: [u8; 16], messages: Vec<Vec<u8>>) {
+    /// Deliver downloaded messages locally (`message_get_response`). Returns
+    /// the transient IDs to acknowledge and the number of duplicates, for
+    /// `acknowledge_downloaded_messages` once the delivery callbacks ran.
+    fn ingest_downloaded_messages(&mut self, messages: &[Vec<u8>]) -> (Vec<Value>, usize) {
         let mut duplicates = 0;
         let mut haves = Vec::with_capacity(messages.len());
-        for lxmf_data in &messages {
+        for lxmf_data in messages {
             if self
                 .lxmf_propagation(lxmf_data, lxmf_core::stamp::StampValue::ZERO, None, None)
                 .is_none()
@@ -1895,6 +1896,22 @@ impl LxmRouter {
             }
             haves.push(Value::Bin(rns_crypto::sha256::sha256(lxmf_data).to_vec()));
         }
+        (haves, duplicates)
+    }
+
+    /// Acknowledge downloaded messages so the node deletes them, and report
+    /// the download complete (`message_get_response`). Upstream fires the
+    /// delivery callback from `lxmf_delivery`, before it acknowledges; ours
+    /// are deferred, so this runs after them. A client that stops inside its
+    /// callback then still finds the messages on the node, and not in its
+    /// saved transient IDs.
+    fn acknowledge_downloaded_messages(
+        &mut self,
+        link_id: [u8; 16],
+        haves: Vec<Value>,
+        duplicates: usize,
+    ) {
+        let received = haves.len();
         if !haves.is_empty() {
             if let Some(node) = &self.node {
                 let request = msgpack::pack(&Value::Array(vec![Value::Nil, Value::Array(haves)]));
@@ -1909,7 +1926,7 @@ impl LxmRouter {
         self.propagation_transfer_state = PropagationTransferState::Complete;
         self.propagation_transfer_progress = 1.0;
         self.propagation_transfer_last_duplicates = duplicates;
-        self.propagation_transfer_last_result = Some(messages.len());
+        self.propagation_transfer_last_result = Some(received);
         let _ = storage::save_transient_ids(
             &self.paths.local_deliveries,
             &self.locally_delivered_transient_ids,
@@ -4756,11 +4773,18 @@ impl Callbacks for LxmfCallbacks {
         if router.propagation_link == Some(link_id.0) && router.download.phase.is_some() {
             if let Some(messages) = router.handle_download_response(link_id.0, &data) {
                 // Decrypting and delivering happens off the driver thread.
+                // The node is acknowledged once the delivery callbacks ran.
                 let router = self.router.clone();
                 thread::spawn(move || {
+                    let mut ingested = (Vec::new(), 0);
                     deliver_unlocked(&router, |router| {
-                        router.ingest_downloaded_messages(link_id.0, messages)
+                        ingested = router.ingest_downloaded_messages(&messages)
                     });
+                    let (haves, duplicates) = ingested;
+                    router
+                        .lock()
+                        .unwrap()
+                        .acknowledge_downloaded_messages(link_id.0, haves, duplicates);
                 });
             }
             return;
