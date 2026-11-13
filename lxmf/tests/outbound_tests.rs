@@ -8,7 +8,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 
 use lxmf_core::constants::*;
-use lxmf_rs::outbound::{LinkCreation, OutboundNetwork, SendFailed, DEFAULT_PER_HOP_TIMEOUT};
+use lxmf_rs::outbound::{
+    LinkCreation, OutboundNetwork, SendFailed, SentLinkPacket, DEFAULT_PER_HOP_TIMEOUT,
+};
 use lxmf_rs::router::{LxmRouter, OutboundMessage, RouterConfig};
 use rns_crypto::identity::Identity;
 
@@ -46,7 +48,13 @@ struct MockNetwork {
     path_requests: Mutex<Vec<[u8; 16]>>,
     drops: Mutex<Vec<[u8; 16]>>,
     links: Mutex<Vec<[u8; 16]>>,
+    closed_links: Mutex<Vec<[u8; 16]>>,
     retained: Mutex<Vec<[u8; 16]>>,
+}
+
+/// The hash the mock gives the `n`th link packet it sends (from 1).
+fn link_packet_hash(n: usize) -> [u8; 32] {
+    [n as u8; 32]
 }
 
 impl MockNetwork {
@@ -99,12 +107,21 @@ impl OutboundNetwork for MockNetwork {
         hash[0] = sent.len() as u8;
         Ok(hash)
     }
-    fn send_link_packet(&self, link_id: [u8; 16], _data: Vec<u8>) -> Result<(), SendFailed> {
+    fn send_link_packet(
+        &self,
+        link_id: [u8; 16],
+        _data: Vec<u8>,
+    ) -> Result<SentLinkPacket, SendFailed> {
         if *self.fail_sends.lock().unwrap() {
             return Err(SendFailed);
         }
-        self.link_packets.lock().unwrap().push(link_id);
-        Ok(())
+        let mut sent = self.link_packets.lock().unwrap();
+        sent.push(link_id);
+        let hash = link_packet_hash(sent.len());
+        Ok(SentLinkPacket::new(move || Some(hash)))
+    }
+    fn close_link(&self, link_id: [u8; 16]) {
+        self.closed_links.lock().unwrap().push(link_id);
     }
     fn send_link_resource(
         &self,
@@ -274,6 +291,9 @@ fn direct_delivery_establishes_link_then_sends() {
 
     router.process_outbound_with(&network);
     assert_eq!(*network.link_packets.lock().unwrap(), vec![link_id]);
+    // Delivered once the recipient proves the packet.
+    assert_eq!(router.outbound[0].state, MessageState::Sending);
+    router.handle_delivery_proof(link_id, link_packet_hash(1));
     assert_eq!(router.outbound[0].state, MessageState::Delivered);
 
     router.process_outbound_with(&network);
@@ -341,6 +361,8 @@ fn small_propagated_message_is_sent_as_link_packet() {
     router.process_outbound_with(&network);
 
     assert_eq!(*network.link_packets.lock().unwrap(), vec![link_id]);
+    // Accepted once the propagation node proves the packet.
+    router.handle_delivery_proof(link_id, link_packet_hash(1));
     assert_eq!(router.outbound[0].state, MessageState::Sent);
     router.process_outbound_with(&network);
     assert!(router.outbound.is_empty(), "propagated and accepted");
@@ -522,5 +544,162 @@ fn cancelling_a_generating_message_fails_it() {
     assert!(router.outbound.is_empty());
     assert_eq!(failed.load(Ordering::SeqCst), 1);
     assert!(!router.cancel_outbound(&hash));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+// A message sent as a link packet is delivered (or, propagated, accepted by
+// the propagation node) only once the proof of that packet comes back, as
+// upstream's `LXMessage.send` sets the packet receipt's delivery callback.
+
+#[test]
+fn direct_link_packet_is_not_delivered_before_its_proof() {
+    let (mut router, dir) = test_router("direct_awaits_proof");
+    let network = MockNetwork::with_path(DEST);
+    let link_id = [0xEE; 16];
+    router.direct_links.insert(DEST, link_id);
+    router
+        .handle_outbound(message(DeliveryMethod::Direct, 300))
+        .unwrap();
+
+    router.process_outbound_with(&network);
+
+    assert_eq!(*network.link_packets.lock().unwrap(), vec![link_id]);
+    assert_eq!(router.outbound[0].state, MessageState::Sending);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn propagated_link_packet_is_not_accepted_before_its_proof() {
+    let (mut router, dir) = test_router("propagated_awaits_proof");
+    let propagation_node = [0xB0; 16];
+    let network = MockNetwork::with_path(propagation_node);
+    let link_id = [0xB1; 16];
+    router.set_propagation_dest_hash(propagation_node);
+    router.propagation_link = Some(link_id);
+    let mut msg = message(DeliveryMethod::Propagated, 200);
+    msg.propagation_packed = Some(vec![0u8; LINK_PACKET_MAX_CONTENT]);
+    msg.propagation_stamp = Some(vec![0u8; STAMP_SIZE]);
+    router.handle_outbound(msg).unwrap();
+
+    router.process_outbound_with(&network);
+
+    assert_eq!(*network.link_packets.lock().unwrap(), vec![link_id]);
+    assert_eq!(router.outbound[0].state, MessageState::Sending);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn link_packet_proof_must_name_the_packet_and_its_link() {
+    let (mut router, dir) = test_router("link_proof_match");
+    let network = MockNetwork::with_path(DEST);
+    let link_id = [0xEE; 16];
+    router.direct_links.insert(DEST, link_id);
+    router
+        .handle_outbound(message(DeliveryMethod::Direct, 300))
+        .unwrap();
+    router.process_outbound_with(&network);
+
+    // Another packet on the link, or this packet's hash on another link,
+    // proves nothing about this message.
+    router.handle_delivery_proof(link_id, link_packet_hash(2));
+    router.handle_delivery_proof([0xEF; 16], link_packet_hash(1));
+    assert_eq!(router.outbound[0].state, MessageState::Sending);
+
+    router.handle_delivery_proof(link_id, link_packet_hash(1));
+    assert_eq!(router.outbound[0].state, MessageState::Delivered);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn link_packet_proof_is_due_within_six_round_trips_of_the_link() {
+    let (mut router, dir) = test_router("link_proof_timeout_rtt");
+    let network = MockNetwork::with_path(DEST);
+    let link_id = [0xEE; 16];
+    router.direct_links.insert(DEST, link_id);
+    router.link_rtts.insert(link_id, 2.0);
+    router
+        .handle_outbound(message(DeliveryMethod::Direct, 300))
+        .unwrap();
+
+    let before = lxmf_rs::router::now_timestamp();
+    router.process_outbound_with(&network);
+    let after = lxmf_rs::router::now_timestamp();
+
+    let timeout_at = router.outbound[0].link_packet.as_ref().unwrap().timeout_at;
+    assert!(
+        (before + 12.0..=after + 12.0).contains(&timeout_at),
+        "proof due six round trips after sending, got {}",
+        timeout_at - before
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn overdue_link_packet_proof_tears_the_link_down_and_requeues() {
+    let (mut router, dir) = test_router("link_proof_overdue");
+    let network = MockNetwork::with_path(DEST);
+    let link_id = [0xEE; 16];
+    router.direct_links.insert(DEST, link_id);
+    router
+        .handle_outbound(message(DeliveryMethod::Direct, 300))
+        .unwrap();
+    router.process_outbound_with(&network);
+    router.outbound[0].link_packet.as_mut().unwrap().timeout_at = 0.0;
+
+    router.process_outbound_with(&network);
+
+    // As `__link_packet_timed_out`: the link goes and the message is queued
+    // again.
+    assert_eq!(*network.closed_links.lock().unwrap(), vec![link_id]);
+    assert!(!router.direct_links.contains_key(&DEST));
+    let msg = &router.outbound[0];
+    assert_eq!(msg.state, MessageState::Outbound);
+    assert!(msg.link_packet.is_none() && msg.link_id.is_none());
+
+    // The proof of the abandoned packet no longer counts.
+    router.handle_delivery_proof(link_id, link_packet_hash(1));
+    assert_eq!(router.outbound[0].state, MessageState::Outbound);
+
+    // Its link closed, the path to the recipient is requested and, at its
+    // next attempt, the message goes out again over a new link.
+    advance(&mut router);
+    router.process_outbound_with(&network);
+    assert_eq!(*network.path_requests.lock().unwrap(), vec![DEST]);
+    advance(&mut router);
+    router.process_outbound_with(&network);
+    assert_eq!(*network.links.lock().unwrap(), vec![DEST]);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn resource_completing_on_the_link_does_not_conclude_a_link_packet() {
+    use rns_net::driver::Callbacks;
+
+    let (mut router, dir) = test_router("link_packet_vs_resource");
+    let network = MockNetwork::with_path(DEST);
+    let link_id = [0xEE; 16];
+    router.direct_links.insert(DEST, link_id);
+    router
+        .handle_outbound(message(DeliveryMethod::Direct, 300))
+        .unwrap();
+    router.process_outbound_with(&network);
+    let router = Arc::new(Mutex::new(router));
+    let mut callbacks = lxmf_rs::router::LxmfCallbacks::new(router.clone());
+
+    callbacks.on_resource_completed(rns_core::types::LinkId(link_id));
+    assert_eq!(
+        router.lock().unwrap().outbound[0].state,
+        MessageState::Sending
+    );
+
+    callbacks.on_proof(
+        rns_core::types::DestHash(link_id),
+        rns_core::types::PacketHash(link_packet_hash(1)),
+        0.1,
+    );
+    assert_eq!(
+        router.lock().unwrap().outbound[0].state,
+        MessageState::Delivered
+    );
     let _ = std::fs::remove_dir_all(dir);
 }

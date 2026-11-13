@@ -20,8 +20,8 @@ use crate::handlers::{
     decide_propagation_action, parse_propagation_announce, PropagationAnnounceResult,
 };
 use crate::outbound::{
-    destination_round_trip, retry_jitter, schedule_attempt, DeliveryTracking, LinkCreation,
-    MediumInfo, OutboundNetwork,
+    destination_round_trip, link_packet_timeout, retry_jitter, schedule_attempt, DeliveryTracking,
+    LinkCreation, MediumInfo, OutboundNetwork, SentLinkPacket,
 };
 use crate::peer::{LxmPeer, OfferEntry, SyncAction, SyncPostponeReason};
 use crate::propagation::{PropagationEntry, PropagationStore};
@@ -227,6 +227,16 @@ pub enum UnverifiedReason {
     SignatureInvalid = 0x02,
 }
 
+/// A message sent as a link packet, waiting for the proof of that packet
+/// (the packet receipt upstream's `LXMessage.send` watches).
+#[derive(Debug)]
+pub struct LinkPacketReceipt {
+    /// The packet sent; a proof naming its hash concludes the message.
+    pub packet: SentLinkPacket,
+    /// When the proof is overdue and the message goes out again.
+    pub timeout_at: f64,
+}
+
 /// An outbound message queued for delivery.
 pub struct OutboundMessage {
     pub destination_hash: [u8; DESTINATION_LENGTH],
@@ -250,6 +260,8 @@ pub struct OutboundMessage {
     pub link_id: Option<[u8; 16]>,
     /// Tracking packet_hash for opportunistic delivery
     pub packet_hash: Option<[u8; 32]>,
+    /// The link packet carrying this message, while its proof is awaited.
+    pub link_packet: Option<LinkPacketReceipt>,
     /// Retry timing and slow-path bookkeeping used by outbound processing.
     pub tracking: DeliveryTracking,
     /// The message carries a ticket from [`LxmRouter::generate_ticket`];
@@ -286,6 +298,7 @@ impl OutboundMessage {
             progress_callback: None,
             link_id: None,
             packet_hash: None,
+            link_packet: None,
             tracking: DeliveryTracking::default(),
             include_ticket: false,
         }
@@ -432,6 +445,9 @@ pub struct LxmRouter {
     pub link_remote_identities: HashMap<[u8; 16], [u8; 16]>, // link_id -> identity_hash
     pub active_propagation_links: Vec<[u8; 16]>,
     pub propagation_link: Option<[u8; 16]>,
+    /// Round trip of each established link, which times its packets'
+    /// proofs.
+    pub link_rtts: HashMap<[u8; 16], f64>, // link_id -> rtt
 
     // Caches
     pub locally_delivered_transient_ids: HashMap<[u8; 32], f64>,
@@ -578,6 +594,7 @@ impl LxmRouter {
             direct_link_tx,
             direct_link_rx,
             backchannel_links: HashMap::new(),
+            link_rtts: HashMap::new(),
             link_destinations: HashMap::new(),
             link_remote_identities: HashMap::new(),
             active_propagation_links: Vec::new(),
@@ -2085,11 +2102,15 @@ impl LxmRouter {
     /// destination's announce data retained, and failed, cancelled or
     /// rejected messages fire their failed callback.
     pub fn process_outbound_with<N: OutboundNetwork + ?Sized>(&mut self, network: &N) {
+        // Taken before the network queries below. They wait on the driver,
+        // which may itself be waiting for this router in a callback with a
+        // link packet's proof: judged by the time the pass started, that
+        // proof is not overdue for the wait the pass made it sit through.
+        let now = now_timestamp();
         self.drain_direct_link_results();
         self.process_stamp_generation(network);
 
         let medium = MediumInfo::query(network);
-        let now = now_timestamp();
         let mut concluded: Vec<(usize, bool)> = Vec::new(); // (index, fire failed callback)
 
         for idx in 0..self.outbound.len() {
@@ -2571,14 +2592,17 @@ impl LxmRouter {
                     .get(&dest_hash)
                     .copied()
                     .unwrap_or(true);
+                let timeout = self.link_packet_timeout(&dest_hash, &link_id, network);
                 let msg = &mut self.outbound[idx];
                 msg.tracking.sent_on_slow_path = slow;
                 if msg.tracking.progress < 0.05 {
                     msg.tracking.progress = 0.05;
                 }
-                return send_direct_on_link(network, msg, link_id, auto_compress).is_err();
+                return send_direct_on_link(network, msg, link_id, auto_compress, now + timeout)
+                    .is_err();
             }
             // Transfer in progress; wait for it to conclude.
+            self.check_link_packet_timeout(idx, network, now);
             return false;
         }
 
@@ -2617,10 +2641,12 @@ impl LxmRouter {
         if let Some(link_id) = self.propagation_link {
             if self.outbound[idx].state == MessageState::Outbound {
                 let slow = self.slow_path(&propagation_node, network, medium);
+                let timeout = self.link_packet_timeout(&propagation_node, &link_id, network);
                 let msg = &mut self.outbound[idx];
                 msg.tracking.sent_on_slow_path = slow;
-                return send_propagated_on_link(network, msg, link_id).is_err();
+                return send_propagated_on_link(network, msg, link_id, now + timeout).is_err();
             }
+            self.check_link_packet_timeout(idx, network, now);
             return false;
         }
 
@@ -2633,6 +2659,89 @@ impl LxmRouter {
         }
 
         self.attempt_link(idx, propagation_node, network, medium, now)
+    }
+
+    /// How long the proof of a packet sent on `link_id` to `target` may
+    /// take: six round trips of the link. The round trip is reported when
+    /// the link is established; until then the first hop's timeout stands
+    /// in for it.
+    fn link_packet_timeout<N: OutboundNetwork + ?Sized>(
+        &self,
+        target: &[u8; 16],
+        link_id: &[u8; 16],
+        network: &N,
+    ) -> f64 {
+        let rtt = self
+            .link_rtts
+            .get(link_id)
+            .copied()
+            .unwrap_or_else(|| network.first_hop_timeout(target));
+        link_packet_timeout(rtt)
+    }
+
+    /// `LXMessage.__link_packet_timed_out`: when the proof of the link
+    /// packet carrying a message is overdue, the link is torn down and the
+    /// message returns to the queue, to go out again on a new link once the
+    /// path is requested again, as for a link that closed.
+    fn check_link_packet_timeout<N: OutboundNetwork + ?Sized>(
+        &mut self,
+        idx: usize,
+        network: &N,
+        now: f64,
+    ) {
+        let msg = &mut self.outbound[idx];
+        let overdue = msg.state == MessageState::Sending
+            && msg
+                .link_packet
+                .as_ref()
+                .is_some_and(|receipt| now >= receipt.timeout_at);
+        let Some(link_id) = msg.link_id.filter(|_| overdue) else {
+            return;
+        };
+        log::debug!(
+            "No proof of {:02x?} on link {:02x?}, tearing the link down",
+            &msg.message_hash[..4],
+            &link_id[..4]
+        );
+        msg.link_packet = None;
+        msg.link_id = None;
+        msg.state = MessageState::Outbound;
+        msg.tracking.link_closed = Some(true);
+        self.direct_links.retain(|_, link| *link != link_id);
+        self.backchannel_links.retain(|_, link| *link != link_id);
+        if self.propagation_link == Some(link_id) {
+            self.propagation_link = None;
+        }
+        network.close_link(link_id);
+    }
+
+    /// A delivery proof for a packet this router sent, to `destination`:
+    /// conclude the message it carried. Opportunistic messages are matched
+    /// by packet hash; messages sent as link packets by the link (the
+    /// proof's destination) and the hash their packet was sent with.
+    /// Returns whether a message held on a slow path concluded.
+    pub fn handle_delivery_proof(&mut self, destination: [u8; 16], packet_hash: [u8; 32]) -> bool {
+        for msg in &mut self.outbound {
+            let proved = msg.packet_hash == Some(packet_hash)
+                || (msg.state == MessageState::Sending
+                    && msg.link_id == Some(destination)
+                    && msg
+                        .link_packet
+                        .as_ref()
+                        .and_then(|receipt| receipt.packet.packet_hash())
+                        == Some(packet_hash));
+            if !proved {
+                continue;
+            }
+            msg.link_packet = None;
+            let concluded = if msg.method == DeliveryMethod::Propagated {
+                mark_propagated(msg)
+            } else {
+                mark_delivered(msg)
+            };
+            return concluded && msg.tracking.sent_on_slow_path;
+        }
+        false
     }
 
     /// Clean up inactive links.
@@ -4011,13 +4120,14 @@ fn mark_propagated(msg: &mut OutboundMessage) -> bool {
 
 /// Send a direct message on an established link, as a packet or resource.
 ///
-/// Link packets carry no completion callback here, so a dispatched packet on
-/// the encrypted link is treated as delivered.
+/// A packet's message is delivered once the proof of the packet comes back,
+/// or goes out again if it has not by `proof_timeout_at`.
 fn send_direct_on_link<N: OutboundNetwork + ?Sized>(
     network: &N,
     msg: &mut OutboundMessage,
     link_id: [u8; 16],
     auto_compress: bool,
+    proof_timeout_at: f64,
 ) -> Result<(), crate::outbound::SendFailed> {
     msg.link_id = Some(link_id);
     if msg.representation == Representation::Unknown {
@@ -4025,9 +4135,13 @@ fn send_direct_on_link<N: OutboundNetwork + ?Sized>(
             message::resolve_delivery(DeliveryMethod::Direct, msg.packed.len(), None).1;
     }
     if msg.representation == Representation::Packet {
-        network.send_link_packet(link_id, msg.packed.clone())?;
+        let packet = network.send_link_packet(link_id, msg.packed.clone())?;
+        msg.link_packet = Some(LinkPacketReceipt {
+            packet,
+            timeout_at: proof_timeout_at,
+        });
+        msg.state = MessageState::Sending;
         msg.tracking.progress = 0.5;
-        mark_delivered(msg);
     } else {
         msg.representation = Representation::Resource;
         network.send_link_resource(link_id, msg.packed.clone(), auto_compress, false)?;
@@ -4044,6 +4158,7 @@ fn send_propagated_on_link<N: OutboundNetwork + ?Sized>(
     network: &N,
     msg: &mut OutboundMessage,
     link_id: [u8; 16],
+    proof_timeout_at: f64,
 ) -> Result<(), crate::outbound::SendFailed> {
     let Some(prop_packed) = msg.propagation_packed.clone() else {
         log::error!("Propagated message has no propagation-packed data");
@@ -4059,8 +4174,14 @@ fn send_propagated_on_link<N: OutboundNetwork + ?Sized>(
         .1;
     }
     if msg.representation == Representation::Packet {
-        network.send_link_packet(link_id, prop_packed)?;
-        mark_propagated(msg);
+        // Accepted by the propagation node once the packet's proof is back.
+        let packet = network.send_link_packet(link_id, prop_packed)?;
+        msg.link_packet = Some(LinkPacketReceipt {
+            packet,
+            timeout_at: proof_timeout_at,
+        });
+        msg.state = MessageState::Sending;
+        msg.tracking.progress = 0.5;
     } else {
         msg.representation = Representation::Resource;
         network.send_link_resource(link_id, prop_packed, false, true)?;
@@ -4395,6 +4516,7 @@ impl Callbacks for LxmfCallbacks {
         is_initiator: bool,
     ) {
         let mut router = self.router.lock().unwrap();
+        router.link_rtts.insert(link_id.0, rtt);
 
         if is_initiator {
             router
@@ -4471,6 +4593,7 @@ impl Callbacks for LxmfCallbacks {
         router.direct_links.retain(|_, v| *v != link);
         router.pending_direct_links.retain(|_, v| *v != link);
         router.backchannel_links.retain(|_, v| *v != link);
+        router.link_rtts.remove(&link);
         router.link_destinations.remove(&link);
         router.link_remote_identities.remove(&link);
         router.backchannel_identified.remove(&link);
@@ -4498,6 +4621,7 @@ impl Callbacks for LxmfCallbacks {
             let on_this_link = msg.link_id == Some(link);
             if on_this_link && msg.state == MessageState::Sending {
                 msg.state = MessageState::Outbound;
+                msg.link_packet = None;
             }
             if on_this_link {
                 msg.link_id = None;
@@ -4665,7 +4789,10 @@ impl Callbacks for LxmfCallbacks {
             }
         }
         for msg in &mut router.outbound {
-            if msg.link_id == Some(link_id.0) && msg.state == MessageState::Sending {
+            if msg.link_id == Some(link_id.0)
+                && msg.state == MessageState::Sending
+                && msg.representation != Representation::Packet
+            {
                 msg.tracking.progress = 0.10 + fraction * 0.90;
                 if let Some(cb) = &msg.progress_callback {
                     cb(msg, msg.tracking.progress);
@@ -4709,7 +4836,10 @@ impl Callbacks for LxmfCallbacks {
         // Mark the outbound message transferred on this link concluded.
         let mut slow_path_concluded = false;
         for msg in &mut router.outbound {
-            if msg.link_id == Some(link_id.0) && msg.state == MessageState::Sending {
+            if msg.link_id == Some(link_id.0)
+                && msg.state == MessageState::Sending
+                && msg.representation != Representation::Packet
+            {
                 let changed = if msg.method == DeliveryMethod::Propagated {
                     mark_propagated(msg)
                 } else {
@@ -4746,7 +4876,10 @@ impl Callbacks for LxmfCallbacks {
         let rejected = error == RESOURCE_REJECTED;
         let mut failed_outbound = false;
         for msg in &mut router.outbound {
-            if msg.link_id == Some(link_id.0) && msg.state == MessageState::Sending {
+            if msg.link_id == Some(link_id.0)
+                && msg.state == MessageState::Sending
+                && msg.representation != Representation::Packet
+            {
                 msg.link_id = None;
                 if rejected {
                     log::info!("Receiver rejected {:02x?}", &msg.message_hash[..4]);
@@ -4807,18 +4940,12 @@ impl Callbacks for LxmfCallbacks {
         }
     }
 
-    fn on_proof(&mut self, _dest_hash: DestHash, packet_hash: PacketHash, _rtt: f64) {
-        let mut router = self.router.lock().unwrap();
-
-        // Check if this proof matches an outbound message
-        let mut slow_path_concluded = false;
-        for msg in &mut router.outbound {
-            if msg.packet_hash == Some(packet_hash.0) {
-                slow_path_concluded = mark_delivered(msg) && msg.tracking.sent_on_slow_path;
-                break;
-            }
-        }
-        drop(router);
+    fn on_proof(&mut self, dest_hash: DestHash, packet_hash: PacketHash, _rtt: f64) {
+        let slow_path_concluded = self
+            .router
+            .lock()
+            .unwrap()
+            .handle_delivery_proof(dest_hash.0, packet_hash.0);
         if slow_path_concluded {
             self.kick_outbound();
         }

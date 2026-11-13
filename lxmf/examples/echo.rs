@@ -138,6 +138,7 @@ fn main() {
             announces_from_internal: true,
             announces_to_internal: None,
             stamp_costs: Default::default(),
+            announce_limits: Default::default(),
             ifac: None,
             discovery: None,
         }],

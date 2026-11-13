@@ -330,6 +330,7 @@ fn start_transport_node(port: u16) -> (RnsNode, PathBuf) {
             announces_from_internal: true,
             announces_to_internal: None,
             stamp_costs: Default::default(),
+            announce_limits: Default::default(),
             ifac: None,
             discovery: None,
         }],
@@ -370,6 +371,7 @@ fn start_client_node(port: u16, callbacks: Box<dyn Callbacks>) -> RnsNode {
             announces_from_internal: true,
             announces_to_internal: None,
             stamp_costs: Default::default(),
+            announce_limits: Default::default(),
             ifac: None,
             discovery: None,
         }],
@@ -1115,10 +1117,21 @@ fn test_direct_delivery_via_link() {
         assert_eq!(content, b"LinkMsg");
     }
 
-    // Delivered messages leave the queue, retaining the destination's
-    // announce data, on the next outbound pass (as upstream does).
-    peers.alice.router.lock().unwrap().jobs();
-    assert!(peers.alice.router.lock().unwrap().outbound.is_empty());
+    // Delivered once Bob proves the link packet; delivered messages leave
+    // the queue, retaining the destination's announce data, on the next
+    // outbound pass (as upstream does).
+    let deadline = Instant::now() + DEFAULT_TIMEOUT;
+    loop {
+        peers.alice.router.lock().unwrap().jobs();
+        if peers.alice.router.lock().unwrap().outbound.is_empty() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "Bob's proof should conclude the message"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
 
     assert!(
         wait_for_known_destination_retained(

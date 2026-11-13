@@ -22,7 +22,7 @@ Status: `open`, `done` (with the commit), or `blocked` (with the reason).
 | Paper messages: `ingest_lxm_uri`, `from_uri` stripping `/` | done (`41b8237`) |
 | Ratchets on the delivery destination (`enable_ratchets`, `enforce_ratchets`) | done (`a4df128`) |
 | Propagated messages encrypted with the recipient's announced ratchet | blocked: `rns-net` exposes no lookup of remote ratchets (opportunistic sends already use them) |
-| Direct and propagated link packets wait for their proof | blocked: `rns-net` exposes no link packet receipt |
+| Direct and propagated link packets wait for their proof | done (with the link send receipts of `rns-net` 0.13) |
 
 ## Inbound delivery
 
