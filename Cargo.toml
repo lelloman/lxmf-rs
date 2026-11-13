@@ -12,8 +12,8 @@ authors = ["lxmf-rs contributors"]
 
 [workspace.dependencies]
 rns-crypto = { version = "=0.2.2", default-features = false }
-rns-core = { version = "=0.7.0", default-features = false }
-rns-net = "=0.12.0"
+rns-core = { version = "=0.8.0", default-features = false }
+rns-net = "=0.13.0"
 lxmf-core = { version = "0.2.0", path = "lxmf-core" }
 lxmf-rs = { version = "0.2.0", path = "lxmf" }
 log = "0.4"

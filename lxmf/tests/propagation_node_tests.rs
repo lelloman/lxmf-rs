@@ -9,7 +9,9 @@ use std::time::{Duration, Instant};
 
 use lxmf_core::constants::*;
 use lxmf_core::stamp::{StampCost, StampValue};
-use lxmf_rs::outbound::{LinkCreation, OutboundNetwork, SendFailed, DEFAULT_PER_HOP_TIMEOUT};
+use lxmf_rs::outbound::{
+    LinkCreation, OutboundNetwork, SendFailed, SentLinkPacket, DEFAULT_PER_HOP_TIMEOUT,
+};
 use lxmf_rs::peer::LxmPeer;
 use lxmf_rs::router::{LxmRouter, LxmfCallbacks, RouterConfig};
 use rns_core::msgpack::{pack, Value};
@@ -242,9 +244,14 @@ impl OutboundNetwork for PathlessNetwork {
     ) -> Result<[u8; 32], SendFailed> {
         Err(SendFailed)
     }
-    fn send_link_packet(&self, _link_id: [u8; 16], _data: Vec<u8>) -> Result<(), SendFailed> {
+    fn send_link_packet(
+        &self,
+        _link_id: [u8; 16],
+        _data: Vec<u8>,
+    ) -> Result<SentLinkPacket, SendFailed> {
         Err(SendFailed)
     }
+    fn close_link(&self, _link_id: [u8; 16]) {}
     fn send_link_resource(
         &self,
         _link_id: [u8; 16],

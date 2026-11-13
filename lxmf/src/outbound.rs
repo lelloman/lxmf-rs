@@ -58,6 +58,49 @@ pub struct DeliveryTracking {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SendFailed;
 
+/// `Link.TRAFFIC_TIMEOUT_FACTOR`: a link packet's proof is overdue after
+/// this many round trips of the link.
+pub const LINK_TRAFFIC_TIMEOUT_FACTOR: f64 = 6.0;
+
+/// The shortest wait for a link packet's proof. Upstream's own floor is
+/// `Link.TRAFFIC_TIMEOUT_MIN_MS` (5 ms), but it only looks for overdue
+/// receipts once per `Transport.receipts_check_interval` (1 s), so a proof
+/// is never overdue sooner in practice. Checked on every outbound pass here,
+/// a 5 ms floor would abandon packets on fast links before their proof is
+/// back.
+pub const LINK_TRAFFIC_TIMEOUT_MIN: f64 = 1.0;
+
+/// How long the proof of a packet sent on a link with round trip `rtt` may
+/// take (`PacketReceipt.timeout` for link packets).
+pub fn link_packet_timeout(rtt: f64) -> f64 {
+    (rtt * LINK_TRAFFIC_TIMEOUT_FACTOR).max(LINK_TRAFFIC_TIMEOUT_MIN)
+}
+
+/// A link packet the transport admitted. The transport encrypts link
+/// packets, so the hash a delivery proof of one carries is known once the
+/// transport has built it, which is before any proof of it can arrive.
+pub struct SentLinkPacket(Box<dyn Fn() -> Option<[u8; 32]> + Send>);
+
+impl SentLinkPacket {
+    /// A sent packet whose hash `packet_hash` reports once it is known.
+    pub fn new(packet_hash: impl Fn() -> Option<[u8; 32]> + Send + 'static) -> Self {
+        Self(Box::new(packet_hash))
+    }
+
+    /// The hash a delivery proof of this packet carries, once known.
+    pub fn packet_hash(&self) -> Option<[u8; 32]> {
+        (self.0)()
+    }
+}
+
+impl std::fmt::Debug for SentLinkPacket {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("SentLinkPacket")
+            .field(&self.packet_hash())
+            .finish()
+    }
+}
+
 /// Network operations needed by outbound processing.
 ///
 /// Implemented for `Arc<RnsNode>`; tests use a mock.
@@ -80,7 +123,16 @@ pub trait OutboundNetwork {
         public_key: &[u8; 64],
         data: &[u8],
     ) -> Result<[u8; 32], SendFailed>;
-    fn send_link_packet(&self, link_id: [u8; 16], data: Vec<u8>) -> Result<(), SendFailed>;
+    /// Send a packet on a link; its delivery proof is matched by the hash
+    /// the returned handle reports.
+    fn send_link_packet(
+        &self,
+        link_id: [u8; 16],
+        data: Vec<u8>,
+    ) -> Result<SentLinkPacket, SendFailed>;
+    /// Tear a link down, as upstream does when a link packet's proof is
+    /// overdue (`LXMessage.__link_packet_timed_out`).
+    fn close_link(&self, link_id: [u8; 16]);
     fn send_link_resource(
         &self,
         link_id: [u8; 16],
@@ -200,13 +252,23 @@ impl OutboundNetwork for Arc<RnsNode> {
             })
     }
 
-    fn send_link_packet(&self, link_id: [u8; 16], data: Vec<u8>) -> Result<(), SendFailed> {
+    fn send_link_packet(
+        &self,
+        link_id: [u8; 16],
+        data: Vec<u8>,
+    ) -> Result<SentLinkPacket, SendFailed> {
         self.try_send_on_link(link_id, data, 0)
-            .map(|_receipt| ())
+            .map(|receipt| SentLinkPacket::new(move || receipt.packet_hash().map(|hash| hash.0)))
             .map_err(|err| {
                 log::debug!("Link packet send not admitted: {:?}", err);
                 SendFailed
             })
+    }
+
+    fn close_link(&self, link_id: [u8; 16]) {
+        if RnsNode::teardown_link(self, link_id).is_err() {
+            log::debug!("Could not tear down link {:02x?}", &link_id[..4]);
+        }
     }
 
     fn send_link_resource(
