@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.3.0
+
+On `rns-crypto` 0.2.2, `rns-core` 0.8.0 and `rns-net` 0.13.0. `rns-net`
+0.13 no longer lets a forged proof complete a packet receipt, which
+lxmf-rs relies on to mark messages delivered.
+
+### Fixes
+
+- A message sent as a single packet over a link (direct delivery, or an
+  upload to a propagation node) is delivered, or accepted by the node, only
+  once the peer proves that packet, as upstream. If the proof is overdue
+  (six round trips of the link, and no sooner than one second), the link is
+  torn down and the message is sent again. Before, the message was marked
+  delivered as soon as it was sent, so a packet lost on the link was never
+  retried.
+- Messages downloaded from a propagation node are acknowledged, and the
+  download reported `Complete`, only after their delivery callbacks ran, as
+  upstream. Before, a client that stopped inside its callback lost the
+  messages: the node had already deleted them.
+
+### Breaking API changes
+
+- `OutboundNetwork::send_link_packet` returns a `SentLinkPacket`, which
+  reports the hash of the packet once it is sent.
+- `OutboundNetwork` has a new required method, `close_link`.
+- `OutboundMessage` gains `link_packet`, and `LxmRouter` gains `link_rtts`.
+
+### Other changes
+
+- `LxmRouter::handle_delivery_proof` concludes the message a proof is for;
+  `LxmfCallbacks` calls it from `on_proof`.
+- Applications that build `rns-net` interface configs must set
+  `InterfaceConfig::announce_limits`, new in `rns-net` 0.13.
+
 ## 0.2.0
 
 Brings lxmf-rs to behavioral parity with upstream Python LXMF 1.3.0

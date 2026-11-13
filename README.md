@@ -30,7 +30,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-lxmf-rs = "0.2"
+lxmf-rs = "0.3"
 ```
 
 A minimal example that sends a message:
@@ -81,7 +81,7 @@ fn main() {
 
 ## Embedded Status
 
-`lxmf-core` keeps the core LXMF wire-format code separated from router and daemon code. With `rns-core` 0.7 and `rns-crypto` 0.2, `cargo build -p lxmf-core --no-default-features` builds the crate without `std`. It has not yet been built or run on an embedded target.
+`lxmf-core` keeps the core LXMF wire-format code separated from router and daemon code. With `rns-core` 0.8 and `rns-crypto` 0.2, `cargo build -p lxmf-core --no-default-features` builds the crate without `std`. It has not yet been built or run on an embedded target.
 
 ## Key Features
 
@@ -179,7 +179,7 @@ cargo run -p lxmf-server -- start
 
 ## Project Status
 
-- **Version**: 0.2.0 (see [CHANGELOG.md](./CHANGELOG.md))
+- **Version**: 0.3.0 (see [CHANGELOG.md](./CHANGELOG.md))
 - **Tests**: 292 passing, plus the live Python interop test
 - **Parity**: remaining differences from upstream are tracked in [docs/parity-gaps.md](./docs/parity-gaps.md)
 - **Compatibility**: Wire-compatible with the tracked Python LXMF upstream baseline in [UPSTREAM.md](./UPSTREAM.md)
