@@ -18,7 +18,10 @@ const DEFAULT_HTTP_HOST: &str = "127.0.0.1";
 const DEFAULT_HTTP_PORT: u16 = 37529;
 const DEFAULT_RNS_SHARED_PORT: u16 = 37428;
 const MAX_LOG_LINES: usize = 1_000;
-const LXMD_READY_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long a supervised process with a ready file gets to create it before
+/// it is restarted, unless its config sets `ready_timeout_secs`. A
+/// propagation node scans its whole message store before it is ready.
+const DEFAULT_READY_TIMEOUT: Duration = Duration::from_secs(120);
 
 fn main() {
     let args = Args::parse();
@@ -227,6 +230,7 @@ struct LxmdRuntimeConfig {
     propagation_node: bool,
     on_inbound: Option<String>,
     ready_file: PathBuf,
+    ready_timeout: Duration,
 }
 
 #[derive(Debug, Clone)]
@@ -269,6 +273,8 @@ struct LxmdConfigFile {
     propagation_node: Option<bool>,
     #[serde(default)]
     on_inbound: Option<String>,
+    #[serde(default)]
+    ready_timeout_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -308,6 +314,8 @@ struct SidecarConfig {
     restart: bool,
     #[serde(default)]
     ready_file: Option<String>,
+    #[serde(default)]
+    ready_timeout_secs: Option<u64>,
 }
 
 impl ServerConfig {
@@ -402,6 +410,7 @@ impl ServerConfig {
                 propagation_node: file_config.lxmd.propagation_node.unwrap_or(false),
                 on_inbound: file_config.lxmd.on_inbound.clone(),
                 ready_file,
+                ready_timeout: ready_timeout(file_config.lxmd.ready_timeout_secs),
             },
             rns: RnsRuntimeConfig {
                 shared_instance_port: file_config
@@ -492,6 +501,7 @@ port = {}\n",
             cwd: None,
             restart: true,
             ready_file: Some(self.lxmd.ready_file.clone()),
+            ready_timeout: self.lxmd.ready_timeout,
         }];
 
         for sidecar in &self.sidecars {
@@ -503,6 +513,7 @@ port = {}\n",
                 cwd: sidecar.cwd.as_ref().map(PathBuf::from),
                 restart: sidecar.restart,
                 ready_file: sidecar.ready_file.as_ref().map(PathBuf::from),
+                ready_timeout: ready_timeout(sidecar.ready_timeout_secs),
             });
         }
         specs
@@ -653,6 +664,13 @@ struct ProcessSpec {
     cwd: Option<PathBuf>,
     restart: bool,
     ready_file: Option<PathBuf>,
+    ready_timeout: Duration,
+}
+
+/// A configured `ready_timeout_secs`, or the default.
+fn ready_timeout(secs: Option<u64>) -> Duration {
+    secs.map(Duration::from_secs)
+        .unwrap_or(DEFAULT_READY_TIMEOUT)
 }
 
 impl ProcessSpec {
@@ -862,7 +880,7 @@ impl Supervisor {
             return Ok(());
         };
         let started = Instant::now();
-        while started.elapsed() < LXMD_READY_TIMEOUT {
+        while started.elapsed() < spec.ready_timeout {
             self.refresh_readiness(std::slice::from_ref(spec));
             if ready_file.exists() {
                 self.record_ready(&spec.name, true);
@@ -874,7 +892,7 @@ impl Supervisor {
             "process '{}' did not become ready via {} within {:?}",
             spec.name,
             ready_file.display(),
-            LXMD_READY_TIMEOUT
+            spec.ready_timeout
         ))
     }
 
@@ -1656,7 +1674,8 @@ fn config_schema() -> serde_json::Value {
                     "config_dir": {"type": "string"},
                     "rns_config_dir": {"type": "string"},
                     "propagation_node": {"type": "boolean"},
-                    "on_inbound": {"type": "string"}
+                    "on_inbound": {"type": "string"},
+                    "ready_timeout_secs": {"type": "integer", "default": DEFAULT_READY_TIMEOUT.as_secs()}
                 }
             },
             "rns": {
@@ -1687,7 +1706,8 @@ fn config_schema() -> serde_json::Value {
                         "env": {"type": "object"},
                         "cwd": {"type": "string"},
                         "restart": {"type": "boolean"},
-                        "ready_file": {"type": "string"}
+                        "ready_file": {"type": "string"},
+                        "ready_timeout_secs": {"type": "integer", "default": DEFAULT_READY_TIMEOUT.as_secs()}
                     }
                 }
             }
@@ -1872,6 +1892,36 @@ mod tests {
         assert!(content.contains("LocalClientInterface"));
         assert!(content.contains("port = 37428"));
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn ready_timeouts_default_and_come_from_config() {
+        let config = |json: &str| {
+            let dir = temp_dir("lxmf-server-ready-timeout");
+            let file_config = ServerConfig::parse_config_json(json.as_bytes()).unwrap();
+            let config = ServerConfig::build(
+                None,
+                dir.clone(),
+                dir.join("lxmf-server.json"),
+                true,
+                file_config,
+                None,
+            );
+            let _ = fs::remove_dir_all(dir);
+            config.process_specs()
+        };
+        let sidecar = r#"{"name": "helper", "bin": "/bin/true", "ready_file": "/tmp/r"}"#;
+
+        let specs = config(&format!(r#"{{"sidecars": [{sidecar}]}}"#));
+        assert_eq!(specs[0].ready_timeout, DEFAULT_READY_TIMEOUT);
+        assert_eq!(specs[1].ready_timeout, DEFAULT_READY_TIMEOUT);
+
+        let sidecar = sidecar.replace('}', r#", "ready_timeout_secs": 5}"#);
+        let specs = config(&format!(
+            r#"{{"lxmd": {{"ready_timeout_secs": 300}}, "sidecars": [{sidecar}]}}"#
+        ));
+        assert_eq!(specs[0].ready_timeout, Duration::from_secs(300));
+        assert_eq!(specs[1].ready_timeout, Duration::from_secs(5));
     }
 
     #[test]

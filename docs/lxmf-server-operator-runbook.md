@@ -349,6 +349,9 @@ Common fields:
   Starts `lxmd` as an LXMF propagation node.
 - `lxmd.on_inbound`
   External executable to run when a message is received.
+- `lxmd.ready_timeout_secs`
+  Seconds `lxmd` gets to report ready before it is killed and started again.
+  Default is `120`. A propagation node scans its whole message store first.
 - `rns.shared_instance_port`
   Local RNS shared instance port. Default is `37428`.
 - `http.enabled`
@@ -360,7 +363,8 @@ Common fields:
 - `http.auth_token`
   Bearer token for `/api/` endpoints.
 - `sidecars`
-  Optional supervised helper processes.
+  Optional supervised helper processes. A sidecar with a `ready_file` gets
+  `ready_timeout_secs` (default `120`) to create it.
 
 ## Propagation Peering
 
