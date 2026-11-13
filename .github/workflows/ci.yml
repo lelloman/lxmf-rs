@@ -167,10 +167,12 @@ jobs:
 
       - name: Run live interop against upstream Python LXMF
         run: |
+          set -o pipefail
           mkdir -p "$RUNNER_TEMP/interop"
           LXMF_SRC=../LXMF RNS_SRC=../Reticulum timeout 15m tests/interop/run_live.sh 2>&1 | tee "$RUNNER_TEMP/interop/python.log"
         env:
           RUST_LOG: debug
+          INTEROP_RELEASE: ${{ matrix.attempt > 2 && '1' || '' }}
           RNS_LOGLEVEL: "6"
           KEEP_WORKDIR: "1"
           INTEROP_TMPDIR: ${{ runner.temp }}/interop

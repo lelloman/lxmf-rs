@@ -4975,10 +4975,18 @@ impl Callbacks for LxmfCallbacks {
             );
             return;
         }
+        let arrived = std::time::Instant::now();
         deliver_unlocked(&self.router, |router| {
+            let locked = arrived.elapsed();
             if router.propagation_node && router.active_propagation_links.contains(&link_id.0) {
                 let valid = router.handle_propagation_packet(link_id.0, &data);
                 router.propagation_packet_proof = Some(valid);
+                log::debug!(
+                    "DIAG propagation packet: lock wait {:?}, handled in {:?} (valid {})",
+                    locked,
+                    arrived.elapsed(),
+                    valid
+                );
             }
         });
     }

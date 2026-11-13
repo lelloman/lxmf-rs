@@ -12,6 +12,8 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 : "${LXMF_SRC:?LXMF_SRC must point at an upstream LXMF checkout}"
 : "${RNS_SRC:?RNS_SRC must point at an upstream Reticulum checkout}"
 
-cargo build --manifest-path "$ROOT/Cargo.toml" --example interop_peer
+PROFILE=debug
+if [[ -n "${INTEROP_RELEASE:-}" ]]; then PROFILE=release; fi
+cargo build --manifest-path "$ROOT/Cargo.toml" --example interop_peer ${INTEROP_RELEASE:+--release}
 LXMF_SRC="$LXMF_SRC" RNS_SRC="$RNS_SRC" \
-  python3 -I "$ROOT/tests/interop/lxmf13_live.py" "$ROOT/target/debug/examples/interop_peer"
+  python3 -I "$ROOT/tests/interop/lxmf13_live.py" "$ROOT/target/$PROFILE/examples/interop_peer"
