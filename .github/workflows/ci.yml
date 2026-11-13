@@ -128,6 +128,10 @@ jobs:
     name: Python LXMF Interop
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        attempt: [1, 2, 3, 4]
 
     steps:
       - name: Checkout lxmf-rs
@@ -162,4 +166,18 @@ jobs:
         run: python3 -m pip install cryptography pyserial
 
       - name: Run live interop against upstream Python LXMF
-        run: LXMF_SRC=../LXMF RNS_SRC=../Reticulum timeout 15m tests/interop/run_live.sh
+        run: |
+          mkdir -p "$RUNNER_TEMP/interop"
+          LXMF_SRC=../LXMF RNS_SRC=../Reticulum timeout 15m tests/interop/run_live.sh 2>&1 | tee "$RUNNER_TEMP/interop/python.log"
+        env:
+          RUST_LOG: debug
+          RNS_LOGLEVEL: "6"
+          KEEP_WORKDIR: "1"
+          INTEROP_TMPDIR: ${{ runner.temp }}/interop
+
+      - name: Upload interop logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: interop-logs-${{ matrix.attempt }}
+          path: ${{ runner.temp }}/interop
