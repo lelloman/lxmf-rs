@@ -179,7 +179,7 @@ cargo run -p lxmf-server -- start
 
 ## Project Status
 
-- **Version**: 0.3.0 (see [CHANGELOG.md](./CHANGELOG.md))
+- **Version**: 0.3.1 (see [CHANGELOG.md](./CHANGELOG.md))
 - **Tests**: 292 passing, plus the live Python interop test
 - **Parity**: remaining differences from upstream are tracked in [docs/parity-gaps.md](./docs/parity-gaps.md)
 - **Compatibility**: Wire-compatible with the tracked Python LXMF upstream baseline in [UPSTREAM.md](./UPSTREAM.md)

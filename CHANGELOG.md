@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.3.1
+
+### lxmf-server
+
+- Supervised processes get 120 seconds, up from 30, to write their ready
+  file before they are restarted. A propagation node scans its whole
+  message store first: on a node with a large store and little free memory
+  that took about 30 seconds, so `lxmd` was killed and restarted several
+  times on every start before one attempt made it.
+- `lxmd.ready_timeout_secs` and a sidecar's `ready_timeout_secs` set the
+  timeout per process.
+
+### Testing
+
+- The live interop test gives link packet proofs a one-second deadline.
+  Over its localhost link Python allowed about 11 ms, less than the Rust
+  propagation node takes to validate and store a client upload in a debug
+  build, so about half of the CI runs failed.
+
 ## 0.3.0
 
 On `rns-crypto` 0.2.2, `rns-core` 0.8.0 and `rns-net` 0.13.0. `rns-net`
