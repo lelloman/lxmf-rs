@@ -49,6 +49,17 @@ from LXMF.LXMessage import LXMessage  # noqa: E402
 TIMEOUT = float(os.environ.get("INTEROP_TIMEOUT", "90"))
 results = []
 
+# A packet sent on a link is proven within max(6 x rtt, 5 ms) or given up
+# (RNS.PacketReceipt), checked once a second. Over this localhost link the
+# rtt is about 2 ms, so the peer gets about 11 ms: less than the Rust
+# propagation node takes to validate a propagation stamp and store the
+# message before proving a client upload (tens of ms in a debug build).
+# When Python's once-a-second receipt check landed in between, every
+# attempt failed the same way and the message ended FAILED. Real links have
+# a far longer rtt; give the proof a deadline of one second, the floor
+# lxmf-rs uses for its own link packets (LINK_TRAFFIC_TIMEOUT_MIN).
+RNS.Link.TRAFFIC_TIMEOUT_MIN_MS = 1000
+
 
 def check(name, ok, detail=""):
     results.append((name, bool(ok), detail))
