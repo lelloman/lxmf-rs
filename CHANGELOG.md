@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+### lxmf
+
+- A propagation node keeps each peer's handled and unhandled messages in an
+  ordered set with constant-time lookups, where it scanned lists. A peer
+  with a large backlog made every sync offer scan the available messages
+  once per unhandled message: with 150 000 unhandled messages one offer
+  took about 3 minutes in a debug build (milliseconds now), and a node with
+  20 peers used hours of CPU and large, short-lived buffers in many threads.
+- A peer stored without a sync limit is offered at most its per-message
+  transfer limit per sync, as upstream's `LXMPeer.from_bytes` does, not an
+  unlimited sync.
+- The message store scan at startup reads the first 16 bytes of each message
+  instead of the whole file.
+
 ## 0.3.1
 
 ### lxmf-server

@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use lxmf_core::constants::*;
 use lxmf_core::stamp::{min_accepted_cost, StampCost, StampValue};
@@ -47,8 +47,8 @@ pub struct LxmPeer {
     pub last_offer: Vec<[u8; 32]>,
 
     // Message queues
-    pub handled_ids: Vec<[u8; 32]>,
-    pub unhandled_ids: Vec<[u8; 32]>,
+    pub handled_ids: TransientIdList,
+    pub unhandled_ids: TransientIdList,
     pub handled_messages_queue: VecDeque<[u8; 32]>,
     pub unhandled_messages_queue: VecDeque<[u8; 32]>,
 
@@ -85,8 +85,8 @@ impl LxmPeer {
             current_sync_transfer_started: 0.0,
             link_id: None,
             last_offer: Vec::new(),
-            handled_ids: Vec::new(),
-            unhandled_ids: Vec::new(),
+            handled_ids: TransientIdList::new(),
+            unhandled_ids: TransientIdList::new(),
             handled_messages_queue: VecDeque::new(),
             unhandled_messages_queue: VecDeque::new(),
             offered: 0,
@@ -192,12 +192,20 @@ impl LxmPeer {
 
         // Unhandled messages no longer in the store, or whose stamp value
         // is below what the peer accepts, are dropped (`LXMPeer.sync`).
+        let available: HashMap<&[u8; 32], &OfferEntry> = available_messages
+            .iter()
+            .map(|entry| (&entry.transient_id, entry))
+            .collect();
         let mut entries: Vec<&OfferEntry> = Vec::new();
-        for id in self.unhandled_ids.clone() {
-            match available_messages.iter().find(|e| e.transient_id == id) {
+        let mut stale: Vec<[u8; 32]> = Vec::new();
+        for id in self.unhandled_ids.iter() {
+            match available.get(id) {
                 Some(entry) if entry.stamp_value.meets(min_accepted_cost) => entries.push(entry),
-                _ => self.unhandled_ids.retain(|unhandled| *unhandled != id),
+                _ => stale.push(*id),
             }
+        }
+        for id in &stale {
+            self.unhandled_ids.remove(id);
         }
         entries.sort_by(|a, b| {
             a.weight
@@ -306,8 +314,9 @@ impl LxmPeer {
 
             // Mark unwanted messages as handled
             let offer = self.last_offer.clone();
+            let wanted_set: HashSet<&[u8; 32]> = wanted.iter().collect();
             for id in &offer {
-                if !wanted.contains(id) {
+                if !wanted_set.contains(id) {
                     self.mark_handled(*id);
                 }
             }
@@ -393,7 +402,7 @@ impl LxmPeer {
 
         // Process unhandled queue
         while let Some(tid) = self.unhandled_messages_queue.pop_back() {
-            if !self.handled_ids.contains(&tid) && !self.unhandled_ids.contains(&tid) {
+            if !self.handled_ids.contains(&tid) {
                 self.unhandled_ids.push(tid);
             }
         }
@@ -411,16 +420,14 @@ impl LxmPeer {
 
     /// Mark a message as handled (move from unhandled to handled).
     fn mark_handled(&mut self, transient_id: [u8; 32]) {
-        if !self.handled_ids.contains(&transient_id) {
-            self.handled_ids.push(transient_id);
-        }
-        self.unhandled_ids.retain(|id| *id != transient_id);
+        self.handled_ids.push(transient_id);
+        self.unhandled_ids.remove(&transient_id);
     }
 
     /// Remove a transient ID from both lists (e.g., when message is purged).
     pub fn purge_message(&mut self, transient_id: &[u8; 32]) {
-        self.handled_ids.retain(|id| id != transient_id);
-        self.unhandled_ids.retain(|id| id != transient_id);
+        self.handled_ids.remove(transient_id);
+        self.unhandled_ids.remove(transient_id);
     }
 
     /// Node name from the peer's announce metadata (`PN_META_NAME`).
@@ -595,7 +602,10 @@ impl LxmPeer {
 
         // Limits
         peer.propagation_transfer_limit = map_get_float(map, "propagation_transfer_limit");
-        peer.propagation_sync_limit = map_get_uint(map, "propagation_sync_limit");
+        // `LXMPeer.from_bytes`: a peer stored without a sync limit syncs at
+        // most its per-message transfer limit, not without a limit.
+        peer.propagation_sync_limit = map_get_uint(map, "propagation_sync_limit")
+            .or(peer.propagation_transfer_limit.map(|limit| limit as u64));
         peer.propagation_stamp_cost = map_get_cost(map, "propagation_stamp_cost");
         peer.propagation_stamp_cost_flexibility =
             map_get_cost(map, "propagation_stamp_cost_flexibility");
@@ -612,10 +622,139 @@ impl LxmPeer {
         peer.tx_bytes = map_get_uint(map, "tx_bytes").unwrap_or(0);
 
         // Message IDs
-        peer.handled_ids = load_id_list(map, "handled_ids");
-        peer.unhandled_ids = load_id_list(map, "unhandled_ids");
+        peer.handled_ids = load_id_list(map, "handled_ids").into();
+        peer.unhandled_ids = load_id_list(map, "unhandled_ids").into();
 
         Some(peer)
+    }
+}
+
+/// Transient IDs in insertion order, without duplicates, with constant-time
+/// membership, insertion and removal.
+///
+/// Upstream keeps a peer's handled and unhandled messages in Python lists
+/// next to a dict of the message store. A busy propagation node tracks
+/// hundreds of thousands of IDs per peer, and scanning a list on every
+/// membership check made each sync cost billions of comparisons. Removal
+/// leaves a hole that iteration skips; the holes are compacted once they
+/// outnumber the live IDs.
+#[derive(Clone, Default)]
+pub struct TransientIdList {
+    slots: Vec<Option<[u8; 32]>>,
+    positions: HashMap<[u8; 32], usize>,
+}
+
+impl TransientIdList {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Append `id` unless it is present; returns whether it was added.
+    pub fn push(&mut self, id: [u8; 32]) -> bool {
+        if self.positions.contains_key(&id) {
+            return false;
+        }
+        self.positions.insert(id, self.slots.len());
+        self.slots.push(Some(id));
+        true
+    }
+
+    /// Remove `id`; returns whether it was present.
+    pub fn remove(&mut self, id: &[u8; 32]) -> bool {
+        let Some(position) = self.positions.remove(id) else {
+            return false;
+        };
+        self.slots[position] = None;
+        if self.slots.len() > 64 && self.slots.len() > 2 * self.positions.len() {
+            self.compact();
+        }
+        true
+    }
+
+    pub fn contains(&self, id: &[u8; 32]) -> bool {
+        self.positions.contains_key(id)
+    }
+
+    pub fn len(&self) -> usize {
+        self.positions.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.positions.is_empty()
+    }
+
+    pub fn clear(&mut self) {
+        self.slots.clear();
+        self.positions.clear();
+    }
+
+    /// The IDs in insertion order.
+    pub fn iter(&self) -> impl Iterator<Item = &[u8; 32]> + '_ {
+        self.slots.iter().flatten()
+    }
+
+    pub fn to_vec(&self) -> Vec<[u8; 32]> {
+        self.iter().copied().collect()
+    }
+
+    /// Keep only the IDs for which `keep` returns true.
+    pub fn retain(&mut self, mut keep: impl FnMut(&[u8; 32]) -> bool) {
+        for slot in &mut self.slots {
+            if let Some(id) = slot {
+                if !keep(id) {
+                    self.positions.remove(id);
+                    *slot = None;
+                }
+            }
+        }
+        self.compact();
+    }
+
+    fn compact(&mut self) {
+        self.slots.retain(Option::is_some);
+        for (position, slot) in self.slots.iter().enumerate() {
+            if let Some(id) = slot {
+                self.positions.insert(*id, position);
+            }
+        }
+    }
+}
+
+impl From<Vec<[u8; 32]>> for TransientIdList {
+    fn from(ids: Vec<[u8; 32]>) -> Self {
+        let mut list = Self::new();
+        for id in ids {
+            list.push(id);
+        }
+        list
+    }
+}
+
+impl std::fmt::Debug for TransientIdList {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list().entries(self.iter()).finish()
+    }
+}
+
+impl PartialEq for TransientIdList {
+    fn eq(&self, other: &Self) -> bool {
+        self.iter().eq(other.iter())
+    }
+}
+
+impl PartialEq<Vec<[u8; 32]>> for TransientIdList {
+    fn eq(&self, other: &Vec<[u8; 32]>) -> bool {
+        self.iter().eq(other.iter())
+    }
+}
+
+impl std::ops::Index<usize> for TransientIdList {
+    type Output = [u8; 32];
+
+    fn index(&self, index: usize) -> &[u8; 32] {
+        self.iter()
+            .nth(index)
+            .expect("transient id index out of range")
     }
 }
 

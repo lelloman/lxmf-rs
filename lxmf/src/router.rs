@@ -3084,10 +3084,12 @@ impl LxmRouter {
         }
     }
 
-    fn peer_sync_offer_entries(&self, transient_ids: &[[u8; 32]]) -> Vec<OfferEntry> {
+    fn peer_sync_offer_entries<'a>(
+        &self,
+        transient_ids: impl Iterator<Item = &'a [u8; 32]>,
+    ) -> Vec<OfferEntry> {
         let now = now_timestamp();
         transient_ids
-            .iter()
             .filter_map(|id| {
                 self.propagation_store
                     .entries
@@ -3106,7 +3108,7 @@ impl LxmRouter {
         let Some(peer) = self.peers.get(&peer_hash) else {
             return;
         };
-        let handled = peer.handled_ids.clone();
+        let handled = peer.handled_ids.to_vec();
         for transient_id in handled {
             self.propagation_store
                 .add_handled_peer(&transient_id, peer_hash);
@@ -3557,18 +3559,21 @@ impl LxmRouter {
         peer_hash: [u8; 16],
         transport: &T,
     ) -> PeerOfferResponseResult {
-        let (link_id, unhandled_ids) = match self.peers.get_mut(&peer_hash) {
+        let link_id = match self.peers.get_mut(&peer_hash) {
             Some(peer) => {
                 peer.process_queues();
                 match peer.link_id {
-                    Some(link_id) => (link_id, peer.unhandled_ids.clone()),
+                    Some(link_id) => link_id,
                     None => return PeerOfferResponseResult::MissingLink,
                 }
             }
             None => return PeerOfferResponseResult::MissingPeer,
         };
 
-        let available_messages = self.peer_sync_offer_entries(&unhandled_ids);
+        let available_messages = match self.peers.get(&peer_hash) {
+            Some(peer) => self.peer_sync_offer_entries(peer.unhandled_ids.iter()),
+            None => return PeerOfferResponseResult::MissingPeer,
+        };
         let offer = match self
             .peers
             .get_mut(&peer_hash)

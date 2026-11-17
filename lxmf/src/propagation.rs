@@ -1,6 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use lxmf_core::constants::*;
 use lxmf_core::stamp::{format_cost, quantize_value, StampValue};
@@ -27,6 +27,16 @@ pub struct PropagationEntry {
 struct DistributionEntry {
     transient_id: [u8; 32],
     from_peer: Option<[u8; 16]>,
+}
+
+/// The destination hash a stored message starts with, and the file's size.
+fn read_destination_and_size(path: &Path) -> Option<([u8; DESTINATION_LENGTH], usize)> {
+    use std::io::Read;
+    let mut file = fs::File::open(path).ok()?;
+    let size = file.metadata().ok()?.len() as usize;
+    let mut destination_hash = [0u8; DESTINATION_LENGTH];
+    file.read_exact(&mut destination_hash).ok()?;
+    Some((destination_hash, size))
 }
 
 /// The propagation node message store.
@@ -110,20 +120,11 @@ impl PropagationStore {
             };
             let has_stamp = stamp_value > StampValue::ZERO;
 
-            // Read destination hash from first 16 bytes of file
-            let file_data = match fs::read(&path) {
-                Ok(d) => d,
-                Err(_) => continue,
-            };
-
-            if file_data.len() < DESTINATION_LENGTH {
+            // The destination hash is the first 16 bytes of the file: read
+            // only those, not every stored message in full.
+            let Some((destination_hash, size)) = read_destination_and_size(&path) else {
                 continue;
-            }
-
-            let mut destination_hash = [0u8; DESTINATION_LENGTH];
-            destination_hash.copy_from_slice(&file_data[..DESTINATION_LENGTH]);
-
-            let size = file_data.len();
+            };
 
             self.entries.insert(
                 transient_id,
