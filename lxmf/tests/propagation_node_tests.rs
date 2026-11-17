@@ -743,7 +743,7 @@ fn offers_drop_stale_and_low_value_messages_and_skip_oversized_ones() {
         stamp_value: StampValue::from_whole(value),
     };
     let available = vec![entry(1, 100, 20), entry(2, 100, 2), entry(3, 5_000, 20)];
-    peer.unhandled_ids = vec![[1; 32], [2; 32], [3; 32], [4; 32]];
+    peer.unhandled_ids = vec![[1; 32], [2; 32], [3; 32], [4; 32]].into();
 
     assert!(peer.build_offer(&available).is_some());
     assert_eq!(peer.last_offer, vec![[1; 32]]);

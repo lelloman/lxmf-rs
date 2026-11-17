@@ -478,7 +478,7 @@ fn test_peer_offer_response_false() {
     let tid1 = [0x11; 32];
     let tid2 = [0x22; 32];
     peer.last_offer = vec![tid1, tid2];
-    peer.unhandled_ids = vec![tid1, tid2];
+    peer.unhandled_ids = vec![tid1, tid2].into();
 
     let response = pack(&Value::Bool(false));
     let action = peer.handle_offer_response(&response);
@@ -513,7 +513,7 @@ fn test_peer_offer_response_wants_specific() {
     let tid1 = [0x11; 32];
     let tid2 = [0x22; 32];
     peer.last_offer = vec![tid1, tid2];
-    peer.unhandled_ids = vec![tid1, tid2];
+    peer.unhandled_ids = vec![tid1, tid2].into();
 
     let response = pack(&Value::Array(vec![Value::Bin(tid1.to_vec())]));
     let action = peer.handle_offer_response(&response);
@@ -533,7 +533,7 @@ fn test_peer_resource_completed() {
     let tid1 = [0x11; 32];
     let tid2 = [0x22; 32];
 
-    peer.unhandled_ids = vec![tid1, tid2];
+    peer.unhandled_ids = vec![tid1, tid2].into();
     peer.last_offer = vec![tid1, tid2];
     peer.currently_transferring_messages = Some(vec![tid1, tid2]);
     peer.current_sync_transfer_started = lxmf_rs::router::now_timestamp() - 1.0;
@@ -549,4 +549,99 @@ fn test_peer_resource_completed() {
     assert_eq!(peer.outgoing, 2);
     assert_eq!(peer.tx_bytes, 1024);
     assert!(peer.alive);
+}
+
+fn id_from(n: u32) -> [u8; 32] {
+    let mut id = [0u8; 32];
+    id[..4].copy_from_slice(&n.to_be_bytes());
+    id[31] = 0xA5;
+    id
+}
+
+#[test]
+fn transient_id_list_keeps_order_without_duplicates() {
+    use lxmf_rs::peer::TransientIdList;
+    let mut list = TransientIdList::new();
+    assert!(list.push(id_from(1)));
+    assert!(list.push(id_from(2)));
+    assert!(!list.push(id_from(1)), "a present id is not added twice");
+    assert!(list.push(id_from(3)));
+    assert!(list.remove(&id_from(2)));
+    assert!(!list.remove(&id_from(2)));
+    assert!(
+        list.push(id_from(2)),
+        "a removed id can come back, at the end"
+    );
+    assert_eq!(list, vec![id_from(1), id_from(3), id_from(2)]);
+    assert_eq!(list.len(), 3);
+    assert_eq!(list[1], id_from(3));
+
+    // Removing most ids compacts the holes; order and lookups survive it.
+    let mut big = TransientIdList::from((0..1_000).map(id_from).collect::<Vec<_>>());
+    for n in (0..1_000).filter(|n| n % 10 != 0) {
+        assert!(big.remove(&id_from(n)));
+    }
+    assert_eq!(big, (0..1_000).step_by(10).map(id_from).collect::<Vec<_>>());
+    assert!(big.contains(&id_from(990)));
+    assert!(!big.contains(&id_from(991)));
+    big.retain(|id| id[3] % 20 == 0);
+    let expected: Vec<[u8; 32]> = (0..1_000)
+        .step_by(10)
+        .map(id_from)
+        .filter(|id| id[3] % 20 == 0)
+        .collect();
+    assert_eq!(big, expected);
+}
+
+/// A propagation node with a large backlog for one peer: vps-eu held
+/// 147 000 unhandled messages for a peer, and offers scanned the available
+/// messages once per unhandled id, about 10^10 comparisons per sync.
+#[test]
+fn an_offer_from_a_large_backlog_stays_fast() {
+    let count: u32 = 150_000;
+    let mut peer = LxmPeer::new([0xB1; 16]);
+    peer.peering_key = Some((vec![0x42; 32], value(20)));
+    peer.propagation_transfer_limit = Some(256.0);
+    peer.propagation_sync_limit = Some(10_240);
+    // Every other unhandled message is no longer in the store.
+    peer.unhandled_ids = (0..count).map(id_from).collect::<Vec<_>>().into();
+    let available: Vec<OfferEntry> = (0..count)
+        .step_by(2)
+        .map(|n| OfferEntry {
+            transient_id: id_from(n),
+            weight: f64::from(n),
+            size: 700,
+            stamp_value: value(20),
+        })
+        .collect();
+
+    let started = std::time::Instant::now();
+    assert!(peer.build_offer(&available).is_some());
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_secs(10),
+        "building one offer took {elapsed:?}"
+    );
+    assert_eq!(
+        peer.unhandled_ids.len(),
+        (count / 2) as usize,
+        "stale ids dropped"
+    );
+    // 10 240 KB at 716 bytes a message, lightest weights first.
+    assert_eq!(peer.last_offer.len(), 14_301);
+    assert_eq!(peer.last_offer[0], id_from(0));
+}
+
+#[test]
+fn a_peer_stored_without_a_sync_limit_syncs_its_transfer_limit() {
+    let mut peer = LxmPeer::new([0xB2; 16]);
+    peer.propagation_transfer_limit = Some(256.0);
+    peer.propagation_sync_limit = None;
+    let loaded = LxmPeer::from_bytes(&peer.to_bytes()).unwrap();
+    // `LXMPeer.from_bytes` falls back to the per-message limit.
+    assert_eq!(loaded.propagation_sync_limit, Some(256));
+
+    peer.propagation_transfer_limit = None;
+    let loaded = LxmPeer::from_bytes(&peer.to_bytes()).unwrap();
+    assert_eq!(loaded.propagation_sync_limit, None);
 }
