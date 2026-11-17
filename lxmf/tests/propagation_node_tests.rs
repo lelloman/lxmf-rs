@@ -758,3 +758,17 @@ fn offers_drop_stale_and_low_value_messages_and_skip_oversized_ones() {
     );
     assert!(!peer.handled_ids.contains(&[2; 32]));
 }
+
+#[test]
+fn the_memory_report_counts_stored_messages_and_allocator_totals() {
+    let (mut router, dir) = test_router("memory_report");
+    assert!(router.handle_propagation_packet([0x04; 16], &batch(vec![transient(0x42, b"held")])));
+
+    let report = router.memory_report();
+    assert!(report.starts_with("LXMFMEM store=1 "), "{report}");
+    if cfg!(all(target_os = "linux", target_env = "gnu")) {
+        assert!(report.contains(" heap_inuse_mb="), "{report}");
+        assert!(report.contains(" heap_free_mb="), "{report}");
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}
