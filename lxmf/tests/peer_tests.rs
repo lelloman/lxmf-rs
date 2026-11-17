@@ -664,7 +664,11 @@ fn a_peer_with_large_id_lists_packs_as_its_msgpack_dict() {
 
     let bytes = peer.to_bytes();
     let value = unpack_exact(&bytes).unwrap();
-    assert_eq!(pack(&value), bytes, "packing the decoded dict gives the same bytes");
+    assert_eq!(
+        pack(&value),
+        bytes,
+        "packing the decoded dict gives the same bytes"
+    );
     let loaded = LxmPeer::from_bytes(&bytes).unwrap();
     assert_eq!(loaded.handled_ids, peer.handled_ids);
     assert_eq!(loaded.unhandled_ids, peer.unhandled_ids);
