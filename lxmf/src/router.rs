@@ -575,6 +575,9 @@ impl LxmRouter {
                 peers.insert(peer.destination_hash, peer);
             }
         }
+        // Decoding hundreds of thousands of stored and peer IDs leaves
+        // that much freed memory below the state that stays.
+        release_free_memory();
 
         let (direct_link_tx, direct_link_rx) = mpsc::channel();
         let (peering_key_tx, peering_key_rx) = mpsc::channel();
@@ -2061,6 +2064,7 @@ impl LxmRouter {
         // Transient ID cleanup (every 60 cycles = 4 min)
         if self.processing_count.is_multiple_of(JOB_TRANSIENT_INTERVAL) {
             self.clean_transient_id_caches();
+            release_free_memory();
             log::info!("{}", self.memory_report());
         }
 
@@ -5134,6 +5138,20 @@ fn control_peer_hash(data: &[u8]) -> Result<[u8; 16], PeerError> {
         .ok()
         .and_then(|value| value.as_bin().and_then(|bytes| bytes.try_into().ok()))
         .ok_or(PeerError::InvalidData)
+}
+
+/// Return the free memory inside glibc's heaps to the system.
+///
+/// glibc only shrinks a heap from its top, so the memory a peer sync or
+/// a load frees below data that stays is kept: on a busy propagation
+/// node, twice the live state. `malloc_trim` releases the free pages
+/// anywhere in the heaps, so they no longer hold RAM or swap.
+pub fn release_free_memory() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    // SAFETY: malloc_trim only returns free pages the allocator owns.
+    unsafe {
+        libc::malloc_trim(0);
+    }
 }
 
 /// glibc's heap totals across all arenas: what the heap spans, what is in
