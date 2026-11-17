@@ -97,6 +97,56 @@ pub fn save_peers(path: &Path, peers: &[Value]) -> std::io::Result<()> {
     save_msgpack(path, &value)
 }
 
+/// Append a msgpack array header for `count` elements.
+pub(crate) fn push_array_header(data: &mut Vec<u8>, count: usize) -> io::Result<()> {
+    push_header(data, count, 0x90, 0xdc, 0xdd)
+}
+
+/// Append a msgpack map header for `count` entries.
+pub(crate) fn push_map_header(data: &mut Vec<u8>, count: usize) -> io::Result<()> {
+    push_header(data, count, 0x80, 0xde, 0xdf)
+}
+
+fn push_header(
+    data: &mut Vec<u8>,
+    count: usize,
+    fix: u8,
+    wide16: u8,
+    wide32: u8,
+) -> io::Result<()> {
+    if count < 16 {
+        data.push(fix | count as u8);
+    } else if let Ok(count) = u16::try_from(count) {
+        data.push(wide16);
+        data.extend_from_slice(&count.to_be_bytes());
+    } else {
+        let count = u32::try_from(count)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "too many msgpack items"))?;
+        data.push(wide32);
+        data.extend_from_slice(&count.to_be_bytes());
+    }
+    Ok(())
+}
+
+/// Append a 32-byte ID as msgpack bin, as `msgpack::pack` encodes it.
+pub(crate) fn push_id(data: &mut Vec<u8>, id: &[u8; 32]) {
+    data.extend_from_slice(&[0xc4, 32]);
+    data.extend_from_slice(id);
+}
+
+/// Save peers already packed one by one (`LxmPeer::to_bytes`) as the same
+/// msgpack array of peer dicts [`save_peers`] writes. A msgpack array is
+/// its header followed by its packed elements, so the peers' hundreds of
+/// thousands of IDs are not decoded and re-encoded on every save.
+pub fn save_packed_peers(path: &Path, packed_peers: &[Vec<u8>]) -> std::io::Result<()> {
+    let mut data = Vec::with_capacity(5 + packed_peers.iter().map(Vec::len).sum::<usize>());
+    push_array_header(&mut data, packed_peers.len())?;
+    for peer in packed_peers {
+        data.extend_from_slice(peer);
+    }
+    atomic_write(path, &data)
+}
+
 /// Load peers from storage.
 pub fn load_peers(path: &Path) -> Vec<Value> {
     match load_msgpack(path) {
@@ -106,12 +156,20 @@ pub fn load_peers(path: &Path) -> Vec<Value> {
 }
 
 /// Save transient ID cache as msgpack dict: hash -> timestamp.
+///
+/// Packed directly: a busy node holds hundreds of thousands of IDs, and
+/// building them as msgpack values first churned that many allocations at
+/// every save.
 pub fn save_transient_ids(path: &Path, ids: &HashMap<[u8; 32], f64>) -> std::io::Result<()> {
-    let entries: Vec<(Value, Value)> = ids
-        .iter()
-        .map(|(k, v)| (Value::Bin(k.to_vec()), Value::Float(*v)))
-        .collect();
-    save_msgpack(path, &Value::Map(entries))
+    // Each entry: bin 8 header, 32 ID bytes, float 64 header, 8 bytes.
+    let mut data = Vec::with_capacity(5 + ids.len() * 43);
+    push_map_header(&mut data, ids.len())?;
+    for (id, timestamp) in ids {
+        push_id(&mut data, id);
+        data.push(0xcb);
+        data.extend_from_slice(&timestamp.to_be_bytes());
+    }
+    atomic_write(path, &data)
 }
 
 /// Load transient ID cache from storage.
@@ -355,5 +413,64 @@ mod tests {
 
         assert!(temp_files(&paths.base).is_empty());
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn packed_peers_are_saved_as_the_same_array_of_peer_dicts() {
+        let dir = temp_dir("packed_peers");
+        let peer = |index: usize| {
+            Value::Map(vec![
+                (
+                    Value::Str("destination_hash".into()),
+                    Value::Bin(vec![index as u8; 16]),
+                ),
+                (
+                    Value::Str("handled_ids".into()),
+                    Value::Array(vec![Value::Bin(vec![0xAB; 32]); index % 3]),
+                ),
+            ])
+        };
+        // Each array header size: fixarray, array 16 and array 32.
+        for count in [1, 20, 70_000] {
+            let peers: Vec<Value> = (0..count).map(peer).collect();
+            let packed: Vec<Vec<u8>> = peers.iter().map(msgpack::pack).collect();
+            let old = dir.join(format!("old_{count}"));
+            let new = dir.join(format!("new_{count}"));
+            save_peers(&old, &peers).unwrap();
+            save_packed_peers(&new, &packed).unwrap();
+
+            assert_eq!(
+                fs::read(&new).unwrap(),
+                fs::read(&old).unwrap(),
+                "{count} peers"
+            );
+            assert_eq!(load_peers(&new), peers);
+        }
+    }
+
+    #[test]
+    fn transient_ids_are_packed_as_the_msgpack_map_of_id_to_time() {
+        let dir = temp_dir("packed_transient_ids");
+        for count in [3usize, 20, 70_000] {
+            let ids: HashMap<[u8; 32], f64> = (0..count)
+                .map(|i| {
+                    let mut id = [0u8; 32];
+                    id[..8].copy_from_slice(&(i as u64).to_be_bytes());
+                    (id, 1_700_000_000.25 + i as f64)
+                })
+                .collect();
+            let path = dir.join(format!("ids_{count}"));
+            save_transient_ids(&path, &ids).unwrap();
+
+            let entries: Vec<(Value, Value)> = ids
+                .iter()
+                .map(|(k, v)| (Value::Bin(k.to_vec()), Value::Float(*v)))
+                .collect();
+            assert_eq!(
+                fs::read(&path).unwrap(),
+                msgpack::pack(&Value::Map(entries))
+            );
+            assert_eq!(load_transient_ids(&path), ids);
+        }
     }
 }

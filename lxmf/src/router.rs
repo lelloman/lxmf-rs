@@ -4065,15 +4065,8 @@ impl LxmRouter {
 
     /// Persist peers to storage.
     fn save_peers(&self) {
-        let peer_values: Vec<Value> = self
-            .peers
-            .values()
-            .filter_map(|peer| {
-                let bytes = peer.to_bytes();
-                msgpack::unpack_exact(&bytes).ok()
-            })
-            .collect();
-        let _ = storage::save_peers(&self.paths.peers, &peer_values);
+        let packed_peers: Vec<Vec<u8>> = self.peers.values().map(LxmPeer::to_bytes).collect();
+        let _ = storage::save_packed_peers(&self.paths.peers, &packed_peers);
     }
 
     /// Exit handler: save state and tear down connections.

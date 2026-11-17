@@ -645,3 +645,27 @@ fn a_peer_stored_without_a_sync_limit_syncs_its_transfer_limit() {
     let loaded = LxmPeer::from_bytes(&peer.to_bytes()).unwrap();
     assert_eq!(loaded.propagation_sync_limit, None);
 }
+
+#[test]
+fn a_peer_with_large_id_lists_packs_as_its_msgpack_dict() {
+    let mut peer = LxmPeer::new([0x5A; 16]);
+    let id = |i: u32| {
+        let mut id = [0u8; 32];
+        id[..4].copy_from_slice(&i.to_be_bytes());
+        id
+    };
+    // An array 32 header for the handled IDs, array 16 for the unhandled.
+    for i in 0..70_000 {
+        peer.handled_ids.push(id(i));
+    }
+    for i in 70_000..70_020 {
+        peer.unhandled_ids.push(id(i));
+    }
+
+    let bytes = peer.to_bytes();
+    let value = unpack_exact(&bytes).unwrap();
+    assert_eq!(pack(&value), bytes, "packing the decoded dict gives the same bytes");
+    let loaded = LxmPeer::from_bytes(&bytes).unwrap();
+    assert_eq!(loaded.handled_ids, peer.handled_ids);
+    assert_eq!(loaded.unhandled_ids, peer.unhandled_ids);
+}
