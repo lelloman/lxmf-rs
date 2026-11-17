@@ -234,6 +234,20 @@ impl PropagationStore {
         self.entries.len()
     }
 
+    /// Messages waiting to be distributed to peers.
+    pub fn distribution_queue_len(&self) -> usize {
+        self.distribution_queue.len()
+    }
+
+    /// Peer references held by the stored entries' handled and unhandled
+    /// peer lists.
+    pub fn entry_peer_refs(&self) -> usize {
+        self.entries
+            .values()
+            .map(|e| e.handled_peers.len() + e.unhandled_peers.len())
+            .sum()
+    }
+
     /// Clean the message store: expire old messages and cull by weight.
     pub fn clean_messagestore(&mut self, prioritised_list: &[[u8; 16]]) {
         let now = now_timestamp();

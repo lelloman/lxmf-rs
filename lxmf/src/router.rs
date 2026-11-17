@@ -2061,6 +2061,7 @@ impl LxmRouter {
         // Transient ID cleanup (every 60 cycles = 4 min)
         if self.processing_count.is_multiple_of(JOB_TRANSIENT_INTERVAL) {
             self.clean_transient_id_caches();
+            log::info!("{}", self.memory_report());
         }
 
         // Peer rotation (every 336 cycles)
@@ -2750,6 +2751,61 @@ impl LxmRouter {
     }
 
     /// Clean expired transient ID caches.
+    /// One log line of the router's collection sizes and the allocator's
+    /// totals, to tell which state a memory growth lives in, and whether it
+    /// is live data or freed memory the allocator keeps.
+    pub fn memory_report(&self) -> String {
+        let peer_ids: usize = self
+            .peers
+            .values()
+            .map(|p| p.handled_ids.len() + p.unhandled_ids.len())
+            .sum();
+        let peer_queued: usize = self
+            .peers
+            .values()
+            .map(|p| p.handled_messages_queue.len() + p.unhandled_messages_queue.len())
+            .sum();
+        let peer_transferring: usize = self
+            .peers
+            .values()
+            .filter_map(|p| p.currently_transferring_messages.as_ref())
+            .map(Vec::len)
+            .sum();
+        let outbound_kb = self
+            .outbound
+            .iter()
+            .map(|m| m.packed.len() + m.propagation_packed.as_ref().map_or(0, Vec::len))
+            .sum::<usize>()
+            / 1024;
+        let pending_inbound_kb = self.pending_inbound.iter().map(Vec::len).sum::<usize>() / 1024;
+        format!(
+            "LXMFMEM store={} store_peer_refs={} distribution_q={} peers={} peer_ids={} \
+             peer_queued={} peer_transferring={} outbound={} outbound_kb={} \
+             pending_inbound={} pending_inbound_kb={} delivered_ids={} processed_ids={} \
+             identity_cache={} pn_announces={} inbound_resources={} accepted_offers={} \
+             sync_links={} {}",
+            self.propagation_store.message_count(),
+            self.propagation_store.entry_peer_refs(),
+            self.propagation_store.distribution_queue_len(),
+            self.peers.len(),
+            peer_ids,
+            peer_queued,
+            peer_transferring,
+            self.outbound.len(),
+            outbound_kb,
+            self.pending_inbound.len(),
+            pending_inbound_kb,
+            self.locally_delivered_transient_ids.len(),
+            self.locally_processed_transient_ids.len(),
+            self.identity_cache.len(),
+            self.pn_announces.len(),
+            self.incoming_delivery_resources.len(),
+            self.accepted_offer_links.len(),
+            self.peer_sync_response_links.len(),
+            allocator_report(),
+        )
+    }
+
     fn clean_transient_id_caches(&mut self) {
         let now = now_timestamp();
         // Transient IDs outlive the messages themselves so that copies
@@ -5078,6 +5134,28 @@ fn control_peer_hash(data: &[u8]) -> Result<[u8; 16], PeerError> {
         .ok()
         .and_then(|value| value.as_bin().and_then(|bytes| bytes.try_into().ok()))
         .ok_or(PeerError::InvalidData)
+}
+
+/// glibc's heap totals across all arenas: what the heap spans, what is in
+/// use, what is free but kept, and what is in separate mmapped chunks.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn allocator_report() -> String {
+    // SAFETY: mallinfo2 only reads the allocator's own statistics.
+    let info = unsafe { libc::mallinfo2() };
+    let mb = |bytes: usize| bytes as f64 / 1_048_576.0;
+    format!(
+        "heap_mb={:.1} heap_inuse_mb={:.1} heap_free_mb={:.1} heap_top_free_mb={:.1} mmap_mb={:.1}",
+        mb(info.arena),
+        mb(info.uordblks),
+        mb(info.fordblks),
+        mb(info.keepcost),
+        mb(info.hblkhd),
+    )
+}
+
+#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+fn allocator_report() -> String {
+    String::new()
 }
 
 #[cfg(test)]
