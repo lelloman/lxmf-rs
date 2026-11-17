@@ -13,6 +13,16 @@
 - A peer stored without a sync limit is offered at most its per-message
   transfer limit per sync, as upstream's `LXMPeer.from_bytes` does, not an
   unlimited sync.
+- A propagation node no longer holds about twice its live state in freed
+  heap memory. Saving the peers built several msgpack copies of every
+  peer's message IDs (800 000 on a busy node) every eight minutes and on
+  each peer change; the peers file and the transient ID caches are now
+  packed straight from the lists, to the same bytes. The router also
+  returns the heaps' free pages to the system after loading and every four
+  minutes (`malloc_trim`, on glibc). On two live nodes the heap went from
+  274 and 487 MB to about 170 and 230 MB, for 107 and 146 MB of live data.
+- The router logs an `LXMFMEM` line every four minutes: the sizes of its
+  collections and, on glibc, the heap's in-use, free and mmapped totals.
 - The message store scan at startup reads the first 16 bytes of each message
   instead of the whole file.
 
