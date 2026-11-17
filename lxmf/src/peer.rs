@@ -462,18 +462,7 @@ impl LxmPeer {
             None => Value::Nil,
         };
 
-        let handled_id_vals: Vec<Value> = self
-            .handled_ids
-            .iter()
-            .map(|id| Value::Bin(id.to_vec()))
-            .collect();
-        let unhandled_id_vals: Vec<Value> = self
-            .unhandled_ids
-            .iter()
-            .map(|id| Value::Bin(id.to_vec()))
-            .collect();
-
-        let dict = Value::Map(vec![
+        let entries = vec![
             (
                 Value::Str("peering_timebase".to_string()),
                 Value::Float(self.peering_timebase),
@@ -542,17 +531,31 @@ impl LxmPeer {
                 Value::Str("tx_bytes".to_string()),
                 Value::UInt(self.tx_bytes),
             ),
-            (
-                Value::Str("handled_ids".to_string()),
-                Value::Array(handled_id_vals),
-            ),
-            (
-                Value::Str("unhandled_ids".to_string()),
-                Value::Array(unhandled_id_vals),
-            ),
-        ]);
+        ];
 
-        msgpack::pack(&dict)
+        // The ID lists, hundreds of thousands of IDs on a busy node, are
+        // packed straight from the lists rather than built as msgpack
+        // values first; the bytes are what packing the whole dict gives.
+        let ids = [
+            ("handled_ids", &self.handled_ids),
+            ("unhandled_ids", &self.unhandled_ids),
+        ];
+        let mut data =
+            Vec::with_capacity(1024 + 34 * (self.handled_ids.len() + self.unhandled_ids.len()));
+        crate::storage::push_map_header(&mut data, entries.len() + ids.len())
+            .expect("a peer dict has few entries");
+        for (key, value) in &entries {
+            data.extend_from_slice(&msgpack::pack(key));
+            data.extend_from_slice(&msgpack::pack(value));
+        }
+        for (key, list) in ids {
+            data.extend_from_slice(&msgpack::pack(&Value::Str(key.to_string())));
+            crate::storage::push_array_header(&mut data, list.len()).expect("fewer than 2^32 IDs");
+            for id in list.iter() {
+                crate::storage::push_id(&mut data, id);
+            }
+        }
+        data
     }
 
     /// Deserialize from bytes (msgpack dict matching Python's format).
